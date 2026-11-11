@@ -1,26 +1,132 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --background: #08090e;
+  --foreground: #f5f6fa;
+  --card: #10121c;
+  --card-foreground: #f5f6fa;
+  --primary: #0070d1; /* PlayStation Iconic Blue */
+  --nintendo: #e60012; /* Nintendo Joyful Red */
+  --xbox: #107c10;     /* Xbox Emerald */
+  --steam: #1a9fff;    /* Steam Cyan */
+  --border: rgba(255, 255, 255, 0.09);
+  --radius: 1.25rem;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: #08090e;
+  color: #f5f6fa;
+  font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+  overflow-x: hidden;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Apple Liquid Glassmorphism & PlayStation Deep Glass */
+.apple-glass {
+  background: rgba(16, 18, 28, 0.72);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+
+.apple-glass-pill {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+/* Sony PS5 Style Game Card Elevation */
+.game-card-surface {
+  background: linear-gradient(180deg, rgba(25, 28, 44, 0.8) 0%, rgba(13, 15, 25, 0.95) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 
+    0 4px 6px -1px rgba(0, 0, 0, 0.3),
+    0 2px 4px -2px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.12);
+  transition: all 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.game-card-surface:hover {
+  transform: translateY(-5px) scale(1.015);
+  border-color: rgba(255, 255, 255, 0.28);
+  box-shadow: 
+    0 20px 35px -10px rgba(0, 0, 0, 0.7),
+    0 0 25px 0 var(--hover-glow, rgba(0, 112, 209, 0.25)),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.3);
+}
+
+/* Tactile Physical Card Sheen */
+.physical-card-foil {
+  position: relative;
+  overflow: hidden;
+}
+
+.physical-card-foil::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.12) 50%,
+    transparent 100%
+  );
+  transform: skewX(-20deg);
+  transition: all 0.65s ease;
+  pointer-events: none;
+}
+
+.game-card-surface:hover .physical-card-foil::after {
+  left: 200%;
+}
+
+/* Nintendo Joyful Tag */
+.nintendo-tag {
+  background: linear-gradient(135deg, #e60012 0%, #b3000e 100%);
+  color: #ffffff;
+  font-weight: 800;
+  box-shadow: 0 4px 12px rgba(230, 0, 18, 0.4);
+}
+
+/* PlayStation Blue Tag */
+.ps-tag {
+  background: linear-gradient(135deg, #0070d1 0%, #00439c 100%);
+  color: #ffffff;
+  font-weight: 800;
+  box-shadow: 0 4px 12px rgba(0, 112, 209, 0.4);
+}
+
+/* Xbox Green Tag */
+.xbox-tag {
+  background: linear-gradient(135deg, #107c10 0%, #0e610e 100%);
+  color: #ffffff;
+  font-weight: 800;
+  box-shadow: 0 4px 12px rgba(16, 124, 16, 0.4);
+}
+
+/* Custom modern scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #08090e;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
 }
