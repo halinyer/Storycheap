@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useStore } from "@/context/store-context";
@@ -18,6 +18,7 @@ import {
 
 export function Navbar() {
   const pathname = usePathname();
+  const [mounted, setMounted] = useState(false);
   const {
     cartCount,
     setCartDrawerOpen,
@@ -25,6 +26,10 @@ export function Navbar() {
     creditBalanceCents,
     signOut,
   } = useStore();
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const navLinks = [
     { href: "/", label: "Catálogo", icon: Gamepad2 },
@@ -74,7 +79,7 @@ export function Navbar() {
               </Link>
             );
           })}
-          {sessionUser?.role === "admin" && (
+          {mounted && sessionUser?.role === "admin" && (
             <Link
               href="/admin"
               className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
@@ -91,7 +96,7 @@ export function Navbar() {
 
         {/* Right Controls: Account / Credit Badge + Cart Drawer Trigger */}
         <div className="flex items-center gap-2.5">
-          {sessionUser ? (
+          {mounted && sessionUser ? (
             <div className="flex items-center gap-2">
               <Link
                 href="/account"
@@ -134,7 +139,7 @@ export function Navbar() {
           >
             <ShoppingBag className="w-4 h-4" />
             <span className="hidden sm:inline">Carrito</span>
-            {cartCount > 0 && (
+            {mounted && cartCount > 0 && (
               <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-slate-950 text-white text-[10px] font-black">
                 {cartCount}
               </span>

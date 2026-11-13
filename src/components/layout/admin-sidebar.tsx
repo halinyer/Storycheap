@@ -41,7 +41,7 @@ export function AdminSidebar({
       badge: lowStockCount > 0 ? lowStockCount : undefined,
       badgeTone: "bg-amber-400 text-slate-950",
     },
-    { href: "/admin/products", label: "Productos y Precios", icon: PackageSearch },
+    { href: "/admin/products", label: "Gift Cards", icon: PackageSearch },
     { href: "/admin/customers", label: "Clientes y Saldo", icon: Users },
     { href: "/admin/providers", label: "Pasarelas y Webhooks", icon: PlugZap },
     { href: "/admin/audit", label: "Auditoría", icon: Activity },

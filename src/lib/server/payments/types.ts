@@ -30,6 +30,7 @@ export interface NormalizedPaymentWebhookEvent {
   priceCents: number;
   paidCents: number;
   status: "OPEN" | "COMPLETED" | "PARTIALLY_PAID" | "EXPIRED" | "CANCELLED";
+  expiresAt?: string | null;
   rawPayload: Record<string, unknown>;
 }
 

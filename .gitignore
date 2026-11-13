@@ -30,9 +30,21 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files & secrets (never commit real keys)
+.env
 .env*
+.env.*
+*.local.env
 !.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*credentials*.json
+*service-account*.json
+.supabase/
+supabase/.temp/
 
 # local scratch/temp downloads
 /scratch/

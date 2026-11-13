@@ -12,6 +12,7 @@ import {
   getOrderByGatewayCheckoutId,
   getOrderById,
   getProviderConfig,
+  getSupplierOrderByExternalId,
   getVariantsLookupByIds,
   insertFulfillmentRecord,
   markOrderAttentionFlag,
@@ -20,8 +21,17 @@ import {
   releaseReservedCodesForOrder,
   reserveManualCodes,
   transitionOrderStatus,
+  updateOrderPartialPaymentCents,
+  updateSupplierOrderState,
   updateWebhookEventStatus,
+  upsertSupplierOrder,
 } from "./repository";
+import {
+  createCentralOneOrder,
+  getCentralOneOrder,
+  getCentralOneOrderCodes,
+  invalidateCentralOneBalanceCache,
+} from "./suppliers/centralone";
 import { purchaseReloadlyCard } from "./suppliers/reloadly";
 
 /**
@@ -64,10 +74,12 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
     order.items.map((i) => i.variantId)
   );
   const reloadlyCfg = await getProviderConfig("reloadly");
+  const centralOneCfg = await getProviderConfig("centralone");
   const manualCfg = await getProviderConfig("manual_inventory");
 
   let allItemsFulfilled = true;
   let anyFulfilledNowOrBefore = false;
+  let hasPendingAsyncSupplier = false;
   const attentionReasons: string[] = [];
 
   for (const item of order.items) {
@@ -102,7 +114,8 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
     if (
       delivered < item.quantity &&
       (manualCfg?.enabled ?? true) &&
-      variantMeta?.sourcePriority !== "reloadly_only"
+      variantMeta?.sourcePriority !== "reloadly_only" &&
+      variantMeta?.sourcePriority !== "centralone_only"
     ) {
       const remaining = item.quantity - delivered;
       try {
@@ -138,7 +151,8 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       delivered < item.quantity &&
       reloadlyCfg?.enabled &&
       variantMeta &&
-      variantMeta.sourcePriority !== "manual_only" &&
+      (variantMeta.sourcePriority === "manual_then_reloadly" ||
+        variantMeta.sourcePriority === "reloadly_only") &&
       variantMeta.reloadlyProductId
     ) {
       while (delivered < item.quantity) {
@@ -173,17 +187,103 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       }
     }
 
+    // Step D: Central One API fulfillment (supports both instant & async delivery)
+    let itemPendingAsync = false;
+    if (
+      delivered < item.quantity &&
+      centralOneCfg?.enabled &&
+      variantMeta &&
+      (variantMeta.sourcePriority === "manual_then_centralone" ||
+        variantMeta.sourcePriority === "centralone_only") &&
+      variantMeta.centraloneProductId
+    ) {
+      const remaining = item.quantity - delivered;
+      if (
+        typeof variantMeta.unitCostCents === "number" &&
+        variantMeta.unitCostCents > item.unitPriceCents
+      ) {
+        attentionReasons.push(
+          `Central One bloqueado para ${item.productName}: costo configurado ($${(variantMeta.unitCostCents / 100).toFixed(2)}) supera el precio de venta ($${(item.unitPriceCents / 100).toFixed(2)}).`
+        );
+      } else {
+        try {
+          const c1Order = await createCentralOneOrder({
+            idempotencyKey: `sc-item-${item.id}`,
+            catalogItemId: variantMeta.centraloneProductId,
+            quantity: remaining,
+            externalReference: `${order.orderNumber}:${item.id}`,
+          });
+
+          await upsertSupplierOrder({
+            orderId: order.id,
+            orderItemId: item.id,
+            provider: "centralone",
+            idempotencyKey: `sc-item-${item.id}`,
+            externalOrderId: c1Order.externalOrderId,
+            referenceCode: c1Order.referenceCode,
+            status: c1Order.status,
+            expectedQty: remaining,
+            deliveredCount: c1Order.deliveredCount,
+            supplierUnitCostCents: c1Order.unitCostCents,
+            rawPayload: c1Order.raw,
+          });
+          invalidateCentralOneBalanceCache();
+
+          if (c1Order.status === "completed" && c1Order.deliveredCount > 0) {
+            const codes = await getCentralOneOrderCodes(c1Order.externalOrderId);
+            for (const c of codes.slice(0, remaining)) {
+              await insertFulfillmentRecord({
+                orderItemId: item.id,
+                orderId: order.id,
+                userId: order.userId,
+                source: "centralone",
+                codeInventoryId: null,
+                codeCiphertext: encryptCode(c.codePlaintext),
+                codeLast4: extractLast4(c.codePlaintext),
+                pinCiphertext: c.pinPlaintext ? encryptCode(c.pinPlaintext) : null,
+                supplierTxId: c1Order.externalOrderId,
+              });
+              delivered += 1;
+              anyFulfilledNowOrBefore = true;
+            }
+          } else if (
+            c1Order.status === "confirmed" ||
+            c1Order.status === "processing" ||
+            c1Order.status === "pending"
+          ) {
+            itemPendingAsync = true;
+            hasPendingAsyncSupplier = true;
+          } else {
+            attentionReasons.push(
+              `Central One devolvió estado "${c1Order.status}" para ${item.productName}.`
+            );
+          }
+        } catch (err) {
+          attentionReasons.push(
+            `Central One falló para ${item.productName}: ${err instanceof Error ? err.message : "Error desconocido"}`
+          );
+        }
+      }
+    }
+
     if (delivered < item.quantity) {
       allItemsFulfilled = false;
-      if (attentionReasons.length === 0) {
-        attentionReasons.push(
-          `Stock insuficiente para entregar ${item.quantity - delivered} unidad(es) de ${item.productName} (${item.denominationLabel}).`
-        );
+      if (itemPendingAsync) {
+        await markOrderItemProgress(item.id, {
+          deliveredCount: delivered,
+          status: "RESERVED",
+        });
+      } else {
+        if (attentionReasons.length === 0) {
+          attentionReasons.push(
+            `Stock insuficiente para entregar ${item.quantity - delivered} unidad(es) de ${item.productName} (${item.denominationLabel}).`
+          );
+        }
+        await markOrderItemProgress(item.id, {
+          deliveredCount: delivered,
+          status: "MANUAL_REVIEW",
+        });
       }
-      await markOrderItemProgress(item.id, {
-        deliveredCount: delivered,
-        status: "MANUAL_REVIEW",
-      });
     } else {
       await markOrderItemProgress(item.id, {
         deliveredCount: delivered,
@@ -207,6 +307,15 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       orderNumber: order.orderNumber,
       itemCount: totalDelivered,
     }).catch(() => {});
+  } else if (hasPendingAsyncSupplier && attentionReasons.length === 0) {
+    await appendAuditLog({
+      actorId: null,
+      actorRole: "system",
+      action: "order.fulfillment_awaiting_supplier",
+      targetType: "order",
+      targetId: order.id,
+      metadata: { provider: "centralone" },
+    });
   } else {
     const nextStatus = anyFulfilledNowOrBefore ? "PARTIAL" : "MANUAL_REVIEW";
     const reasonText = attentionReasons.join(" | ");
@@ -239,6 +348,45 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
   return (await getOrderById(order.id)) ?? order;
 }
 
+async function settleUnderpaymentToCredit(params: {
+  order: OrderDTO;
+  paidCents: number;
+  note: string;
+  needsAttention: boolean;
+  attentionReason: string | null;
+}): Promise<boolean> {
+  await releaseReservedCodesForOrder(params.order.id);
+  const transitioned = await transitionOrderStatus({
+    orderId: params.order.id,
+    expectedStatuses: ["PENDING_PAYMENT", "CREATED", "EXPIRED"],
+    nextStatus: "REFUNDED_CREDIT",
+    paidCents: params.paidCents,
+    needsAttention: params.needsAttention,
+    attentionReason: params.attentionReason,
+  });
+
+  if (transitioned && params.paidCents > 0) {
+    const userId =
+      params.order.userId ?? (await ensureCustomerProfile(params.order.email));
+    await appendCreditLedgerEntry({
+      userId,
+      orderId: params.order.id,
+      deltaCents: params.paidCents,
+      reason: "partial_payment",
+      note: params.note,
+      createdBy: null,
+    });
+    await sendCreditAdjustmentEmail({
+      to: params.order.email,
+      orderNumber: params.order.orderNumber,
+      amountCents: params.paidCents,
+      reasonText: params.note,
+    }).catch(() => {});
+  }
+
+  return transitioned;
+}
+
 export async function processVerifiedWebhookEvent(
   event: NormalizedPaymentWebhookEvent,
   options?: { skipRemoteDoubleCheck?: boolean }
@@ -247,6 +395,7 @@ export async function processVerifiedWebhookEvent(
     | "duplicate"
     | "delivered_or_fulfilling"
     | "partial_underpaid_credited"
+    | "partial_pending"
     | "expired"
     | "ignored";
   orderId: string | null;
@@ -281,12 +430,19 @@ export async function processVerifiedWebhookEvent(
   // Server-to-server authoritative checkout double-check with gateway API
   let authoritativeStatus = event.status;
   let authoritativePaidCents = event.paidCents;
+  let authoritativeExpiresAt = event.expiresAt ?? matchedOrder.expiresAt ?? null;
   if (!options?.skipRemoteDoubleCheck) {
     const gateway = getPaymentGateway(event.gateway);
     const liveCheckout = await gateway.getCheckout(event.checkoutId);
     authoritativeStatus = liveCheckout.status;
     authoritativePaidCents = liveCheckout.paidCents;
+    authoritativeExpiresAt = liveCheckout.expiresAt ?? authoritativeExpiresAt;
   }
+
+  const checkoutHasExpired = Boolean(
+    matchedOrder.status === "EXPIRED" ||
+      (authoritativeExpiresAt && Date.now() >= Date.parse(authoritativeExpiresAt))
+  );
 
   // Handle expiry or non-completed underpayment
   if (
@@ -294,34 +450,25 @@ export async function processVerifiedWebhookEvent(
     authoritativeStatus === "EXPIRED" ||
     authoritativeStatus === "CANCELLED"
   ) {
-    await releaseReservedCodesForOrder(matchedOrder.id);
-
-    if (authoritativePaidCents > 0 && matchedOrder.status === "PENDING_PAYMENT") {
-      const userId =
-        matchedOrder.userId ?? (await ensureCustomerProfile(matchedOrder.email));
-      await appendCreditLedgerEntry({
-        userId,
-        orderId: matchedOrder.id,
-        deltaCents: authoritativePaidCents,
-        reason: "partial_payment",
-        note: `Pago parcial recibido tras expiración (${matchedOrder.orderNumber})`,
-        createdBy: null,
-      });
-      await transitionOrderStatus({
-        orderId: matchedOrder.id,
-        expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
-        nextStatus: "REFUNDED_CREDIT",
+    if (authoritativePaidCents > 0) {
+      await settleUnderpaymentToCredit({
+        order: matchedOrder,
         paidCents: authoritativePaidCents,
+        note: `Pago parcial recibido tras expiración (${matchedOrder.orderNumber})`,
         needsAttention: false,
+        attentionReason: null,
       });
+      await updateWebhookEventStatus(recordId, "processed");
       return { outcome: "partial_underpaid_credited", orderId: matchedOrder.id };
     }
 
+    await releaseReservedCodesForOrder(matchedOrder.id);
     await transitionOrderStatus({
       orderId: matchedOrder.id,
       expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
       nextStatus: "EXPIRED",
     });
+    await updateWebhookEventStatus(recordId, "processed");
     return { outcome: "expired", orderId: matchedOrder.id };
   }
 
@@ -330,34 +477,46 @@ export async function processVerifiedWebhookEvent(
     authoritativeStatus === "PARTIALLY_PAID" ||
     authoritativePaidCents < matchedOrder.amountDueCents
   ) {
-    // Underpayment: NEVER release digital codes. If checkout is closed/expired or partial event, handle carefully:
-    if (event.eventType === "checkout.completed") {
-      // Gateway marked COMPLETED despite paidAmount < expected price -> credit paid amount safely & flag
-      await releaseReservedCodesForOrder(matchedOrder.id);
-      if (authoritativePaidCents > 0) {
-        const userId =
-          matchedOrder.userId ?? (await ensureCustomerProfile(matchedOrder.email));
-        await appendCreditLedgerEntry({
-          userId,
-          orderId: matchedOrder.id,
-          deltaCents: authoritativePaidCents,
-          reason: "partial_payment",
-          note: `Monto recibido menor al total en orden ${matchedOrder.orderNumber}`,
-          createdBy: null,
-        });
-      }
-      await transitionOrderStatus({
-        orderId: matchedOrder.id,
-        expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
-        nextStatus: "REFUNDED_CREDIT",
+    // Underpayment: NEVER release digital codes.
+    const shouldSettleToCredit =
+      event.eventType === "checkout.completed" ||
+      authoritativeStatus === "COMPLETED" ||
+      checkoutHasExpired;
+
+    if (shouldSettleToCredit && authoritativePaidCents > 0) {
+      await settleUnderpaymentToCredit({
+        order: matchedOrder,
         paidCents: authoritativePaidCents,
-        needsAttention: true,
+        note: checkoutHasExpired
+          ? `Pago parcial recibido al vencer enlace (${matchedOrder.orderNumber})`
+          : `Monto recibido menor al total en orden ${matchedOrder.orderNumber}`,
+        needsAttention:
+          event.eventType === "checkout.completed" ||
+          authoritativeStatus === "COMPLETED",
         attentionReason: `Pago insuficiente: pagado ${authoritativePaidCents} vs esperado ${matchedOrder.amountDueCents}`,
       });
+      await updateWebhookEventStatus(recordId, "processed");
       return { outcome: "partial_underpaid_credited", orderId: matchedOrder.id };
     }
 
-    // Still OPEN waiting for remaining funds
+    if (shouldSettleToCredit && authoritativePaidCents === 0) {
+      await releaseReservedCodesForOrder(matchedOrder.id);
+      await transitionOrderStatus({
+        orderId: matchedOrder.id,
+        expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
+        nextStatus: "EXPIRED",
+      });
+      await updateWebhookEventStatus(recordId, "processed");
+      return { outcome: "expired", orderId: matchedOrder.id };
+    }
+
+    // Checkout is still OPEN: persist partial paid_cents so UI shows exact missing balance
+    if (authoritativePaidCents > 0) {
+      await updateOrderPartialPaymentCents(matchedOrder.id, authoritativePaidCents);
+      await updateWebhookEventStatus(recordId, "processed");
+      return { outcome: "partial_pending", orderId: matchedOrder.id };
+    }
+
     await updateWebhookEventStatus(recordId, "processed");
     return { outcome: "ignored", orderId: matchedOrder.id };
   }
@@ -461,4 +620,123 @@ export async function adminRefundOrderToCredit(params: {
     targetId: order.id,
     metadata: { refundCents, reasonNote: params.reasonNote },
   });
+}
+
+/**
+ * Reconciles an asynchronous Central One order against GET /orders/{id} and
+ * GET /orders/{id}/codes. Called by /api/webhooks/centralone and /api/cron/reconcile.
+ */
+export async function syncCentralOneOrderProgress(
+  externalOrderId: string,
+  sequenceHint?: number
+): Promise<{ ok: boolean; status: string; addedCodes: number }> {
+  const supplierOrder = await getSupplierOrderByExternalId("centralone", externalOrderId);
+  if (!supplierOrder) {
+    return { ok: false, status: "unknown_supplier_order", addedCodes: 0 };
+  }
+
+  if (
+    typeof sequenceHint === "number" &&
+    sequenceHint > 0 &&
+    sequenceHint <= supplierOrder.lastSequence
+  ) {
+    return { ok: true, status: "stale_sequence_ignored", addedCodes: 0 };
+  }
+
+  const live = await getCentralOneOrder(externalOrderId);
+  const order = await getOrderById(supplierOrder.orderId);
+  if (!order) {
+    return { ok: false, status: "order_not_found", addedCodes: 0 };
+  }
+
+  const targetItem = order.items.find((it) => it.id === supplierOrder.orderItemId);
+  if (!targetItem) {
+    return { ok: false, status: "order_item_not_found", addedCodes: 0 };
+  }
+
+  let addedCodes = 0;
+  if (live.deliveredCount > 0) {
+    const existingCount = order.fulfillments.filter(
+      (f) => f.orderItemId === targetItem.id && f.source === "centralone"
+    ).length;
+
+    if (live.deliveredCount > existingCount) {
+      const codes = await getCentralOneOrderCodes(externalOrderId);
+      const pendingCodes = codes.slice(existingCount);
+      for (const c of pendingCodes) {
+        await insertFulfillmentRecord({
+          orderItemId: targetItem.id,
+          orderId: order.id,
+          userId: order.userId,
+          source: "centralone",
+          codeInventoryId: null,
+          codeCiphertext: encryptCode(c.codePlaintext),
+          codeLast4: extractLast4(c.codePlaintext),
+          pinCiphertext: c.pinPlaintext ? encryptCode(c.pinPlaintext) : null,
+          supplierTxId: externalOrderId,
+        });
+        addedCodes += 1;
+      }
+    }
+  }
+
+  const newDeliveredForItem = Math.min(
+    targetItem.quantity,
+    targetItem.deliveredCount + addedCodes
+  );
+
+  await updateSupplierOrderState(supplierOrder.id, {
+    status: live.status,
+    deliveredCount: live.deliveredCount,
+    supplierUnitCostCents: live.unitCostCents ?? supplierOrder.supplierUnitCostCents,
+    lastSequence:
+      typeof sequenceHint === "number" && sequenceHint > supplierOrder.lastSequence
+        ? sequenceHint
+        : supplierOrder.lastSequence,
+    rawPayload: live.raw,
+  });
+
+  if (live.status === "failed" || live.status === "cancelled") {
+    await markOrderItemProgress(targetItem.id, {
+      deliveredCount: newDeliveredForItem,
+      status: newDeliveredForItem >= targetItem.quantity ? "FULFILLED" : "MANUAL_REVIEW",
+    });
+    const nextOrderStatus = newDeliveredForItem > 0 ? "PARTIAL" : "MANUAL_REVIEW";
+    await transitionOrderStatus({
+      orderId: order.id,
+      expectedStatuses: ["FULFILLING", "PARTIAL"],
+      nextStatus: nextOrderStatus,
+      needsAttention: true,
+      attentionReason: `Central One devolvió estado "${live.status}" (orden ${externalOrderId}).`,
+    });
+    return { ok: true, status: live.status, addedCodes };
+  }
+
+  await markOrderItemProgress(targetItem.id, {
+    deliveredCount: newDeliveredForItem,
+    status: newDeliveredForItem >= targetItem.quantity ? "FULFILLED" : "RESERVED",
+  });
+
+  const refreshed = await getOrderById(order.id);
+  if (
+    refreshed &&
+    refreshed.items.every((it) => it.deliveredCount >= it.quantity) &&
+    refreshed.status !== "DELIVERED"
+  ) {
+    await transitionOrderStatus({
+      orderId: order.id,
+      expectedStatuses: ["FULFILLING", "PARTIAL", "MANUAL_REVIEW"],
+      nextStatus: "DELIVERED",
+      needsAttention: false,
+      attentionReason: null,
+    });
+    await sendOrderReadyEmail({
+      to: order.email,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      itemCount: refreshed.items.reduce((acc, it) => acc + it.quantity, 0),
+    }).catch(() => {});
+  }
+
+  return { ok: true, status: live.status, addedCodes };
 }

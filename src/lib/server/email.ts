@@ -8,6 +8,41 @@ function getFromEmail(): string {
   );
 }
 
+async function dispatchEmail(params: {
+  to: string;
+  subject: string;
+  html: string;
+  sandboxLink?: string;
+}): Promise<{ sent: boolean; sandboxLogged: boolean; error?: string }> {
+  if (!isResendConfigured()) {
+    if (process.env.NODE_ENV !== "test") {
+      console.info(
+        `[StoryCheap Email Sandbox] To=${params.to} Subject="${params.subject}"${
+          params.sandboxLink ? ` Link=${params.sandboxLink}` : ""
+        }`
+      );
+    }
+    return { sent: false, sandboxLogged: true };
+  }
+
+  const resend = new Resend(process.env.RESEND_API_KEY!.trim());
+  const { error } = await resend.emails.send({
+    from: getFromEmail(),
+    to: params.to,
+    subject: params.subject,
+    html: params.html,
+  });
+
+  if (error) {
+    console.error(
+      `[StoryCheap Email Error] To=${params.to} Subject="${params.subject}": ${error.message}`
+    );
+    return { sent: false, sandboxLogged: false, error: error.message };
+  }
+
+  return { sent: true, sandboxLogged: false };
+}
+
 /**
  * Sends order readiness notification linking securely to `/order/[id]`.
  * NEVER embeds plaintext digital codes or PINs inside email bodies.
@@ -46,23 +81,12 @@ export async function sendOrderReadyEmail(params: {
     </div>
   `;
 
-  if (!isResendConfigured()) {
-    if (process.env.NODE_ENV !== "test") {
-      console.info(
-        `[StoryCheap Email Sandbox] To=${params.to} Subject="${subject}" Link=${orderUrl}`
-      );
-    }
-    return { sent: false, sandboxLogged: true };
-  }
-
-  const resend = new Resend(process.env.RESEND_API_KEY!);
-  await resend.emails.send({
-    from: getFromEmail(),
+  return dispatchEmail({
     to: params.to,
     subject,
     html,
+    sandboxLink: orderUrl,
   });
-  return { sent: true, sandboxLogged: false };
 }
 
 export async function sendCreditAdjustmentEmail(params: {
@@ -88,21 +112,9 @@ export async function sendCreditAdjustmentEmail(params: {
     </div>
   `;
 
-  if (!isResendConfigured()) {
-    if (process.env.NODE_ENV !== "test") {
-      console.info(
-        `[StoryCheap Email Sandbox] To=${params.to} Subject="${subject}"`
-      );
-    }
-    return { sent: false, sandboxLogged: true };
-  }
-
-  const resend = new Resend(process.env.RESEND_API_KEY!);
-  await resend.emails.send({
-    from: getFromEmail(),
+  return dispatchEmail({
     to: params.to,
     subject,
     html,
   });
-  return { sent: true, sandboxLogged: false };
 }

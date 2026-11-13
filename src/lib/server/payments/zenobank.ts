@@ -95,6 +95,7 @@ export function verifyZenoBankWebhookWithSecret(args: {
     priceCents: parseUsdToCents(verified.data.priceAmount),
     paidCents: parseUsdToCents(verified.data.paidAmount),
     status: verified.data.status,
+    expiresAt: verified.data.expiresAt ?? null,
     rawPayload: verified as unknown as Record<string, unknown>,
   };
 }

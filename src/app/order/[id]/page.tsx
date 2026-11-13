@@ -282,8 +282,42 @@ function OrderDetailInner() {
           </div>
         )}
 
-        {/* Payment Link if still PENDING_PAYMENT */}
+        {/* Partial payment progress while checkout is still open */}
         {order.status === "PENDING_PAYMENT" &&
+          order.paidCents > 0 &&
+          order.paidCents < order.amountDueCents && (
+            <div className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-4 flex flex-wrap items-center justify-between gap-4">
+              <div className="text-xs text-amber-100 leading-relaxed max-w-xl">
+                <span className="font-bold text-amber-300 block mb-0.5">
+                  Pago parcial recibido: {formatCents(order.paidCents)} de{" "}
+                  {formatCents(order.amountDueCents)} USD
+                </span>
+                Te faltan{" "}
+                <strong className="text-white">
+                  {formatCents(order.amountDueCents - order.paidCents)} USD
+                </strong>{" "}
+                (por ejemplo por décimas o comisión de red). Completa esa
+                diferencia en ZenoBank antes de que venza el enlace; si expira,
+                acreditaremos tus {formatCents(order.paidCents)} USD como saldo
+                a favor automático para tu siguiente compra.
+              </div>
+              {order.gatewayCheckoutUrl && (
+                <a
+                  href={order.gatewayCheckoutUrl}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs shrink-0"
+                >
+                  <span>
+                    Completar {formatCents(order.amountDueCents - order.paidCents)} en ZenoBank
+                  </span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              )}
+            </div>
+          )}
+
+        {/* Payment Link if still PENDING_PAYMENT with 0 paid */}
+        {order.status === "PENDING_PAYMENT" &&
+          order.paidCents === 0 &&
           order.gatewayCheckoutUrl &&
           !isSandboxCheckout &&
           !order.gatewayCheckoutId?.startsWith("zbk_sbx_") && (
@@ -367,22 +401,34 @@ function OrderDetailInner() {
 
         {/* Store credit notice on REFUNDED_CREDIT */}
         {order.status === "REFUNDED_CREDIT" && (
-          <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/25 p-4 flex items-center justify-between gap-4">
+          <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/25 p-4 flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <Wallet className="w-5 h-5 text-emerald-400 shrink-0" />
-              <div className="text-xs text-emerald-100">
+              <div className="text-xs text-emerald-100 leading-relaxed">
                 <span className="font-bold block">
-                  Saldo a favor acreditado en tu cuenta
+                  Saldo a favor acreditado:{" "}
+                  {order.paidCents > 0
+                    ? `${formatCents(order.paidCents)} USD`
+                    : "Disponible en tu cuenta"}
                 </span>
-                Puedes usar este saldo automáticamente en tu próxima compra.
+                No perdiste tu dinero. En tu próxima compra se aplicará
+                automáticamente para que solo pagues la diferencia restante.
               </div>
             </div>
-            <Link
-              href="/account"
-              className="px-3.5 py-2 rounded-xl bg-white text-slate-950 font-black text-xs shrink-0"
-            >
-              Ver mi saldo
-            </Link>
+            <div className="flex items-center gap-2 shrink-0">
+              <Link
+                href="/"
+                className="px-3.5 py-2 rounded-xl bg-white text-slate-950 font-black text-xs"
+              >
+                Volver al catálogo
+              </Link>
+              <Link
+                href="/account"
+                className="px-3.5 py-2 rounded-xl border border-white/15 text-white font-bold text-xs"
+              >
+                Ver mi saldo
+              </Link>
+            </div>
           </div>
         )}
       </div>

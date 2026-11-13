@@ -3,7 +3,7 @@
 import React, { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useStore } from "@/context/store-context";
-import { Lock, Mail, Shield, Sparkles } from "lucide-react";
+import { KeyRound, Lock, Mail, Shield, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 function LoginFormInner() {
@@ -13,7 +13,11 @@ function LoginFormInner() {
   const safeNext = nextPath.startsWith("/") ? nextPath : "/account";
 
   const { sandboxEnabled, refreshSession, signInSandbox } = useStore();
+  const [authMode, setAuthMode] = useState<"password" | "magic-link">(
+    nextPath.includes("admin") ? "password" : "password"
+  );
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [sentMessage, setSentMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -21,30 +25,46 @@ function LoginFormInner() {
     e.preventDefault();
     setLoading(true);
     setSentMessage(null);
-    try {
-      const res = await fetch("/api/auth/magic-link", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-      const data = (await res.json()) as {
-        error?: string;
-        mode?: string;
-        message?: string;
-      };
-      if (!res.ok) {
-        throw new Error(data.error ?? "No se pudo procesar el acceso.");
-      }
 
-      if (data.mode === "sandbox_signed_in") {
+    try {
+      if (authMode === "password") {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = (await res.json()) as { error?: string };
+        if (!res.ok) {
+          throw new Error(data.error ?? "Credenciales inválidas.");
+        }
         await refreshSession();
-        toast.success("Sesión Sandbox iniciada");
+        toast.success("Sesión iniciada con éxito");
         router.push(safeNext);
       } else {
-        setSentMessage(
-          data.message ??
-            "Revisa tu correo electrónico para abrir tu enlace mágico de acceso."
-        );
+        const res = await fetch("/api/auth/magic-link", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        });
+        const data = (await res.json()) as {
+          error?: string;
+          mode?: string;
+          message?: string;
+        };
+        if (!res.ok) {
+          throw new Error(data.error ?? "No se pudo procesar el acceso.");
+        }
+
+        if (data.mode === "sandbox_signed_in") {
+          await refreshSession();
+          toast.success("Sesión Sandbox iniciada");
+          router.push(safeNext);
+        } else {
+          setSentMessage(
+            data.message ??
+              "Revisa tu correo electrónico para abrir tu enlace mágico de acceso."
+          );
+        }
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Error de acceso");
@@ -62,8 +82,42 @@ function LoginFormInner() {
           </div>
           <h1 className="text-2xl font-black text-white">Accede a StoryCheap</h1>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Sin contraseñas que olvidar. Te enviamos un enlace mágico a tu correo para ver tus códigos y saldo a favor.
+            {authMode === "password"
+              ? "Ingresa con tu correo y contraseña registrada."
+              : "Te enviamos un enlace mágico a tu correo para acceder sin contraseña."}
           </p>
+        </div>
+
+        {/* Tab Selector */}
+        <div className="grid grid-cols-2 p-1 rounded-2xl bg-slate-950/60 border border-white/10 text-xs font-bold">
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMode("password");
+              setSentMessage(null);
+            }}
+            className={`py-2 rounded-xl transition-all ${
+              authMode === "password"
+                ? "bg-white text-slate-950 shadow-sm"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            Contraseña
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMode("magic-link");
+              setSentMessage(null);
+            }}
+            className={`py-2 rounded-xl transition-all ${
+              authMode === "magic-link"
+                ? "bg-white text-slate-950 shadow-sm"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            Enlace mágico
+          </button>
         </div>
 
         {sentMessage ? (
@@ -95,12 +149,39 @@ function LoginFormInner() {
               </div>
             </div>
 
+            {authMode === "password" && (
+              <div>
+                <label
+                  htmlFor="login-password"
+                  className="block text-xs font-bold text-slate-300 mb-2"
+                >
+                  Contraseña
+                </label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                  <input
+                    id="login-password"
+                    type="password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••••••"
+                    className="w-full rounded-2xl bg-slate-950/80 border border-white/15 pl-10 pr-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500/50"
+                  />
+                </div>
+              </div>
+            )}
+
             <button
               type="submit"
               disabled={loading}
               className="w-full py-3.5 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-sm transition-colors"
             >
-              {loading ? "Procesando..." : "Continuar con correo"}
+              {loading
+                ? "Procesando..."
+                : authMode === "password"
+                  ? "Iniciar sesión"
+                  : "Continuar con correo"}
             </button>
           </form>
         )}

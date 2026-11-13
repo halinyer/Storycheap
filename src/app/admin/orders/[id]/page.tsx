@@ -154,7 +154,8 @@ async function AdminOrderDetailContent({
                     {f.productName} ({f.denominationLabel})
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    Origen: <span className="uppercase">{f.source}</span> •
+                    Origen: <span className="uppercase text-sky-300 font-bold">{f.source}</span>
+                    {f.supplierTxId ? ` (TX: ${f.supplierTxId})` : ""} •
                     Revelado por cliente:{" "}
                     {f.revealedAt
                       ? new Date(f.revealedAt).toLocaleString()

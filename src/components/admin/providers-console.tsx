@@ -11,10 +11,12 @@ import { toast } from "sonner";
 export function ProvidersConsole({
   providers,
   reloadlyStatus,
+  centralOneStatus,
   webhooks,
 }: {
   providers: ProviderConfigDTO[];
   reloadlyStatus: SupplierBalanceStatus;
+  centralOneStatus: SupplierBalanceStatus;
   webhooks: WebhookEventDTO[];
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -38,27 +40,49 @@ export function ProvidersConsole({
 
   return (
     <div className="space-y-8">
-      {/* Reloadly Caution Notice */}
-      <div className="rounded-3xl bg-amber-500/10 border border-amber-500/25 p-5 flex items-start gap-3">
-        <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-        <div className="text-xs text-amber-100 leading-relaxed space-y-1">
-          <div className="font-black text-amber-300">
-            Política de Proveedor Reloadly (Seguridad de Capital)
+      {/* Supplier Balances & Notices */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="rounded-3xl bg-sky-500/10 border border-sky-500/25 p-5 flex items-start gap-3">
+          <ShieldCheck className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-sky-100 leading-relaxed space-y-1">
+            <div className="font-black text-sky-300">
+              Central One API (Gift Cards)
+            </div>
+            <p>
+              Webhook: <code>/api/webhooks/centralone</code>. No tiene modo sandbox: cada compra consume saldo real en Central One.
+            </p>
+            <p className="text-sky-200/90 font-bold">
+              Saldo actual:{" "}
+              {centralOneStatus.configured
+                ? centralOneStatus.balanceCents !== null
+                  ? `${formatCents(centralOneStatus.balanceCents)} ${centralOneStatus.currency}`
+                  : centralOneStatus.errorMessage ?? "Error"
+                : centralOneStatus.errorMessage}
+            </p>
           </div>
-          <p>
-            Mantén Reloadly desactivado (<code>enabled: false</code>) y opera con tu{" "}
-            <strong>Inventario Propio CSV</strong> hasta contar con una cuenta Reloadly comercial verificada con KYC propio y sin VPN.
-          </p>
-          <p className="text-amber-200/80">
-            Estado actual SDK:{" "}
-            {reloadlyStatus.configured
-              ? `Conectado (${reloadlyStatus.sandbox ? "Sandbox" : "Live"}) — Balance: ${
-                  reloadlyStatus.balanceCents !== null
-                    ? formatCents(reloadlyStatus.balanceCents)
-                    : "Error"
-                }`
-              : reloadlyStatus.errorMessage}
-          </p>
+        </div>
+
+        <div className="rounded-3xl bg-amber-500/10 border border-amber-500/25 p-5 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-amber-100 leading-relaxed space-y-1">
+            <div className="font-black text-amber-300">
+              Política de Proveedor Reloadly (Seguridad de Capital)
+            </div>
+            <p>
+              Mantén Reloadly desactivado (<code>enabled: false</code>) y opera con tu{" "}
+              <strong>Inventario Propio CSV</strong> hasta contar con una cuenta Reloadly comercial verificada con KYC propio y sin VPN.
+            </p>
+            <p className="text-amber-200/80">
+              Estado actual SDK:{" "}
+              {reloadlyStatus.configured
+                ? `Conectado (${reloadlyStatus.sandbox ? "Sandbox" : "Live"}) — Balance: ${
+                    reloadlyStatus.balanceCents !== null
+                      ? formatCents(reloadlyStatus.balanceCents)
+                      : "Error"
+                  }`
+                : reloadlyStatus.errorMessage}
+            </p>
+          </div>
         </div>
       </div>
 

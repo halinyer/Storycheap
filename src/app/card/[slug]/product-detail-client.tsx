@@ -3,21 +3,25 @@
 import React, { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { PayYourWay } from "@/components/storefront/pay-your-way";
 import { Card3DInteractive } from "@/components/ui/card-3d-interactive";
 import { useStore } from "@/context/store-context";
 import { formatCents } from "@/lib/catalog-seed";
 import type { ProductDTO } from "@/types";
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowLeft,
-  Check,
+  CheckCircle2,
   ChevronDown,
+  Clock,
   Globe,
+  Lock,
+  Mail,
   Minus,
   Plus,
   ShieldCheck,
-  ShoppingBag,
-  Zap,
+  ShoppingCart,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -29,7 +33,12 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
   const router = useRouter();
   const { addToCart, setCartDrawerOpen } = useStore();
 
-  const activeVariants = product.variants.filter((v) => v.active);
+  const activeVariants = product.variants
+    .filter((v) => v.active)
+    .sort(
+      (a, b) =>
+        a.salePriceCents - b.salePriceCents || a.faceValueCents - b.faceValueCents
+    );
   const firstAvailable =
     activeVariants.find((v) => v.inStock) ?? activeVariants[0];
   const [selectedVariantId, setSelectedVariantId] = useState(
@@ -41,6 +50,20 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
     activeVariants.find((v) => v.id === selectedVariantId) ?? firstAvailable;
 
   const canBuy = Boolean(selectedVariant && selectedVariant.inStock);
+  const accent = product.accentColor || "#0070d1";
+
+  const maxQuantity = selectedVariant
+    ? typeof selectedVariant.deliverableStock === "number" &&
+      selectedVariant.deliverableStock > 0
+      ? Math.min(5, selectedVariant.deliverableStock)
+      : selectedVariant.availableStock > 0
+        ? Math.min(5, selectedVariant.availableStock)
+        : 5
+    : 1;
+
+  const outOfStockLabels = activeVariants
+    .filter((v) => !v.inStock)
+    .map((v) => v.denominationLabel);
 
   const handleAddToCart = (redirectCheckout: boolean) => {
     if (!selectedVariant || !selectedVariant.inStock) {
@@ -66,7 +89,9 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
     if (redirectCheckout) {
       router.push("/checkout");
     } else {
-      toast.success(`${product.brand} (${selectedVariant.denominationLabel}) agregado al carrito`);
+      toast.success(
+        `${product.brand} (${selectedVariant.denominationLabel}) agregado al carrito`
+      );
       setCartDrawerOpen(true);
     }
   };
@@ -76,210 +101,94 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
       {/* Minimal Breadcrumb */}
       <Link
         href="/"
-        className="inline-flex items-center gap-2 text-xs font-bold text-slate-400 hover:text-white transition-colors mb-8"
+        className="inline-flex items-center gap-2 text-xs font-medium text-slate-400 hover:text-white transition-colors mb-7"
       >
-        <ArrowLeft className="w-4 h-4" />
+        <ArrowLeft className="w-3.5 h-3.5" />
         <span>Volver al catálogo</span>
       </Link>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-start">
-        {/* Left: Interactive 3D Card Showcase */}
-        <div className="lg:col-span-5 flex flex-col items-center">
-          <div className="w-full max-w-sm rounded-[36px] apple-glass p-6 sm:p-8 flex items-center justify-center">
-            <Card3DInteractive
-              imageSrc={product.imageUrl}
-              cardName={product.name}
-              brand={product.brand}
-              accentColor={product.accentColor}
-              region={product.region}
-              className="w-full"
-            />
-          </div>
-          <p className="text-[11px] text-slate-400 mt-4 text-center">
-            Mueve el cursor sobre la tarjeta • Entrega digital oficial
-          </p>
-        </div>
-
-        {/* Right: Clean Minimalist Configuration (No Payment Clutter) */}
-        <div className="lg:col-span-7 space-y-6">
-          <div>
-            <div className="flex flex-wrap items-center gap-2 mb-3">
-              <span className="px-3 py-1 rounded-full bg-white/[0.06] border border-white/10 text-[11px] font-bold text-slate-200 uppercase tracking-wider">
-                {product.brand}
-              </span>
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-sky-500/15 border border-sky-500/30 text-[11px] font-bold text-sky-300">
-                <Globe className="w-3.5 h-3.5" />
-                Región: {product.region}
-              </span>
-            </div>
-
-            <h1 className="text-3xl sm:text-4xl font-black text-white tracking-tight">
-              {product.name}
-            </h1>
-            <p className="text-sm text-slate-300 mt-3 leading-relaxed">
-              {product.description}
-            </p>
-          </div>
-
-          {/* Explicit Region Warning Banner */}
-          {product.regionWarning && (
-            <div className="rounded-2xl bg-amber-500/10 border border-amber-500/25 p-4 flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-              <div className="text-xs text-amber-100 leading-relaxed">
-                <span className="font-extrabold block text-amber-300 mb-0.5">
-                  Verifica la región antes de comprar
-                </span>
-                {product.regionWarning}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-start">
+        {/* Left Column: Product Hero Banner + Pay Your Way + Description */}
+        <div className="lg:col-span-7 space-y-7">
+          {/* Restrained Hero Card Banner */}
+          <div
+            className="rounded-2xl border border-white/[0.08] p-6 sm:p-7"
+            style={{
+              background: `linear-gradient(135deg, ${accent}24 0%, rgba(15, 17, 25, 0.92) 65%)`,
+            }}
+          >
+            <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6">
+              <div className="w-44 sm:w-48 shrink-0">
+                <Card3DInteractive
+                  minimal
+                  imageSrc={product.imageUrl}
+                  cardName={product.name}
+                  brand={product.brand}
+                  accentColor={accent}
+                  region={product.region}
+                />
               </div>
-            </div>
-          )}
 
-          {/* Denomination Selector */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-extrabold uppercase tracking-wider text-slate-300">
-                Selecciona el monto
-              </label>
-              {selectedVariant && (
-                <span className="text-xs text-slate-400">
-                  {selectedVariant.inStock
-                    ? selectedVariant.availableStock > 0
-                      ? `${selectedVariant.availableStock} disponible(s)`
-                      : "Disponible"
-                    : "Sin stock"}
+              <div className="flex-1 min-w-0 space-y-3 text-center sm:text-left pt-1">
+                <span className="text-xs font-medium text-slate-300/85">
+                  {product.brand}
                 </span>
-              )}
-            </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {activeVariants.map((variant) => {
-                const isSelected = selectedVariant?.id === variant.id;
-                return (
-                  <button
-                    key={variant.id}
-                    type="button"
-                    onClick={() => {
-                      setSelectedVariantId(variant.id);
-                      setQuantity(1);
-                    }}
-                    className={`relative rounded-2xl p-4 text-left border transition-all ${
-                      isSelected
-                        ? "bg-white text-slate-950 border-white shadow-xl"
-                        : variant.inStock
-                        ? "bg-white/[0.04] hover:bg-white/[0.08] text-white border-white/10"
-                        : "bg-white/[0.02] text-slate-500 border-white/[0.05] opacity-60"
-                    }`}
-                  >
-                    {isSelected && (
-                      <Check className="w-4 h-4 text-emerald-600 absolute top-3 right-3" />
-                    )}
-                    <div className="text-sm font-black">
-                      {variant.denominationLabel}
-                    </div>
-                    <div
-                      className={`text-xs font-bold mt-1 ${
-                        isSelected ? "text-slate-700" : "text-sky-400"
-                      }`}
-                    >
-                      {formatCents(variant.salePriceCents)} USD
-                    </div>
-                    {!variant.inStock && (
-                      <div className="text-[10px] font-bold uppercase text-rose-400 mt-1">
-                        Agotado
-                      </div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+                <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-white leading-tight">
+                  {product.name}
+                </h1>
 
-          {/* Purchase Box: Quantity + Total + 2 Clean CTAs */}
-          {selectedVariant && (
-            <div className="rounded-3xl apple-glass p-6 space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <span className="text-xs text-slate-400 block">
-                    Total por {quantity} unidad{quantity === 1 ? "" : "es"}
-                  </span>
-                  <div className="flex items-baseline gap-1.5 mt-0.5">
-                    <span className="text-3xl font-black text-white">
-                      {formatCents(selectedVariant.salePriceCents * quantity)}
+                <div className="space-y-2 pt-1 text-xs text-slate-300">
+                  <div className="flex items-center justify-center sm:justify-start gap-2">
+                    <Globe className="w-4 h-4 text-slate-400 shrink-0" />
+                    <span>
+                      Válida en la región:{" "}
+                      <strong className="font-medium text-white">
+                        {product.region}
+                      </strong>
                     </span>
-                    <span className="text-xs font-bold text-slate-400">
-                      USD
+                  </div>
+
+                  <div className="flex items-center justify-center sm:justify-start gap-2">
+                    <Mail className="w-4 h-4 text-slate-400 shrink-0" />
+                    <span>
+                      Entrega digital:{" "}
+                      <span className="text-slate-200">
+                        al instante en tu bóveda y correo
+                      </span>
                     </span>
                   </div>
                 </div>
-
-                {/* Quantity */}
-                <div className="flex items-center gap-2 rounded-2xl bg-slate-950 border border-white/10 p-1.5">
-                  <button
-                    type="button"
-                    aria-label="Disminuir cantidad"
-                    onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                    className="w-8 h-8 rounded-xl flex items-center justify-center text-slate-300 hover:bg-white/10"
-                  >
-                    <Minus className="w-4 h-4" />
-                  </button>
-                  <span className="w-8 text-center text-sm font-black text-white">
-                    {quantity}
-                  </span>
-                  <button
-                    type="button"
-                    aria-label="Aumentar cantidad"
-                    onClick={() =>
-                      setQuantity((q) =>
-                        Math.min(
-                          selectedVariant.availableStock > 0
-                            ? Math.min(5, selectedVariant.availableStock)
-                            : 5,
-                          q + 1
-                        )
-                      )
-                    }
-                    className="w-8 h-8 rounded-xl flex items-center justify-center text-slate-300 hover:bg-white/10"
-                  >
-                    <Plus className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  disabled={!canBuy}
-                  onClick={() => handleAddToCart(false)}
-                  className="w-full py-3.5 px-5 rounded-2xl bg-white hover:bg-sky-300 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-black text-sm flex items-center justify-center gap-2 transition-all shadow-lg"
-                >
-                  <ShoppingBag className="w-4 h-4" />
-                  <span>{canBuy ? "Agregar al carrito" : "Sin stock"}</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={!canBuy}
-                  onClick={() => handleAddToCart(true)}
-                  className="w-full py-3.5 px-5 rounded-2xl bg-sky-500/20 hover:bg-sky-500/30 disabled:opacity-40 border border-sky-400/40 text-sky-200 font-black text-sm flex items-center justify-center gap-2 transition-all"
-                >
-                  <Zap className="w-4 h-4" />
-                  <span>Comprar ahora</span>
-                </button>
-              </div>
-
-              <div className="flex items-center gap-2 text-xs text-slate-400 pt-1">
-                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>
-                  El pago se realiza en el siguiente paso (ZenoBank Cripto o tu saldo a favor).
-                </span>
               </div>
             </div>
-          )}
+          </div>
 
-          {/* Collapsible Accordions: Cómo canjear & Términos */}
-          <div className="space-y-3">
-            <details className="group rounded-2xl bg-white/[0.03] border border-white/[0.08] p-4">
-              <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-bold text-white">
+          {/* Minimalist Payment Marks Strip */}
+          <PayYourWay variant="card" />
+
+          {/* Description */}
+          <div className="space-y-4">
+            <p className="text-sm text-slate-300 leading-relaxed">
+              {product.description}
+            </p>
+
+            {product.regionWarning && (
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.04] px-4 py-3 flex items-start gap-3">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div className="text-xs text-amber-100/90 leading-relaxed">
+                  <span className="font-medium text-amber-300 block mb-0.5">
+                    Verifica la región antes de comprar
+                  </span>
+                  {product.regionWarning}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Hairline Accordions */}
+          <div className="space-y-2.5 pt-1">
+            <details className="group rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-3.5">
+              <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium text-white">
                 <span>¿Cómo canjear tu código?</span>
                 <ChevronDown className="w-4 h-4 text-slate-400 group-open:rotate-180 transition-transform" />
               </summary>
@@ -290,8 +199,8 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
               </ol>
             </details>
 
-            <details className="group rounded-2xl bg-white/[0.03] border border-white/[0.08] p-4">
-              <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-bold text-white">
+            <details className="group rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-3.5">
+              <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium text-white">
                 <span>Términos y compatibilidad</span>
                 <ChevronDown className="w-4 h-4 text-slate-400 group-open:rotate-180 transition-transform" />
               </summary>
@@ -299,6 +208,183 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
                 {product.terms || "Válido únicamente para la región indicada."}
               </p>
             </details>
+          </div>
+        </div>
+
+        {/* Right Column: Unified Purchase Card */}
+        <div className="lg:col-span-5 lg:sticky lg:top-24">
+          <div className="rounded-2xl border border-white/[0.1] bg-[#0e1017] p-6 space-y-5 shadow-[0_24px_60px_-15px_rgba(0,0,0,0.65)]">
+            {/* Region Row */}
+            <div className="space-y-2">
+              <span className="text-xs font-medium text-slate-400 block">
+                Región
+              </span>
+              <div className="rounded-xl border border-white/[0.1] bg-white/[0.025] px-3.5 py-2.5 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Globe className="w-4 h-4 text-slate-400 shrink-0" />
+                  <span className="text-sm font-medium text-white truncate">
+                    {product.region}
+                  </span>
+                </div>
+                <span className="text-[11px] font-medium text-emerald-400/90 shrink-0">
+                  Compatible
+                </span>
+              </div>
+            </div>
+
+            {/* Denomination Grid */}
+            <div className="space-y-2.5">
+              <span className="text-xs font-medium text-slate-400 block">
+                Valor
+              </span>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {activeVariants.map((variant) => {
+                  const isSelected = selectedVariant?.id === variant.id;
+                  return (
+                    <button
+                      key={variant.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedVariantId(variant.id);
+                        setQuantity(1);
+                      }}
+                      className={`rounded-xl border px-3 py-2.5 text-left transition-all ${
+                        isSelected
+                          ? "border-white bg-white/[0.07] text-white ring-1 ring-white/50"
+                          : variant.inStock
+                            ? "border-white/[0.1] bg-transparent hover:border-white/25 hover:bg-white/[0.03] text-slate-200"
+                            : "border-white/[0.05] bg-transparent text-slate-500 opacity-50"
+                      }`}
+                    >
+                      <div className="text-[13px] font-semibold leading-snug">
+                        {variant.denominationLabel}
+                      </div>
+                      <div className="text-[11px] text-slate-400 tabular-nums mt-0.5">
+                        {formatCents(variant.salePriceCents)} US$
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {outOfStockLabels.length > 0 && (
+                <p className="text-[11px] text-slate-500 pt-0.5">
+                  Fuera de stock: {outOfStockLabels.join(" · ")}
+                </p>
+              )}
+            </div>
+
+            {/* Price Summary, Live Stock & Quantity */}
+            {selectedVariant && (
+              <>
+                <div className="flex items-end justify-between gap-4 pt-1">
+                  <div>
+                    <span className="text-xs text-slate-400 block">Pagas</span>
+                    <div className="text-3xl font-semibold tracking-tight text-white tabular-nums mt-0.5">
+                      {formatCents(selectedVariant.salePriceCents * quantity)}{" "}
+                      <span className="text-base font-medium text-slate-300">
+                        US$
+                      </span>
+                    </div>
+
+                    {selectedVariant.inStock ? (
+                      <div className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>
+                          En stock
+                          {typeof selectedVariant.deliverableStock ===
+                            "number" && selectedVariant.deliverableStock <= 5
+                            ? ` · ${selectedVariant.deliverableStock} disp.`
+                            : ""}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-rose-400">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        <span>Fuera de stock</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Minimal Quantity Stepper */}
+                  <div className="flex flex-col items-end gap-1">
+                    <span className="text-[11px] text-slate-400">
+                      Cantidad
+                    </span>
+                    <div className="inline-flex items-center rounded-xl border border-white/[0.1] bg-white/[0.025] p-0.5">
+                      <button
+                        type="button"
+                        aria-label="Disminuir cantidad"
+                        disabled={quantity <= 1}
+                        onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/[0.06] disabled:opacity-35 transition-colors"
+                      >
+                        <Minus className="w-3.5 h-3.5" />
+                      </button>
+                      <span className="w-7 text-center text-xs font-semibold text-white tabular-nums">
+                        {quantity}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="Aumentar cantidad"
+                        disabled={!canBuy || quantity >= maxQuantity}
+                        onClick={() =>
+                          setQuantity((q) => Math.min(maxQuantity, q + 1))
+                        }
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/[0.06] disabled:opacity-35 transition-colors"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Primary & Secondary CTAs */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    disabled={!canBuy}
+                    onClick={() => handleAddToCart(true)}
+                    className="w-full py-3 px-4 rounded-xl bg-[#0070d1] hover:bg-[#0b84eb] disabled:bg-white/[0.06] disabled:text-slate-500 text-white font-semibold text-sm flex items-center justify-center transition-colors shadow-sm"
+                  >
+                    <span>{canBuy ? "Comprar ahora" : "Sin stock"}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={!canBuy}
+                    onClick={() => handleAddToCart(false)}
+                    className="w-full py-3 px-4 rounded-xl border border-white/[0.16] bg-transparent hover:bg-white/[0.05] disabled:opacity-40 text-white font-medium text-sm flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <ShoppingCart className="w-4 h-4 shrink-0" />
+                    <span>Añadir al carrito</span>
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* 3-Column Trust Footer */}
+            <div className="border-t border-white/[0.08] pt-4 grid grid-cols-3 gap-2 text-center">
+              <div className="space-y-1">
+                <Lock className="w-3.5 h-3.5 text-slate-400 mx-auto" />
+                <span className="block text-[11px] text-slate-400 leading-tight">
+                  Pago seguro
+                </span>
+              </div>
+              <div className="space-y-1">
+                <Clock className="w-3.5 h-3.5 text-slate-400 mx-auto" />
+                <span className="block text-[11px] text-slate-400 leading-tight">
+                  Entrega al instante
+                </span>
+              </div>
+              <div className="space-y-1">
+                <ShieldCheck className="w-3.5 h-3.5 text-slate-400 mx-auto" />
+                <span className="block text-[11px] text-slate-400 leading-tight">
+                  Códigos oficiales
+                </span>
+              </div>
+            </div>
           </div>
         </div>
       </div>

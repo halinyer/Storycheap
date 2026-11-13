@@ -4,6 +4,7 @@ import { connection } from "next/server";
 import { CatalogFilters } from "@/components/storefront/catalog-filters";
 import { GiftCardGrid } from "@/components/storefront/gift-card-grid";
 import { HeroSection } from "@/components/storefront/hero-section";
+import { PayYourWay } from "@/components/storefront/pay-your-way";
 import { listCatalog } from "@/lib/server/repository";
 import { isStorePreviewMode } from "@/lib/server/env";
 import { CheckCircle2, Lock, ShieldCheck, Zap } from "lucide-react";
@@ -18,6 +19,7 @@ export default function HomePage() {
   return (
     <div className="min-h-screen pb-16">
       <HeroSection />
+      <PayYourWay variant="strip" />
 
       {/* Catalog Section */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 pt-2">

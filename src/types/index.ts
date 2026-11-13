@@ -5,7 +5,11 @@ export type Category = "gaming" | "streaming" | "shopping" | "crypto";
 export type SourcePriority =
   | "manual_only"
   | "manual_then_reloadly"
-  | "reloadly_only";
+  | "reloadly_only"
+  | "manual_then_centralone"
+  | "centralone_only";
+
+export type FulfillmentSource = "manual" | "reloadly" | "centralone";
 
 export type PaymentGatewayId = "zenobank" | "pablito";
 
@@ -47,9 +51,12 @@ export interface ProductVariantDTO {
   currency: string;
   sourcePriority: SourcePriority;
   reloadlyProductId: number | null;
+  centraloneProductId?: string | null;
   lowStockThreshold: number;
   active: boolean;
   availableStock: number;
+  supplierStock?: number | null;
+  deliverableStock?: number | null;
   inStock: boolean;
 }
 
@@ -108,8 +115,9 @@ export interface FulfillmentSummaryDTO {
   productName: string;
   denominationLabel: string;
   region: string;
-  source: "manual" | "reloadly";
+  source: FulfillmentSource;
   codeLast4: string;
+  supplierTxId?: string | null;
   revealedAt: string | null;
   createdAt: string;
 }
@@ -203,6 +211,7 @@ export interface ProviderConfigDTO {
     | "zenobank"
     | "manual_inventory"
     | "reloadly"
+    | "centralone"
     | "pablito";
   label: string;
   enabled: boolean;

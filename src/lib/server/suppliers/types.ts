@@ -1,7 +1,7 @@
 import "server-only";
 
 export interface SupplierDeliveredCode {
-  source: "manual" | "reloadly";
+  source: "manual" | "reloadly" | "centralone";
   codePlaintext: string;
   pinPlaintext?: string | null;
   codeInventoryId?: string | null;

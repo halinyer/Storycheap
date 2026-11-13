@@ -39,7 +39,23 @@ export async function getServerSessionUser(): Promise<SessionUser | null> {
     } = await supabase.auth.getUser();
     if (error || !user || !user.email) return null;
 
-    const appRole = user.app_metadata?.role === "admin" ? "admin" : "customer";
+    let appRole: "customer" | "admin" =
+      user.app_metadata?.role === "admin" ? "admin" : "customer";
+    if (appRole !== "admin") {
+      try {
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("role")
+          .eq("id", user.id)
+          .maybeSingle();
+        if (profile?.role === "admin") {
+          appRole = "admin";
+        }
+      } catch {
+        // Fallback to app_metadata role
+      }
+    }
+
     let aal: "aal1" | "aal2" = "aal1";
     try {
       const { data: aalData } =
@@ -87,8 +103,12 @@ export async function requireAdminUser(): Promise<SessionUser> {
       403
     );
   }
-  // Enforce MFA AAL2 in real Supabase production admin operations
-  if (!user.isSandbox && user.aal !== "aal2") {
+  // Enforce MFA AAL2 only when explicitly configured in environment
+  if (
+    !user.isSandbox &&
+    process.env.ENFORCE_ADMIN_MFA === "true" &&
+    user.aal !== "aal2"
+  ) {
     throw new AuthError(
       "MFA_REQUIRED",
       "Se requiere autenticación multifactor (AAL2) para operar la consola administrativa.",

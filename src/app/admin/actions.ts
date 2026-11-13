@@ -10,16 +10,31 @@ import {
 import {
   appendAuditLog,
   appendCreditLedgerEntry,
+  createProductWithVariantAdmin,
+  createVariantAdmin,
   insertInventoryBatch,
+  listCatalog,
   markOrderAttentionFlag,
   previewCsvInventoryBatch,
   releaseExpiredReservations,
+  saveMonthlyCapitalSnapshot,
+  saveVariantPricingMeta,
   setBsRateCents,
+  toggleProductActiveAdmin,
+  updateProductAdmin,
   updateProviderConfig,
   updateVariantAdmin,
   voidInventoryCode,
+  type CapitalSnapshotRecord,
   type CsvPreviewRow,
+  type VariantPricingMeta,
 } from "@/lib/server/repository";
+import {
+  getCentralOneBalance,
+  getCentralOneCatalog,
+  type CentralOneCatalogItem,
+} from "@/lib/server/suppliers/centralone";
+import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
 import type { ProviderConfigDTO, SourcePriority } from "@/types";
 
 export async function parseCsvCodesAction(rawText: string): Promise<CsvPreviewRow[]> {
@@ -176,23 +191,50 @@ export async function refundOrderToCreditAction(input: {
 
 export async function updateVariantAdminAction(input: {
   variantId: string;
+  denominationLabel?: string;
   salePriceCents: number;
   unitCostCents: number | null;
+  exactCostUsd?: string | null;
   sourcePriority: SourcePriority;
   reloadlyProductId: number | null;
+  centraloneProductId: string | null;
+  centraloneProductName?: string | null;
+  centraloneSku?: string | null;
+  centraloneRegion?: string | null;
   lowStockThreshold: number;
   active: boolean;
 }) {
   const adminUser = await requireAdminUser();
 
+  const trimmedLabel = input.denominationLabel?.trim();
+  if (input.denominationLabel !== undefined && !trimmedLabel) {
+    throw new Error("La etiqueta de denominación no puede estar vacía.");
+  }
+
   await updateVariantAdmin(input.variantId, {
+    denominationLabel: trimmedLabel,
     salePriceCents: input.salePriceCents,
     unitCostCents: input.unitCostCents,
     sourcePriority: input.sourcePriority,
     reloadlyProductId: input.reloadlyProductId,
+    centraloneProductId: input.centraloneProductId,
     lowStockThreshold: input.lowStockThreshold,
     active: input.active,
   });
+
+  const metaPatch: VariantPricingMeta = {
+    exactCostUsd: input.exactCostUsd ?? null,
+    centraloneProductName: input.centraloneProductId
+      ? (input.centraloneProductName ?? null)
+      : null,
+    centraloneSku: input.centraloneProductId
+      ? (input.centraloneSku ?? null)
+      : null,
+    centraloneRegion: input.centraloneProductId
+      ? (input.centraloneRegion ?? null)
+      : null,
+  };
+  await saveVariantPricingMeta(input.variantId, metaPatch, adminUser.id);
 
   await appendAuditLog({
     actorId: adminUser.id,
@@ -305,4 +347,244 @@ export async function runReconcileCronAction() {
   revalidatePath("/admin/inventory");
   revalidatePath("/admin/orders");
   return res;
+}
+
+export async function fetchCentralOneCatalogAdminAction(): Promise<CentralOneCatalogItem[]> {
+  await requireAdminUser();
+  return getCentralOneCatalog();
+}
+
+export async function toggleProductActiveAction(input: {
+  productId: string;
+  active: boolean;
+}) {
+  const adminUser = await requireAdminUser();
+  await toggleProductActiveAdmin(input.productId, input.active);
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "catalog.toggle_product_active",
+    targetType: "product",
+    targetId: input.productId,
+    metadata: { active: input.active },
+  });
+
+  revalidatePath("/");
+  revalidatePath("/admin/products");
+  revalidatePath("/admin");
+}
+
+const updateProductMetaSchema = z.object({
+  productId: z.string().uuid(),
+  name: z.string().trim().min(2).max(80),
+  region: z.enum(["USA", "Global", "Latam", "Europa"]),
+  category: z.enum(["gaming", "streaming", "shopping", "crypto"]),
+});
+
+export async function updateProductMetaAction(
+  input: z.infer<typeof updateProductMetaSchema>
+) {
+  const adminUser = await requireAdminUser();
+  const parsed = updateProductMetaSchema.parse(input);
+
+  await updateProductAdmin(parsed.productId, {
+    name: parsed.name,
+    region: parsed.region,
+    category: parsed.category,
+  });
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "catalog.update_product",
+    targetType: "product",
+    targetId: parsed.productId,
+    metadata: parsed,
+  });
+
+  revalidatePath("/");
+  revalidatePath("/admin/products");
+  revalidatePath("/admin");
+}
+
+const createProductSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  brand: z.string().trim().max(40).optional(),
+  category: z.enum(["gaming", "streaming", "shopping", "crypto"]),
+  region: z.enum(["USA", "Global", "Latam", "Europa"]),
+  description: z.string().trim().max(400).optional(),
+  imageUrl: z.string().trim().max(240).optional(),
+  denominationLabel: z.string().trim().min(1).max(40),
+  faceValueCents: z.number().int().positive(),
+  salePriceCents: z.number().int().positive(),
+  unitCostCents: z.number().int().nonnegative().nullable(),
+  sourcePriority: z.enum([
+    "manual_only",
+    "manual_then_reloadly",
+    "reloadly_only",
+    "manual_then_centralone",
+    "centralone_only",
+  ]),
+  centraloneProductId: z.string().trim().nullable().optional(),
+  exactCostUsd: z.string().trim().nullable().optional(),
+  centraloneProductName: z.string().trim().nullable().optional(),
+  centraloneSku: z.string().trim().nullable().optional(),
+  centraloneRegion: z.string().trim().nullable().optional(),
+  reloadlyProductId: z.number().int().positive().nullable().optional(),
+});
+
+export async function createProductAction(
+  input: z.infer<typeof createProductSchema>
+) {
+  const adminUser = await requireAdminUser();
+  const parsed = createProductSchema.parse(input);
+  const created = await createProductWithVariantAdmin({
+    ...parsed,
+    centraloneProductId: parsed.centraloneProductId || null,
+    reloadlyProductId: parsed.reloadlyProductId ?? null,
+    active: true,
+  });
+
+  if (parsed.exactCostUsd || parsed.centraloneProductName || parsed.centraloneSku) {
+    await saveVariantPricingMeta(
+      created.variantId,
+      {
+        exactCostUsd: parsed.exactCostUsd ?? null,
+        centraloneProductName: parsed.centraloneProductName ?? null,
+        centraloneSku: parsed.centraloneSku ?? null,
+        centraloneRegion: parsed.centraloneRegion ?? null,
+      },
+      adminUser.id
+    );
+  }
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "catalog.create_product",
+    targetType: "product",
+    targetId: created.productId,
+    metadata: { name: parsed.name, variantId: created.variantId },
+  });
+
+  revalidatePath("/");
+  revalidatePath("/admin/products");
+  revalidatePath("/admin");
+  return created;
+}
+
+const createVariantSchema = z.object({
+  productId: z.string().uuid(),
+  denominationLabel: z.string().trim().min(1).max(40),
+  faceValueCents: z.number().int().positive(),
+  salePriceCents: z.number().int().positive(),
+  unitCostCents: z.number().int().nonnegative().nullable(),
+  sourcePriority: z.enum([
+    "manual_only",
+    "manual_then_reloadly",
+    "reloadly_only",
+    "manual_then_centralone",
+    "centralone_only",
+  ]),
+  centraloneProductId: z.string().trim().nullable().optional(),
+  exactCostUsd: z.string().trim().nullable().optional(),
+  centraloneProductName: z.string().trim().nullable().optional(),
+  centraloneSku: z.string().trim().nullable().optional(),
+  centraloneRegion: z.string().trim().nullable().optional(),
+});
+
+export async function createVariantAction(
+  input: z.infer<typeof createVariantSchema>
+) {
+  const adminUser = await requireAdminUser();
+  const parsed = createVariantSchema.parse(input);
+  const variantId = await createVariantAdmin({
+    ...parsed,
+    centraloneProductId: parsed.centraloneProductId || null,
+    active: true,
+  });
+
+  if (parsed.exactCostUsd || parsed.centraloneProductName || parsed.centraloneSku) {
+    await saveVariantPricingMeta(
+      variantId,
+      {
+        exactCostUsd: parsed.exactCostUsd ?? null,
+        centraloneProductName: parsed.centraloneProductName ?? null,
+        centraloneSku: parsed.centraloneSku ?? null,
+        centraloneRegion: parsed.centraloneRegion ?? null,
+      },
+      adminUser.id
+    );
+  }
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "catalog.create_variant",
+    targetType: "product_variant",
+    targetId: variantId,
+    metadata: { productId: parsed.productId, label: parsed.denominationLabel },
+  });
+
+  revalidatePath("/");
+  revalidatePath("/admin/products");
+  revalidatePath("/admin");
+  return { variantId };
+}
+
+export async function captureMonthlyCapitalSnapshotAction(
+  targetMonth?: string
+): Promise<CapitalSnapshotRecord[]> {
+  const adminUser = await requireAdminUser();
+  const now = new Date();
+  const month =
+    targetMonth && /^\d{4}-\d{2}$/.test(targetMonth)
+      ? targetMonth
+      : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+  const [centralOne, reloadly, catalog] = await Promise.all([
+    getCentralOneBalance(),
+    getReloadlyBalance(),
+    listCatalog(true),
+  ]);
+
+  let manualCostCents = 0;
+  for (const product of catalog) {
+    for (const variant of product.variants) {
+      if (variant.availableStock > 0 && typeof variant.unitCostCents === "number") {
+        manualCostCents += variant.availableStock * variant.unitCostCents;
+      }
+    }
+  }
+
+  const byProvider: Record<string, number> = {
+    centralone: centralOne.balanceCents ?? 0,
+    manual: manualCostCents,
+    reloadly: reloadly.balanceCents ?? 0,
+  };
+  const totalCents =
+    byProvider.centralone + byProvider.manual + byProvider.reloadly;
+
+  const updated = await saveMonthlyCapitalSnapshot(
+    {
+      month,
+      totalCents,
+      byProvider,
+      capturedAt: now.toISOString(),
+    },
+    adminUser.id
+  );
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "capital.capture_monthly_snapshot",
+    targetType: "store_settings",
+    targetId: month,
+    metadata: { month, totalCents, byProvider },
+  });
+
+  revalidatePath("/admin");
+  return updated;
 }

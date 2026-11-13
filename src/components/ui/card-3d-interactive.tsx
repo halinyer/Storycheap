@@ -14,6 +14,7 @@ interface Card3DInteractiveProps {
   discountPercentage?: number;
   className?: string;
   showHangerSlot?: boolean;
+  minimal?: boolean;
 }
 
 export function Card3DInteractive({
@@ -25,6 +26,7 @@ export function Card3DInteractive({
   discountPercentage,
   className = "",
   showHangerSlot = false,
+  minimal = false,
 }: Card3DInteractiveProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [isHovered, setIsHovered] = useState(false);
@@ -125,18 +127,22 @@ export function Card3DInteractive({
         onTouchMove={handleTouchMove}
         onTouchEnd={handleMouseLeave}
         style={{ perspective: 1200 }}
-        className="relative w-full max-w-[340px] sm:max-w-[380px] cursor-grab active:cursor-grabbing p-4"
+        className={`relative w-full ${
+          minimal ? "max-w-[240px] p-0" : "max-w-[340px] sm:max-w-[380px] p-4"
+        } cursor-grab active:cursor-grabbing`}
       >
         {/* Dynamic Ambient Glow behind the card */}
-        <motion.div
-          animate={{
-            scale: isHovered ? 1.15 : 1,
-            opacity: isHovered ? 0.45 : 0.25,
-          }}
-          transition={{ duration: 0.4 }}
-          className="absolute inset-4 -z-10 rounded-[36px] blur-3xl pointer-events-none transition-colors duration-500"
-          style={{ background: accentColor }}
-        />
+        {!minimal && (
+          <motion.div
+            animate={{
+              scale: isHovered ? 1.15 : 1,
+              opacity: isHovered ? 0.45 : 0.25,
+            }}
+            transition={{ duration: 0.4 }}
+            className="absolute inset-4 -z-10 rounded-[36px] blur-3xl pointer-events-none transition-colors duration-500"
+            style={{ background: accentColor }}
+          />
+        )}
 
         {/* 3D Card Shell */}
         <motion.div
@@ -158,7 +164,11 @@ export function Card3DInteractive({
             transformStyle: "preserve-3d",
             willChange: "transform",
           }}
-          className="relative rounded-[28px] sm:rounded-[32px] p-2 sm:p-2.5 bg-gradient-to-b from-slate-800/90 via-slate-900/95 to-slate-950 border border-white/20 shadow-2xl overflow-hidden backdrop-blur-xl"
+          className={`relative ${
+            minimal
+              ? "rounded-2xl p-1.5 bg-[#0d0f17] border border-white/15 shadow-[0_20px_40px_-15px_rgba(0,0,0,0.85)]"
+              : "rounded-[28px] sm:rounded-[32px] p-2 sm:p-2.5 bg-gradient-to-b from-slate-800/90 via-slate-900/95 to-slate-950 border border-white/20 shadow-2xl backdrop-blur-xl"
+          } overflow-hidden`}
         >
           {/* Subtle Outer Cardboard Bevel Rim */}
           <div className="absolute inset-0 rounded-[28px] sm:rounded-[32px] border border-white/20 pointer-events-none" />
@@ -178,14 +188,18 @@ export function Card3DInteractive({
           {/* Card Packaging Main Image Container */}
           <div
             style={{ transform: "translateZ(10px)" }}
-            className="relative z-10 w-full rounded-2xl overflow-hidden bg-slate-950 flex items-center justify-center p-2 border border-white/10"
+            className={`relative z-10 w-full overflow-hidden bg-slate-950 flex items-center justify-center ${
+              minimal ? "rounded-xl p-0" : "rounded-2xl p-2 border border-white/10"
+            }`}
           >
             {/* The Authentic Physical Card Image */}
             <img
               src={imageSrc}
               alt={cardName}
               draggable={false}
-              className="w-full max-h-[380px] sm:max-h-[440px] object-contain rounded-xl drop-shadow-[0_20px_35px_rgba(0,0,0,0.85)] pointer-events-none"
+              className={`w-full ${
+                minimal ? "max-h-[240px]" : "max-h-[380px] sm:max-h-[440px]"
+              } object-contain rounded-xl drop-shadow-[0_20px_35px_rgba(0,0,0,0.85)] pointer-events-none`}
             />
 
             {/* Specular Light Flare / Reflection Sheen Overlay */}
@@ -223,74 +237,80 @@ export function Card3DInteractive({
           </div>
 
           {/* Floating 3D Elements that pop out in Z space */}
-          {/* Top Left: Authentic Retail Voucher Hologram Stamp */}
-          <div
-            style={{ transform: "translateZ(35px)" }}
-            className="absolute top-7 left-6 z-30 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-950/85 backdrop-blur-md border border-white/25 text-[10px] font-black uppercase tracking-wider text-slate-200 shadow-xl pointer-events-none"
-          >
-            <ShieldCheck className="w-3 h-3 text-emerald-400" />
-            <span>Retail Oficial</span>
-          </div>
+          {!minimal && (
+            <>
+              {/* Top Left: Authentic Retail Voucher Hologram Stamp */}
+              <div
+                style={{ transform: "translateZ(35px)" }}
+                className="absolute top-7 left-6 z-30 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-950/85 backdrop-blur-md border border-white/25 text-[10px] font-black uppercase tracking-wider text-slate-200 shadow-xl pointer-events-none"
+              >
+                <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                <span>Retail Oficial</span>
+              </div>
 
-          {/* Top Right: Region Badge */}
-          {region && (
-            <div
-              style={{ transform: "translateZ(35px)" }}
-              className="absolute top-7 right-6 z-30 px-2.5 py-1 rounded-full bg-slate-950/85 backdrop-blur-md border border-white/25 text-[10px] font-black uppercase tracking-wider text-sky-300 shadow-xl pointer-events-none"
-            >
-              {region}
-            </div>
+              {/* Top Right: Region Badge */}
+              {region && (
+                <div
+                  style={{ transform: "translateZ(35px)" }}
+                  className="absolute top-7 right-6 z-30 px-2.5 py-1 rounded-full bg-slate-950/85 backdrop-blur-md border border-white/25 text-[10px] font-black uppercase tracking-wider text-sky-300 shadow-xl pointer-events-none"
+                >
+                  {region}
+                </div>
+              )}
+
+              {/* Bottom Right: Discount Flag if present */}
+              {discountPercentage && discountPercentage > 0 && (
+                <div
+                  style={{ transform: "translateZ(38px)" }}
+                  className="absolute bottom-6 right-6 z-30 px-3 py-1 rounded-xl bg-emerald-500 text-slate-950 text-xs font-black uppercase tracking-wider shadow-xl shadow-emerald-500/30 pointer-events-none"
+                >
+                  -{discountPercentage}%
+                </div>
+              )}
+
+              {/* Card Bottom Bar Details */}
+              <div
+                style={{ transform: "translateZ(25px)" }}
+                className="relative z-20 mt-2 px-3 py-1.5 flex items-center justify-between text-[11px] text-slate-300 pointer-events-none"
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="font-semibold text-white">{brand}</span>
+                </div>
+                <span className="text-[10px] text-slate-400 font-mono tracking-tight">
+                  DIGITAL VOUCHER · C2P
+                </span>
+              </div>
+            </>
           )}
-
-          {/* Bottom Right: Discount Flag if present */}
-          {discountPercentage && discountPercentage > 0 && (
-            <div
-              style={{ transform: "translateZ(38px)" }}
-              className="absolute bottom-6 right-6 z-30 px-3 py-1 rounded-xl bg-emerald-500 text-slate-950 text-xs font-black uppercase tracking-wider shadow-xl shadow-emerald-500/30 pointer-events-none"
-            >
-              -{discountPercentage}%
-            </div>
-          )}
-
-          {/* Card Bottom Bar Details */}
-          <div
-            style={{ transform: "translateZ(25px)" }}
-            className="relative z-20 mt-2 px-3 py-1.5 flex items-center justify-between text-[11px] text-slate-300 pointer-events-none"
-          >
-            <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="font-semibold text-white">{brand}</span>
-            </div>
-            <span className="text-[10px] text-slate-400 font-mono tracking-tight">
-              DIGITAL VOUCHER · C2P
-            </span>
-          </div>
         </motion.div>
       </div>
 
       {/* Tactile Interaction Hint & Controls Bar */}
-      <div className="mt-4 flex items-center gap-2.5 px-4 py-2 rounded-2xl bg-slate-900/70 border border-white/10 text-xs text-slate-300 backdrop-blur-md shadow-lg">
-        <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-        <span className="font-medium text-slate-300">
-          Mueve el cursor para inclinar en 3D
-        </span>
+      {!minimal && (
+        <div className="mt-4 flex items-center gap-2.5 px-4 py-2 rounded-2xl bg-slate-900/70 border border-white/10 text-xs text-slate-300 backdrop-blur-md shadow-lg">
+          <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+          <span className="font-medium text-slate-300">
+            Mueve el cursor para inclinar en 3D
+          </span>
 
-        <span className="text-slate-600">|</span>
+          <span className="text-slate-600">|</span>
 
-        <button
-          type="button"
-          onClick={() => setAutoRotate(!autoRotate)}
-          className={`flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold transition-all ${
-            autoRotate
-              ? "bg-sky-500 text-slate-950 shadow-md shadow-sky-500/25"
-              : "bg-white/5 hover:bg-white/10 text-slate-300"
-          }`}
-          title="Activar/desactivar flotación automática"
-        >
-          <RotateCw className={`w-3 h-3 ${autoRotate ? "animate-spin" : ""}`} />
-          <span>{autoRotate ? "Pausar" : "Auto-Giro"}</span>
-        </button>
-      </div>
+          <button
+            type="button"
+            onClick={() => setAutoRotate(!autoRotate)}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold transition-all ${
+              autoRotate
+                ? "bg-sky-500 text-slate-950 shadow-md shadow-sky-500/25"
+                : "bg-white/5 hover:bg-white/10 text-slate-300"
+            }`}
+            title="Activar/desactivar flotación automática"
+          >
+            <RotateCw className={`w-3 h-3 ${autoRotate ? "animate-spin" : ""}`} />
+            <span>{autoRotate ? "Pausar" : "Auto-Giro"}</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

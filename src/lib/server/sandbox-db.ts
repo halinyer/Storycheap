@@ -39,7 +39,7 @@ export interface SandboxFulfillmentRow {
   orderItemId: string;
   orderId: string;
   userId: string | null;
-  source: "manual" | "reloadly";
+  source: "manual" | "reloadly" | "centralone";
   codeInventoryId: string | null;
   codeCiphertext: string;
   codeLast4: string;

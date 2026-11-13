@@ -121,14 +121,25 @@ export async function initiateCheckout(
     }
 
     // 2) Atomically reserve manual codes (20-min hold) whenever manual stock should back this line
-    const reloadlyCfg = await getProviderConfig("reloadly");
+    const [reloadlyCfg, centralOneCfg] = await Promise.all([
+      getProviderConfig("reloadly"),
+      getProviderConfig("centralone"),
+    ]);
     for (const line of validatedLines) {
       const canFallbackReloadly =
         Boolean(reloadlyCfg?.enabled) &&
         line.variant.sourcePriority !== "manual_only" &&
         Boolean(line.variant.reloadlyProductId);
+      const canFallbackCentralOne =
+        Boolean(centralOneCfg?.enabled) &&
+        (line.variant.sourcePriority === "manual_then_centralone" ||
+          line.variant.sourcePriority === "centralone_only") &&
+        Boolean(line.variant.centraloneProductId);
 
-      if (line.variant.sourcePriority === "reloadly_only" && canFallbackReloadly) {
+      if (
+        (line.variant.sourcePriority === "reloadly_only" && canFallbackReloadly) ||
+        (line.variant.sourcePriority === "centralone_only" && canFallbackCentralOne)
+      ) {
         continue;
       }
 
@@ -141,7 +152,10 @@ export async function initiateCheckout(
             holdMinutes: 20,
           });
         } catch {
-          if (line.variant.sourcePriority === "manual_only" || !canFallbackReloadly) {
+          if (
+            line.variant.sourcePriority === "manual_only" ||
+            (!canFallbackReloadly && !canFallbackCentralOne)
+          ) {
             throw new CheckoutValidationError(
               "OUT_OF_STOCK",
               `Lo sentimos, otro cliente acaba de reservar el último código disponible de ${line.product.name} (${line.variant.denominationLabel}).`,

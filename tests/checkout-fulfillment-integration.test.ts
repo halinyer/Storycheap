@@ -292,4 +292,85 @@ describe("Checkout -> Webhook -> Fulfillment -> Vault Integration & Concurrency"
     expect(succeeded).toHaveLength(1);
     expect(failed).toHaveLength(19);
   });
+
+  it("tracks open PARTIALLY_PAID decimals and settles to store credit when expired", async () => {
+    const checkout = await initiateCheckout({
+      email: "decimals@example.com",
+      items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+      applyStoreCredit: false,
+      paymentGateway: "zenobank",
+      sessionUser: null,
+      ipAddress: null,
+    });
+
+    const checkoutId = checkout.order.gatewayCheckoutId!;
+    const futureIso = new Date(Date.now() + 10 * 60_000).toISOString();
+
+    // Phase 1: Customer misses a few cents while checkout is still OPEN
+    setSandboxZenoCheckout({
+      id: checkoutId,
+      orderId: checkout.order.id,
+      priceCurrency: "USD",
+      priceAmount: "10.50",
+      paidAmount: "10.35",
+      status: "PARTIALLY_PAID",
+      expiresAt: futureIso,
+      checkoutUrl: checkout.checkoutUrl,
+      createdAt: checkout.order.createdAt,
+      successRedirectUrl: null,
+    });
+
+    const openRes = await processVerifiedWebhookEvent({
+      gateway: "zenobank",
+      eventId: "evt_partial_open_1",
+      eventType: "checkout.partially_paid",
+      orderId: checkout.order.id,
+      checkoutId,
+      priceCents: 1050,
+      paidCents: 1035,
+      status: "PARTIALLY_PAID",
+      expiresAt: futureIso,
+      rawPayload: {},
+    });
+
+    expect(openRes.outcome).toBe("partial_pending");
+    const pendingOrder = await getOrderById(checkout.order.id);
+    expect(pendingOrder?.status).toBe("PENDING_PAYMENT");
+    expect(pendingOrder?.paidCents).toBe(1035);
+    expect(pendingOrder?.fulfillments.length).toBe(0);
+
+    // Phase 2: Checkout expires in PARTIALLY_PAID state -> convert 1035 cents to store credit
+    const pastIso = new Date(Date.now() - 60_000).toISOString();
+    setSandboxZenoCheckout({
+      id: checkoutId,
+      orderId: checkout.order.id,
+      priceCurrency: "USD",
+      priceAmount: "10.50",
+      paidAmount: "10.35",
+      status: "PARTIALLY_PAID",
+      expiresAt: pastIso,
+      checkoutUrl: checkout.checkoutUrl,
+      createdAt: checkout.order.createdAt,
+      successRedirectUrl: null,
+    });
+
+    const expiredRes = await processVerifiedWebhookEvent({
+      gateway: "zenobank",
+      eventId: "evt_partial_expired_1",
+      eventType: "checkout.partially_paid",
+      orderId: checkout.order.id,
+      checkoutId,
+      priceCents: 1050,
+      paidCents: 1035,
+      status: "PARTIALLY_PAID",
+      expiresAt: pastIso,
+      rawPayload: {},
+    });
+
+    expect(expiredRes.outcome).toBe("partial_underpaid_credited");
+    const settledOrder = await getOrderById(checkout.order.id);
+    expect(settledOrder?.status).toBe("REFUNDED_CREDIT");
+    expect(settledOrder?.fulfillments.length).toBe(0);
+    expect(await getUserCreditBalanceCents(settledOrder!.userId!)).toBe(1035);
+  });
 });

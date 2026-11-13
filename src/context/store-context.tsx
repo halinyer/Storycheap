@@ -98,11 +98,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [selectedRegion, setSelectedRegion] = useState<Region | "ALL">("ALL");
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
 
-  const cartItems = useSyncExternalStore(
+  const [hasHydrated, setHasHydrated] = useState(false);
+  useEffect(() => {
+    setHasHydrated(true);
+  }, []);
+
+  const rawCartItems = useSyncExternalStore(
     subscribeCart,
     getCartSnapshot,
     () => EMPTY_CART
   );
+  const cartItems = hasHydrated ? rawCartItems : EMPTY_CART;
 
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null);
   const [creditBalanceCents, setCreditBalanceCents] = useState(0);

@@ -29,6 +29,23 @@ export function isReloadlyConfigured(): boolean {
   );
 }
 
+export function isCentralOneConfigured(): boolean {
+  return Boolean(process.env.CENTRAL_ONE_API_KEY?.trim());
+}
+
+export function getCentralOneApiKey(): string | null {
+  return process.env.CENTRAL_ONE_API_KEY?.trim() || null;
+}
+
+export function getCentralOneWebhookSecret(): string | null {
+  return process.env.CENTRAL_ONE_WEBHOOK_SECRET?.trim() || null;
+}
+
+export function getCentralOneBaseUrl(): string {
+  const configured = process.env.CENTRAL_ONE_BASE_URL?.trim();
+  return (configured || "https://portal.centraloneglobal.com/api/v1").replace(/\/+$/, "");
+}
+
 export function isResendConfigured(): boolean {
   return Boolean(process.env.RESEND_API_KEY?.trim());
 }

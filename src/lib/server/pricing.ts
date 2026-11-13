@@ -1,6 +1,11 @@
 import "server-only";
 import type { ProductDTO, ProductVariantDTO } from "@/types";
-import { getProviderConfig, getVariantsLookupByIds } from "./repository";
+import {
+  getProviderConfig,
+  getVariantPricingMetaMap,
+  getVariantsLookupByIds,
+} from "./repository";
+import { getCentralOneBalance } from "./suppliers/centralone";
 
 export interface CartLineInput {
   variantId: string;
@@ -76,8 +81,14 @@ export async function validateAndPriceCart(
   }
 
   const variantIds = Array.from(mergedQty.keys());
-  const lookup = await getVariantsLookupByIds(variantIds);
-  const reloadlyCfg = await getProviderConfig("reloadly");
+  const [lookup, reloadlyCfg, centralOneCfg] = await Promise.all([
+    getVariantsLookupByIds(variantIds),
+    getProviderConfig("reloadly"),
+    getProviderConfig("centralone"),
+  ]);
+
+  let liveCentralOneBalanceTenths: number | null = null;
+  let pricingMetaMap: Record<string, { exactCostUsd?: string | null }> | null = null;
 
   const validatedLines: ValidatedCheckoutLine[] = [];
   let subtotalCents = 0;
@@ -93,17 +104,64 @@ export async function validateAndPriceCart(
     }
 
     const { product, variant } = found;
-    const canFallbackReloadly =
-      Boolean(reloadlyCfg?.enabled) &&
-      variant.sourcePriority !== "manual_only" &&
-      Boolean(variant.reloadlyProductId);
+    const csvAvailable =
+      variant.sourcePriority === "centralone_only" ||
+      variant.sourcePriority === "reloadly_only"
+        ? 0
+        : variant.availableStock;
+    const deficit = Math.max(0, quantity - csvAvailable);
 
-    if (variant.availableStock < quantity && !canFallbackReloadly) {
-      throw new CheckoutValidationError(
-        "OUT_OF_STOCK",
-        `Stock insuficiente para ${product.name} (${variant.denominationLabel}). Disponibles: ${variant.availableStock}.`,
-        409
-      );
+    if (deficit > 0) {
+      const canFallbackReloadly =
+        Boolean(reloadlyCfg?.enabled) &&
+        (variant.sourcePriority === "manual_then_reloadly" ||
+          variant.sourcePriority === "reloadly_only") &&
+        Boolean(variant.reloadlyProductId);
+
+      const canUseCentralOne =
+        Boolean(centralOneCfg?.enabled) &&
+        (variant.sourcePriority === "manual_then_centralone" ||
+          variant.sourcePriority === "centralone_only") &&
+        Boolean(variant.centraloneProductId);
+
+      if (canUseCentralOne) {
+        if (liveCentralOneBalanceTenths === null) {
+          const [bal, meta] = await Promise.all([
+            getCentralOneBalance(),
+            getVariantPricingMetaMap(),
+          ]);
+          liveCentralOneBalanceTenths =
+            bal.healthy && bal.balanceCents !== null ? bal.balanceCents * 100 : 0;
+          pricingMetaMap = meta;
+        }
+
+        const exactStr = pricingMetaMap?.[variant.id]?.exactCostUsd;
+        const unitTenths =
+          exactStr && /^\d+(\.\d+)?$/.test(exactStr.trim())
+            ? Math.round(Number.parseFloat(exactStr.trim()) * 10_000)
+            : typeof variant.unitCostCents === "number" && variant.unitCostCents > 0
+              ? variant.unitCostCents * 100
+              : 1; // minimal non-zero cost when uncosted, still blocked if balance is $0
+
+        const requiredTenths = unitTenths * deficit;
+        if (liveCentralOneBalanceTenths < requiredTenths || liveCentralOneBalanceTenths <= 0) {
+          const affordableUnits =
+            unitTenths > 0 ? Math.floor(liveCentralOneBalanceTenths / unitTenths) : 0;
+          const totalAvailable = csvAvailable + affordableUnits;
+          throw new CheckoutValidationError(
+            "OUT_OF_STOCK",
+            `Stock insuficiente para ${product.name} (${variant.denominationLabel}). Disponibles: ${totalAvailable}.`,
+            409
+          );
+        }
+        liveCentralOneBalanceTenths -= requiredTenths;
+      } else if (!canFallbackReloadly) {
+        throw new CheckoutValidationError(
+          "OUT_OF_STOCK",
+          `Stock insuficiente para ${product.name} (${variant.denominationLabel}). Disponibles: ${csvAvailable}.`,
+          409
+        );
+      }
     }
 
     const lineTotalCents = variant.salePriceCents * quantity;

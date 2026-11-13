@@ -2,6 +2,7 @@ import "server-only";
 import crypto from "crypto";
 import type {
   AuditLogEntryDTO,
+  Category,
   CreditLedgerEntryDTO,
   CreditReason,
   CustomerSummaryDTO,
@@ -15,6 +16,7 @@ import type {
   ProductDTO,
   ProductVariantDTO,
   ProviderConfigDTO,
+  Region,
   RevealedCodeDTO,
   SourcePriority,
   WebhookEventDTO,
@@ -31,6 +33,10 @@ import {
 } from "./sandbox-db";
 import { canTransitionOrder } from "./state-machine";
 import { getSupabaseAdmin } from "./supabase-admin";
+import {
+  computeCentralOneUnitCapacity,
+  getCachedCentralOneBalanceCents,
+} from "./suppliers/centralone";
 
 function assertDbOrSandbox() {
   const admin = getSupabaseAdmin();
@@ -84,6 +90,7 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
   let varQuery = ctx.admin
     .from("product_variants")
     .select("*")
+    .order("sale_price_cents", { ascending: true })
     .order("face_value_cents", { ascending: true });
   if (!includeInactive) {
     varQuery = varQuery.eq("active", true);
@@ -106,19 +113,62 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
   }
   const manualEnabled = providerMap.get("manual_inventory") ?? true;
   const reloadlyEnabled = providerMap.get("reloadly") ?? false;
+  const centralOneEnabled = providerMap.get("centralone") ?? false;
 
   const stockMap = new Map<string, number>();
   for (const row of stockRows ?? []) {
     stockMap.set(row.variant_id, Number(row.manual_available_count ?? 0));
   }
 
+  const anyUsesCentralOne =
+    centralOneEnabled &&
+    (variants ?? []).some(
+      (v) =>
+        (v.source_priority === "manual_then_centralone" ||
+          v.source_priority === "centralone_only") &&
+        Boolean(v.centralone_product_id)
+    );
+
+  const [centralOneBalanceCents, pricingMetaMap] = anyUsesCentralOne
+    ? await Promise.all([
+        getCachedCentralOneBalanceCents(),
+        getVariantPricingMetaMap(),
+      ])
+    : [null, {} as Record<string, VariantPricingMeta>];
+
   const variantsByProduct = new Map<string, ProductVariantDTO[]>();
   for (const v of variants ?? []) {
     const manualCount = manualEnabled ? stockMap.get(v.id) ?? 0 : 0;
     const reloadlyAvail =
       reloadlyEnabled &&
-      v.source_priority !== "manual_only" &&
+      (v.source_priority === "manual_then_reloadly" ||
+        v.source_priority === "reloadly_only") &&
       Boolean(v.reloadly_product_id);
+
+    const usesCentralOne =
+      centralOneEnabled &&
+      (v.source_priority === "manual_then_centralone" ||
+        v.source_priority === "centralone_only") &&
+      Boolean(v.centralone_product_id);
+
+    const c1Capacity = usesCentralOne
+      ? computeCentralOneUnitCapacity(
+          centralOneBalanceCents,
+          v.unit_cost_cents ?? null,
+          pricingMetaMap[v.id]?.exactCostUsd
+        )
+      : null;
+
+    const centralOneAvail =
+      usesCentralOne &&
+      (c1Capacity === null
+        ? centralOneBalanceCents !== null && centralOneBalanceCents > 0
+        : c1Capacity > 0);
+
+    const isUnboundedApi = reloadlyAvail || (usesCentralOne && c1Capacity === null);
+    const deliverableStock = isUnboundedApi
+      ? null
+      : manualCount + (c1Capacity ?? 0);
 
     const dto: ProductVariantDTO = {
       id: v.id,
@@ -130,10 +180,13 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       currency: v.currency,
       sourcePriority: v.source_priority as SourcePriority,
       reloadlyProductId: v.reloadly_product_id ?? null,
+      centraloneProductId: v.centralone_product_id ?? null,
       lowStockThreshold: v.low_stock_threshold,
       active: Boolean(v.active),
       availableStock: manualCount,
-      inStock: manualCount > 0 || reloadlyAvail,
+      supplierStock: usesCentralOne ? c1Capacity : null,
+      deliverableStock,
+      inStock: manualCount > 0 || reloadlyAvail || centralOneAvail,
     };
     const arr = variantsByProduct.get(v.product_id) ?? [];
     arr.push(dto);
@@ -184,11 +237,13 @@ export async function getVariantsLookupByIds(
 export async function updateVariantAdmin(
   variantId: string,
   patch: Partial<{
+    denominationLabel: string;
     salePriceCents: number;
     unitCostCents: number | null;
     faceValueCents: number;
     sourcePriority: SourcePriority;
     reloadlyProductId: number | null;
+    centraloneProductId: string | null;
     lowStockThreshold: number;
     active: boolean;
   }>
@@ -199,11 +254,15 @@ export async function updateVariantAdmin(
     for (const prod of state.products) {
       const target = prod.variants.find((v) => v.id === variantId);
       if (target) {
+        if (patch.denominationLabel !== undefined)
+          target.denominationLabel = patch.denominationLabel;
         if (patch.salePriceCents !== undefined) target.salePriceCents = patch.salePriceCents;
         if (patch.unitCostCents !== undefined) target.unitCostCents = patch.unitCostCents;
         if (patch.faceValueCents !== undefined) target.faceValueCents = patch.faceValueCents;
         if (patch.sourcePriority !== undefined) target.sourcePriority = patch.sourcePriority;
         if (patch.reloadlyProductId !== undefined) target.reloadlyProductId = patch.reloadlyProductId;
+        if (patch.centraloneProductId !== undefined)
+          target.centraloneProductId = patch.centraloneProductId;
         if (patch.lowStockThreshold !== undefined) target.lowStockThreshold = patch.lowStockThreshold;
         if (patch.active !== undefined) target.active = patch.active;
         return;
@@ -213,11 +272,15 @@ export async function updateVariantAdmin(
   }
 
   const dbPatch: Record<string, unknown> = {};
+  if (patch.denominationLabel !== undefined)
+    dbPatch.denomination_label = patch.denominationLabel;
   if (patch.salePriceCents !== undefined) dbPatch.sale_price_cents = patch.salePriceCents;
   if (patch.unitCostCents !== undefined) dbPatch.unit_cost_cents = patch.unitCostCents;
   if (patch.faceValueCents !== undefined) dbPatch.face_value_cents = patch.faceValueCents;
   if (patch.sourcePriority !== undefined) dbPatch.source_priority = patch.sourcePriority;
   if (patch.reloadlyProductId !== undefined) dbPatch.reloadly_product_id = patch.reloadlyProductId;
+  if (patch.centraloneProductId !== undefined)
+    dbPatch.centralone_product_id = patch.centraloneProductId;
   if (patch.lowStockThreshold !== undefined) dbPatch.low_stock_threshold = patch.lowStockThreshold;
   if (patch.active !== undefined) dbPatch.active = patch.active;
 
@@ -226,6 +289,227 @@ export async function updateVariantAdmin(
     .update(dbPatch)
     .eq("id", variantId);
   if (error) throw error;
+}
+
+export async function updateProductAdmin(
+  productId: string,
+  patch: Partial<{ name: string; region: Region; category: Category }>
+): Promise<void> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const target = getSandboxState().products.find((p) => p.id === productId);
+    if (!target) throw new Error(`Product not found: ${productId}`);
+    if (patch.name !== undefined) target.name = patch.name;
+    if (patch.region !== undefined) target.region = patch.region;
+    if (patch.category !== undefined) target.category = patch.category;
+    return;
+  }
+
+  const dbPatch: Record<string, unknown> = {};
+  if (patch.name !== undefined) dbPatch.name = patch.name;
+  if (patch.region !== undefined) dbPatch.region = patch.region;
+  if (patch.category !== undefined) dbPatch.category = patch.category;
+
+  const { error } = await ctx.admin
+    .from("products")
+    .update(dbPatch)
+    .eq("id", productId);
+  if (error) throw error;
+}
+
+export async function toggleProductActiveAdmin(
+  productId: string,
+  active: boolean
+): Promise<void> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const target = getSandboxState().products.find((p) => p.id === productId);
+    if (!target) throw new Error(`Product not found: ${productId}`);
+    target.active = active;
+    return;
+  }
+
+  const { error } = await ctx.admin
+    .from("products")
+    .update({ active })
+    .eq("id", productId);
+  if (error) throw error;
+}
+
+export async function createVariantAdmin(input: {
+  productId: string;
+  denominationLabel: string;
+  faceValueCents: number;
+  salePriceCents: number;
+  unitCostCents?: number | null;
+  sourcePriority: SourcePriority;
+  centraloneProductId?: string | null;
+  reloadlyProductId?: number | null;
+  lowStockThreshold?: number;
+  active?: boolean;
+}): Promise<string> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const state = getSandboxState();
+    const target = state.products.find((p) => p.id === input.productId);
+    if (!target) throw new Error(`Product not found: ${input.productId}`);
+    const id = crypto.randomUUID();
+    target.variants.push({
+      id,
+      productId: target.id,
+      denominationLabel: input.denominationLabel,
+      faceValueCents: input.faceValueCents,
+      salePriceCents: input.salePriceCents,
+      unitCostCents: input.unitCostCents ?? null,
+      currency: "USD",
+      sourcePriority: input.sourcePriority,
+      reloadlyProductId: input.reloadlyProductId ?? null,
+      centraloneProductId: input.centraloneProductId ?? null,
+      lowStockThreshold: input.lowStockThreshold ?? 3,
+      active: input.active ?? true,
+      availableStock: 0,
+      inStock: false,
+    });
+    return id;
+  }
+
+  const { data, error } = await ctx.admin
+    .from("product_variants")
+    .insert({
+      product_id: input.productId,
+      denomination_label: input.denominationLabel,
+      face_value_cents: input.faceValueCents,
+      sale_price_cents: input.salePriceCents,
+      unit_cost_cents: input.unitCostCents ?? null,
+      currency: "USD",
+      source_priority: input.sourcePriority,
+      centralone_product_id: input.centraloneProductId ?? null,
+      reloadly_product_id: input.reloadlyProductId ?? null,
+      low_stock_threshold: input.lowStockThreshold ?? 3,
+      active: input.active ?? true,
+    })
+    .select("id")
+    .single();
+  if (error || !data) throw error ?? new Error("No se pudo crear la variante.");
+  return data.id as string;
+}
+
+function buildProductSlug(name: string, region: string): string {
+  const base = `${name}-${region}`
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return `${base || "gift-card"}-${crypto.randomUUID().slice(0, 4)}`;
+}
+
+const CATEGORY_DEFAULT_GRADIENTS: Record<string, { accent: string; gradient: string }> = {
+  gaming: { accent: "#0ea5e9", gradient: "from-sky-900 to-slate-950" },
+  streaming: { accent: "#e11d48", gradient: "from-rose-900 to-slate-950" },
+  shopping: { accent: "#f59e0b", gradient: "from-amber-900 to-slate-950" },
+  crypto: { accent: "#10b981", gradient: "from-emerald-900 to-slate-950" },
+};
+
+export async function createProductWithVariantAdmin(input: {
+  name: string;
+  brand?: string;
+  category: "gaming" | "streaming" | "shopping" | "crypto";
+  region: "USA" | "Global" | "Latam" | "Europa";
+  description?: string;
+  imageUrl?: string;
+  denominationLabel: string;
+  faceValueCents: number;
+  salePriceCents: number;
+  unitCostCents?: number | null;
+  sourcePriority: SourcePriority;
+  centraloneProductId?: string | null;
+  reloadlyProductId?: number | null;
+  active?: boolean;
+}): Promise<{ productId: string; variantId: string }> {
+  const ctx = assertDbOrSandbox();
+  const cleanName = input.name.trim();
+  const cleanBrand = (input.brand || cleanName.split(" ")[0] || cleanName).trim();
+  const slug = buildProductSlug(cleanName, input.region);
+  const style = CATEGORY_DEFAULT_GRADIENTS[input.category] ?? CATEGORY_DEFAULT_GRADIENTS.gaming;
+  const imageUrl = input.imageUrl?.trim() || "/cards/steam.png";
+  const description =
+    input.description?.trim() ||
+    `Tarjeta digital oficial ${cleanName} (${input.region}) con entrega inmediata.`;
+
+  if (ctx.mode === "sandbox") {
+    const productId = crypto.randomUUID();
+    getSandboxState().products.unshift({
+      id: productId,
+      slug,
+      name: cleanName,
+      brand: cleanBrand,
+      category: input.category,
+      region: input.region,
+      regionWarning: null,
+      description,
+      redemptionSteps: ["Copia el código digital en tu cuenta.", "Canjea en la tienda oficial."],
+      terms: "Entrega digital verificada. Sin devoluciones tras revelar el código.",
+      imageUrl,
+      accentColor: style.accent,
+      gradient: style.gradient,
+      active: input.active ?? true,
+      isPopular: false,
+      variants: [],
+    });
+    const variantId = await createVariantAdmin({
+      productId,
+      denominationLabel: input.denominationLabel,
+      faceValueCents: input.faceValueCents,
+      salePriceCents: input.salePriceCents,
+      unitCostCents: input.unitCostCents,
+      sourcePriority: input.sourcePriority,
+      centraloneProductId: input.centraloneProductId,
+      reloadlyProductId: input.reloadlyProductId,
+      active: input.active ?? true,
+    });
+    return { productId, variantId };
+  }
+
+  const { data: prodRow, error: prodErr } = await ctx.admin
+    .from("products")
+    .insert({
+      slug,
+      name: cleanName,
+      brand: cleanBrand,
+      category: input.category,
+      region: input.region,
+      description,
+      redemption_steps: [
+        "Copia tu código digital desde Mis Compras.",
+        "Canjéalo directamente en tu cuenta oficial.",
+      ],
+      terms: "Código digital de un solo uso.",
+      image_url: imageUrl,
+      accent_color: style.accent,
+      gradient: style.gradient,
+      active: input.active ?? true,
+      is_popular: false,
+    })
+    .select("id")
+    .single();
+  if (prodErr || !prodRow) throw prodErr ?? new Error("No se pudo crear el producto.");
+
+  const productId = prodRow.id as string;
+  const variantId = await createVariantAdmin({
+    productId,
+    denominationLabel: input.denominationLabel,
+    faceValueCents: input.faceValueCents,
+    salePriceCents: input.salePriceCents,
+    unitCostCents: input.unitCostCents,
+    sourcePriority: input.sourcePriority,
+    centraloneProductId: input.centraloneProductId,
+    reloadlyProductId: input.reloadlyProductId,
+    active: input.active ?? true,
+  });
+
+  return { productId, variantId };
 }
 
 // ============================================================================
@@ -871,6 +1155,127 @@ export async function setBsRateCents(
   if (error) throw error;
 }
 
+export interface CapitalSnapshotRecord {
+  month: string; // YYYY-MM
+  totalCents: number;
+  byProvider: Record<string, number>;
+  capturedAt: string;
+}
+
+const sandboxCapitalSnapshots: CapitalSnapshotRecord[] = [];
+
+export async function getMonthlyCapitalSnapshots(): Promise<CapitalSnapshotRecord[]> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    return [...sandboxCapitalSnapshots].sort((a, b) => b.month.localeCompare(a.month));
+  }
+
+  const { data, error } = await ctx.admin
+    .from("store_settings")
+    .select("value")
+    .eq("key", "monthly_capital_snapshots")
+    .maybeSingle();
+
+  if (error || !data) return [];
+  const rawList = (data.value as { snapshots?: unknown } | null)?.snapshots;
+  if (!Array.isArray(rawList)) return [];
+
+  return rawList
+    .filter(
+      (item): item is CapitalSnapshotRecord =>
+        Boolean(item) &&
+        typeof (item as CapitalSnapshotRecord).month === "string" &&
+        typeof (item as CapitalSnapshotRecord).totalCents === "number"
+    )
+    .sort((a, b) => b.month.localeCompare(a.month));
+}
+
+export async function saveMonthlyCapitalSnapshot(
+  snapshot: CapitalSnapshotRecord,
+  updatedBy?: string | null
+): Promise<CapitalSnapshotRecord[]> {
+  const existing = await getMonthlyCapitalSnapshots();
+  const next = [
+    snapshot,
+    ...existing.filter((item) => item.month !== snapshot.month),
+  ].sort((a, b) => b.month.localeCompare(a.month));
+
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    sandboxCapitalSnapshots.splice(0, sandboxCapitalSnapshots.length, ...next);
+    return next;
+  }
+
+  const { error } = await ctx.admin
+    .from("store_settings")
+    .upsert({
+      key: "monthly_capital_snapshots",
+      value: { snapshots: next },
+      updated_by: updatedBy ?? null,
+    });
+  if (error) throw error;
+  return next;
+}
+
+export interface VariantPricingMeta {
+  exactCostUsd?: string | null;
+  centraloneProductName?: string | null;
+  centraloneSku?: string | null;
+  centraloneRegion?: string | null;
+}
+
+const sandboxVariantPricingMeta: Record<string, VariantPricingMeta> = {};
+
+/** Reads per-variant 4-decimal cost and linked Central One display metadata from store_settings. */
+export async function getVariantPricingMetaMap(): Promise<
+  Record<string, VariantPricingMeta>
+> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    return { ...sandboxVariantPricingMeta };
+  }
+
+  const { data, error } = await ctx.admin
+    .from("store_settings")
+    .select("value")
+    .eq("key", "variant_pricing_meta")
+    .maybeSingle();
+
+  if (error || !data) return {};
+  const map = (data.value as { variants?: Record<string, VariantPricingMeta> } | null)
+    ?.variants;
+  return map && typeof map === "object" ? map : {};
+}
+
+/** Upserts per-variant 4-decimal cost and Central One display metadata in store_settings. */
+export async function saveVariantPricingMeta(
+  variantId: string,
+  meta: VariantPricingMeta,
+  updatedBy?: string | null
+): Promise<void> {
+  const existing = await getVariantPricingMetaMap();
+  const next: Record<string, VariantPricingMeta> = {
+    ...existing,
+    [variantId]: {
+      ...(existing[variantId] ?? {}),
+      ...meta,
+    },
+  };
+
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    Object.assign(sandboxVariantPricingMeta, next);
+    return;
+  }
+
+  const { error } = await ctx.admin.from("store_settings").upsert({
+    key: "variant_pricing_meta",
+    value: { variants: next },
+    updated_by: updatedBy ?? null,
+  });
+  if (error) throw error;
+}
+
 export async function createOrderWithItems(
   input: CreateOrderInput
 ): Promise<OrderDTO> {
@@ -1021,7 +1426,7 @@ export async function getOrderById(orderId: string): Promise<OrderDTO | null> {
   const { data: fulfillments } = await ctx.admin
     .from("fulfillments")
     .select(
-      "id, order_item_id, order_id, source, code_last4, revealed_at, created_at"
+      "id, order_item_id, order_id, source, code_last4, supplier_tx_id, revealed_at, created_at"
     )
     .eq("order_id", o.id)
     .order("created_at", { ascending: true });
@@ -1080,6 +1485,7 @@ export async function getOrderById(orderId: string): Promise<OrderDTO | null> {
         region: meta?.region ?? "USA",
         source: f.source,
         codeLast4: f.code_last4,
+        supplierTxId: f.supplier_tx_id ?? null,
         revealedAt: f.revealed_at,
         createdAt: f.created_at,
       };
@@ -1231,6 +1637,34 @@ export async function markOrderAttentionFlag(
   if (error) throw error;
 }
 
+export async function updateOrderPartialPaymentCents(
+  orderId: string,
+  paidCents: number
+): Promise<void> {
+  if (!Number.isFinite(paidCents) || paidCents <= 0) return;
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const order = getSandboxState().orders.find((o) => o.id === orderId);
+    if (
+      order &&
+      (order.status === "PENDING_PAYMENT" || order.status === "CREATED") &&
+      paidCents > order.paidCents
+    ) {
+      order.paidCents = paidCents;
+      order.updatedAt = new Date().toISOString();
+    }
+    return;
+  }
+
+  const { error } = await ctx.admin
+    .from("orders")
+    .update({ paid_cents: paidCents })
+    .eq("id", orderId)
+    .in("status", ["PENDING_PAYMENT", "CREATED"])
+    .lt("paid_cents", paidCents);
+  if (error) throw error;
+}
+
 export async function markOrderItemProgress(
   orderItemId: string,
   patch: { deliveredCount: number; status: OrderItemStatus }
@@ -1262,7 +1696,7 @@ export async function insertFulfillmentRecord(params: {
   orderItemId: string;
   orderId: string;
   userId: string | null;
-  source: "manual" | "reloadly";
+  source: "manual" | "reloadly" | "centralone";
   codeInventoryId: string | null;
   codeCiphertext: string;
   codeLast4: string;
@@ -1751,4 +2185,161 @@ export async function listAuditLogsAdmin(limit = 100): Promise<AuditLogEntryDTO[
     metadata: (r.metadata as Record<string, unknown>) ?? {},
     createdAt: r.created_at,
   }));
+}
+
+// ============================================================================
+// ASYNC SUPPLIER ORDERS (MULTI-PROVIDER TRACKING)
+// ============================================================================
+
+export interface SupplierOrderRecord {
+  id: string;
+  orderId: string;
+  orderItemId: string;
+  provider: string;
+  idempotencyKey: string;
+  externalOrderId: string | null;
+  referenceCode: string | null;
+  status: string;
+  expectedQty: number;
+  deliveredCount: number;
+  supplierUnitCostCents: number | null;
+  lastSequence: number;
+  errorMessage: string | null;
+  rawPayload: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function mapSupplierOrderRow(r: Record<string, unknown>): SupplierOrderRecord {
+  return {
+    id: String(r.id),
+    orderId: String(r.order_id),
+    orderItemId: String(r.order_item_id),
+    provider: String(r.provider),
+    idempotencyKey: String(r.idempotency_key),
+    externalOrderId: r.external_order_id ? String(r.external_order_id) : null,
+    referenceCode: r.reference_code ? String(r.reference_code) : null,
+    status: String(r.status),
+    expectedQty: Number(r.expected_qty ?? 1),
+    deliveredCount: Number(r.delivered_count ?? 0),
+    supplierUnitCostCents:
+      typeof r.supplier_unit_cost_cents === "number" ? r.supplier_unit_cost_cents : null,
+    lastSequence: Number(r.last_sequence ?? 0),
+    errorMessage: r.error_message ? String(r.error_message) : null,
+    rawPayload: (r.raw_payload as Record<string, unknown>) ?? {},
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+  };
+}
+
+export async function upsertSupplierOrder(params: {
+  orderId: string;
+  orderItemId: string;
+  provider: string;
+  idempotencyKey: string;
+  externalOrderId?: string | null;
+  referenceCode?: string | null;
+  status: string;
+  expectedQty: number;
+  deliveredCount?: number;
+  supplierUnitCostCents?: number | null;
+  lastSequence?: number;
+  errorMessage?: string | null;
+  rawPayload?: Record<string, unknown>;
+}): Promise<SupplierOrderRecord | null> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") return null;
+
+  const { data, error } = await ctx.admin
+    .from("supplier_orders")
+    .upsert(
+      {
+        order_id: params.orderId,
+        order_item_id: params.orderItemId,
+        provider: params.provider,
+        idempotency_key: params.idempotencyKey,
+        external_order_id: params.externalOrderId ?? null,
+        reference_code: params.referenceCode ?? null,
+        status: params.status,
+        expected_qty: params.expectedQty,
+        delivered_count: params.deliveredCount ?? 0,
+        supplier_unit_cost_cents: params.supplierUnitCostCents ?? null,
+        last_sequence: params.lastSequence ?? 0,
+        error_message: params.errorMessage ?? null,
+        raw_payload: params.rawPayload ?? {},
+      },
+      { onConflict: "provider,idempotency_key" }
+    )
+    .select("*")
+    .single();
+
+  if (error || !data) throw error;
+  return mapSupplierOrderRow(data as Record<string, unknown>);
+}
+
+export async function getSupplierOrderByExternalId(
+  provider: string,
+  externalOrderId: string
+): Promise<SupplierOrderRecord | null> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") return null;
+
+  const { data, error } = await ctx.admin
+    .from("supplier_orders")
+    .select("*")
+    .eq("provider", provider)
+    .eq("external_order_id", externalOrderId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data ? mapSupplierOrderRow(data as Record<string, unknown>) : null;
+}
+
+export async function listPendingSupplierOrders(
+  provider: string,
+  limit = 25
+): Promise<SupplierOrderRecord[]> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") return [];
+
+  const { data, error } = await ctx.admin
+    .from("supplier_orders")
+    .select("*")
+    .eq("provider", provider)
+    .in("status", ["pending", "confirmed", "processing"])
+    .order("created_at", { ascending: true })
+    .limit(limit);
+
+  if (error) throw error;
+  return (data ?? []).map((r) => mapSupplierOrderRow(r as Record<string, unknown>));
+}
+
+export async function updateSupplierOrderState(
+  id: string,
+  patch: Partial<{
+    status: string;
+    deliveredCount: number;
+    supplierUnitCostCents: number | null;
+    lastSequence: number;
+    errorMessage: string | null;
+    rawPayload: Record<string, unknown>;
+  }>
+) {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") return;
+
+  const dbPatch: Record<string, unknown> = {};
+  if (patch.status !== undefined) dbPatch.status = patch.status;
+  if (patch.deliveredCount !== undefined) dbPatch.delivered_count = patch.deliveredCount;
+  if (patch.supplierUnitCostCents !== undefined)
+    dbPatch.supplier_unit_cost_cents = patch.supplierUnitCostCents;
+  if (patch.lastSequence !== undefined) dbPatch.last_sequence = patch.lastSequence;
+  if (patch.errorMessage !== undefined) dbPatch.error_message = patch.errorMessage;
+  if (patch.rawPayload !== undefined) dbPatch.raw_payload = patch.rawPayload;
+
+  const { error } = await ctx.admin
+    .from("supplier_orders")
+    .update(dbPatch)
+    .eq("id", id);
+  if (error) throw error;
 }
