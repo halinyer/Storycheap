@@ -4,8 +4,68 @@ import { getSiteUrl, isResendConfigured } from "./env";
 
 function getFromEmail(): string {
   return (
-    process.env.RESEND_FROM_EMAIL?.trim() || "StoryCheap <no-reply@storycheap.com>"
+    process.env.RESEND_FROM_EMAIL?.trim() ||
+    "StoryCheap Pedidos <pedidos@storycheap.com>"
   );
+}
+
+function getReplyToEmail(): string {
+  return process.env.RESEND_REPLY_TO?.trim() || "soporte@storycheap.com";
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderEmailShell(params: {
+  badge: string;
+  title: string;
+  introHtml: string;
+  noteHtml: string;
+  ctaLabel: string;
+  ctaUrl: string;
+  footerText: string;
+}): string {
+  return `
+  <div style="margin: 0; padding: 32px 16px; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a;">
+    <div style="max-width: 560px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 25px rgba(15, 23, 42, 0.06);">
+      <div style="background: linear-gradient(135deg, #08090e 0%, #0f172a 100%); padding: 24px 28px; border-bottom: 1px solid #1e293b;">
+        <div style="font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #38bdf8; margin-bottom: 6px;">
+          ${escapeHtml(params.badge)}
+        </div>
+        <div style="font-size: 20px; font-weight: 800; color: #ffffff; letter-spacing: -0.02em;">
+          StoryCheap
+        </div>
+      </div>
+
+      <div style="padding: 28px;">
+        <h1 style="margin: 0 0 12px; font-size: 20px; line-height: 1.3; font-weight: 800; color: #0f172a;">
+          ${escapeHtml(params.title)}
+        </h1>
+        <p style="margin: 0 0 18px; font-size: 15px; line-height: 1.6; color: #334155;">
+          ${params.introHtml}
+        </p>
+
+        <div style="margin: 0 0 24px; padding: 14px 16px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; font-size: 13px; line-height: 1.5; color: #475569;">
+          ${params.noteHtml}
+        </div>
+
+        <a href="${escapeHtml(params.ctaUrl)}" style="display: inline-block; background-color: #0f172a; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 700; padding: 13px 24px; border-radius: 10px;">
+          ${escapeHtml(params.ctaLabel)}
+        </a>
+
+        <p style="margin: 24px 0 0; padding-top: 18px; border-top: 1px solid #e2e8f0; font-size: 12px; line-height: 1.5; color: #64748b;">
+          ${escapeHtml(params.footerText)} Si tienes alguna consulta, responde directamente a este correo o escríbenos a
+          <a href="mailto:soporte@storycheap.com" style="color: #0284c7; text-decoration: none; font-weight: 600;">soporte@storycheap.com</a>.
+        </p>
+      </div>
+    </div>
+  </div>`;
 }
 
 async function dispatchEmail(params: {
@@ -28,6 +88,7 @@ async function dispatchEmail(params: {
   const resend = new Resend(process.env.RESEND_API_KEY!.trim());
   const { error } = await resend.emails.send({
     from: getFromEmail(),
+    replyTo: getReplyToEmail(),
     to: params.to,
     subject: params.subject,
     html: params.html,
@@ -55,31 +116,25 @@ export async function sendOrderReadyEmail(params: {
   partial?: boolean;
 }) {
   const orderUrl = `${getSiteUrl()}/order/${params.orderId}`;
+  const safeOrderNumber = escapeHtml(params.orderNumber);
   const subject = params.partial
-    ? `Tus primeros códigos de StoryCheap están listos (${params.orderNumber})`
-    : `Tus códigos de StoryCheap están listos (${params.orderNumber})`;
+    ? `Entrega parcial disponible: Pedido ${params.orderNumber} — StoryCheap`
+    : `Pedido ${params.orderNumber} confirmado: tus códigos están listos`;
 
-  const html = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #0f172a;">
-      <h2 style="margin: 0 0 12px; font-size: 20px;">StoryCheap — Confirmación de entrega</h2>
-      <p style="margin: 0 0 16px; color: #334155; line-height: 1.5;">
-        ${
-          params.partial
-            ? `Tu orden <strong>${params.orderNumber}</strong> ya tiene códigos disponibles en tu bóveda segura mientras nuestro equipo verifica el resto.`
-            : `Tu orden <strong>${params.orderNumber}</strong> (${params.itemCount} tarjeta${params.itemCount === 1 ? "" : "s"}) ha sido confirmada y tus códigos están listos.`
-        }
-      </p>
-      <p style="margin: 0 0 20px; color: #475569; font-size: 14px;">
-        Por tu seguridad, nunca enviamos códigos en texto plano por correo. Haz clic abajo para revelarlos en tu bóveda cifrada:
-      </p>
-      <a href="${orderUrl}" style="display: inline-block; background: #0f172a; color: #ffffff; text-decoration: none; font-weight: 600; padding: 12px 22px; border-radius: 10px;">
-        Ver mi código en StoryCheap
-      </a>
-      <p style="margin: 24px 0 0; color: #64748b; font-size: 12px;">
-        ¿Necesitas ayuda? Escríbenos a soporte@storycheap.com indicando tu número de orden ${params.orderNumber}.
-      </p>
-    </div>
-  `;
+  const html = renderEmailShell({
+    badge: "Entrega Digital Segura",
+    title: params.partial
+      ? "Primeros códigos disponibles en tu bóveda"
+      : "Tu entrega digital está lista",
+    introHtml: params.partial
+      ? `Tu pedido <strong>${safeOrderNumber}</strong> ya cuenta con códigos listos en tu bóveda segura mientras completamos la validación restante.`
+      : `Confirmamos tu pago para el pedido <strong>${safeOrderNumber}</strong> (${params.itemCount} tarjeta${params.itemCount === 1 ? "" : "s"}). Ya puedes acceder a tus pines digitales.`,
+    noteHtml:
+      "Por tu seguridad, nunca enviamos códigos ni PINs en texto plano por correo electrónico. Solo tú puedes revelarlos desde tu bóveda cifrada.",
+    ctaLabel: "Acceder a mi bóveda y ver códigos",
+    ctaUrl: orderUrl,
+    footerText: `Referencia de pedido: ${params.orderNumber}.`,
+  });
 
   return dispatchEmail({
     to: params.to,
@@ -97,20 +152,23 @@ export async function sendCreditAdjustmentEmail(params: {
 }) {
   const accountUrl = `${getSiteUrl()}/account`;
   const dollars = (params.amountCents / 100).toFixed(2);
-  const subject = `Saldo a favor acreditado en StoryCheap ($${dollars} USD)`;
+  const subject = `Saldo a favor acreditado ($${dollars} USD) — StoryCheap`;
+  const safeReason = escapeHtml(params.reasonText);
+  const orderSuffix = params.orderNumber
+    ? ` correspondiente al pedido <strong>${escapeHtml(params.orderNumber)}</strong>`
+    : "";
 
-  const html = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #0f172a;">
-      <h2 style="margin: 0 0 12px; font-size: 20px;">Saldo a favor actualizado</h2>
-      <p style="margin: 0 0 16px; color: #334155; line-height: 1.5;">
-        Se acreditaron <strong>$${dollars} USD</strong> en tu saldo a favor interno${params.orderNumber ? ` (Orden ${params.orderNumber})` : ""}.
-      </p>
-      <p style="margin: 0 0 20px; color: #475569; font-size: 14px;">Motivo: ${params.reasonText}</p>
-      <a href="${accountUrl}" style="display: inline-block; background: #0f172a; color: #ffffff; text-decoration: none; font-weight: 600; padding: 12px 22px; border-radius: 10px;">
-        Ir a Mi Cuenta
-      </a>
-    </div>
-  `;
+  const html = renderEmailShell({
+    badge: "Actualización de Cuenta",
+    title: `Se acreditaron $${dollars} USD a tu saldo`,
+    introHtml: `Hemos abonado <strong>$${dollars} USD</strong> en tu saldo a favor dentro de StoryCheap${orderSuffix}. Puedes usarlo automáticamente en tu próxima compra.`,
+    noteHtml: `<strong>Motivo:</strong> ${safeReason}`,
+    ctaLabel: "Ver saldo en Mi Cuenta",
+    ctaUrl: accountUrl,
+    footerText: params.orderNumber
+      ? `Referencia de pedido: ${params.orderNumber}.`
+      : "Movimiento registrado en tu cuenta StoryCheap.",
+  });
 
   return dispatchEmail({
     to: params.to,
