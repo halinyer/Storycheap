@@ -43,6 +43,15 @@ export function isDemoSandboxEnabled(): boolean {
   return process.env.ENABLE_DEMO_SANDBOX !== "false";
 }
 
+/**
+ * Pre-launch preview: no database and no demo sandbox. The storefront renders
+ * the static catalog read-only (all variants out of stock) and checkout,
+ * login and admin stay closed. This is the safe default in production.
+ */
+export function isStorePreviewMode(): boolean {
+  return !isSupabaseAdminConfigured() && !isDemoSandboxEnabled();
+}
+
 export function getSiteUrl(): string {
   const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim();
   if (configured) return configured.replace(/\/+$/, "");

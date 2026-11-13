@@ -7,6 +7,7 @@ import {
   ORDER_ACCESS_COOKIE,
 } from "@/lib/server/order-access";
 import { CheckoutValidationError } from "@/lib/server/pricing";
+import { isStorePreviewMode } from "@/lib/server/env";
 import { checkRateLimit } from "@/lib/server/rate-limit";
 
 const checkoutSchema = z.object({
@@ -25,6 +26,13 @@ const checkoutSchema = z.object({
 });
 
 export async function POST(request: NextRequest) {
+  if (isStorePreviewMode()) {
+    return NextResponse.json(
+      { error: "Las compras se habilitarán muy pronto. ¡Gracias por tu interés!" },
+      { status: 503 }
+    );
+  }
+
   const ip =
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     request.headers.get("x-real-ip") ||

@@ -20,7 +20,8 @@ import type {
   WebhookEventDTO,
 } from "@/types";
 import { decryptCode, encryptCode, extractLast4, sha256CodeHash } from "./crypto";
-import { isDemoSandboxEnabled } from "./env";
+import { CATALOG_SEED } from "@/lib/catalog-seed";
+import { isDemoSandboxEnabled, isStorePreviewMode } from "./env";
 import {
   buildSandboxCatalogSnapshot,
   computeSandboxCustomerSummaries,
@@ -54,6 +55,16 @@ export function generateOrderNumber(): string {
 // ============================================================================
 
 export async function listCatalog(includeInactive = false): Promise<ProductDTO[]> {
+  if (isStorePreviewMode()) {
+    // Read-only preview: browsable catalog, nothing purchasable until the DB is connected.
+    return CATALOG_SEED.filter((p) => includeInactive || p.active).map((p) => ({
+      ...p,
+      redemptionSteps: [...p.redemptionSteps],
+      variants: p.variants
+        .filter((v) => includeInactive || v.active)
+        .map((v) => ({ ...v, availableStock: 0, inStock: false })),
+    }));
+  }
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") {
     return buildSandboxCatalogSnapshot(includeInactive);

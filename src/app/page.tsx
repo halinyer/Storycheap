@@ -5,6 +5,7 @@ import { CatalogFilters } from "@/components/storefront/catalog-filters";
 import { GiftCardGrid } from "@/components/storefront/gift-card-grid";
 import { HeroSection } from "@/components/storefront/hero-section";
 import { listCatalog } from "@/lib/server/repository";
+import { isStorePreviewMode } from "@/lib/server/env";
 import { CheckCircle2, Lock, ShieldCheck, Zap } from "lucide-react";
 
 async function CatalogSectionLoader() {
@@ -20,6 +21,11 @@ export default function HomePage() {
 
       {/* Catalog Section */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 pt-2">
+        {isStorePreviewMode() && (
+          <div className="mb-4 rounded-2xl bg-sky-500/10 border border-sky-500/25 px-4 py-3 text-xs text-sky-100 text-center">
+            Estamos terminando los últimos detalles. Las compras se abrirán muy pronto.
+          </div>
+        )}
         <CatalogFilters />
         <Suspense
           fallback={

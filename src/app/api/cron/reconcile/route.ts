@@ -1,5 +1,5 @@
 import { connection, NextResponse, type NextRequest } from "next/server";
-import { getCronSecret } from "@/lib/server/env";
+import { getCronSecret, isStorePreviewMode } from "@/lib/server/env";
 import { processVerifiedWebhookEvent } from "@/lib/server/fulfillment";
 import { getPaymentGateway } from "@/lib/server/payments";
 import {
@@ -20,6 +20,10 @@ export async function GET(request: NextRequest) {
       { error: "CRON_SECRET is required in production." },
       { status: 500 }
     );
+  }
+
+  if (isStorePreviewMode()) {
+    return NextResponse.json({ ok: true, skipped: "store_preview_mode" });
   }
 
   const { releasedCodes, expiredOrders } = await releaseExpiredReservations();
