@@ -1,14 +1,22 @@
 import React, { Suspense } from "react";
 import Link from "next/link";
 import { connection } from "next/server";
+import { BsRateCard } from "@/components/admin/bs-rate-card";
 import { ReconcileButton } from "@/components/admin/reconcile-button";
 import { formatCents } from "@/lib/catalog-seed";
 import {
+  getBsRateCents,
   listCatalog,
   listInventoryAdmin,
   listOrdersAdmin,
   listProviderConfigs,
 } from "@/lib/server/repository";
+import {
+  computePeriodSales,
+  formatBsCents,
+  formatBsRate,
+  getOrderSnapshot,
+} from "@/lib/server/sales-metrics";
 import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
 import {
   AlertTriangle,
@@ -22,7 +30,7 @@ import {
 
 async function AdminOverviewContent() {
   await connection();
-  const [orders, attentionOrders, catalog, inventory, providers, reloadly] =
+  const [orders, attentionOrders, catalog, inventory, providers, reloadly, bsRateCents] =
     await Promise.all([
       listOrdersAdmin(),
       listOrdersAdmin({ needsAttentionOnly: true }),
@@ -30,11 +38,14 @@ async function AdminOverviewContent() {
       listInventoryAdmin({ status: "AVAILABLE" }),
       listProviderConfigs(),
       getReloadlyBalance(),
+      getBsRateCents(),
     ]);
 
-  const paidRevenueCents = orders
-    .filter((o) => o.status === "DELIVERED" || o.paidCents > 0)
-    .reduce((acc, o) => acc + o.subtotalCents, 0);
+  const periodSummaries = computePeriodSales(orders);
+  const settledSnapshots = orders
+    .map((order) => ({ order, snap: getOrderSnapshot(order) }))
+    .filter((entry) => entry.snap.isSettledSale)
+    .slice(0, 6);
 
   const lowStockVariants = catalog.flatMap((p) =>
     p.variants
@@ -54,24 +65,59 @@ async function AdminOverviewContent() {
         <div>
           <h1 className="text-2xl font-black text-white">Resumen Operativo</h1>
           <p className="text-xs text-slate-400 mt-1">
-            Control de inventario propio cifrado, órdenes en curso y pasarelas.
+            Control de inventario propio cifrado, fotografía de ventas y tasa Bs/USD.
           </p>
         </div>
-        <ReconcileButton />
+        <div className="flex flex-wrap items-center gap-3">
+          <BsRateCard initialRateCents={bsRateCents} />
+          <ReconcileButton />
+        </div>
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <div className="rounded-3xl apple-glass p-5 space-y-1">
-          <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Órdenes totales</span>
-            <Receipt className="w-4 h-4 text-sky-400" />
+      {/* Period Sales & Profit Snapshots (No Accumulated Wallet) */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {periodSummaries.map((period) => (
+          <div
+            key={period.label}
+            className="rounded-3xl apple-glass p-5 space-y-2.5 border border-white/[0.08]"
+          >
+            <div className="flex items-center justify-between text-xs text-slate-400">
+              <span className="font-bold uppercase tracking-wider">{period.label}</span>
+              <span className="text-[11px] font-semibold text-slate-300">
+                {period.ordersCount} venta(s)
+              </span>
+            </div>
+            <div className="text-2xl font-black text-white">
+              {formatCents(period.revenueCents)}{" "}
+              <span className="text-xs font-bold text-slate-400">USD</span>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] pt-1 border-t border-white/[0.08]">
+              <span className="text-slate-400">
+                Costo: <strong className="text-slate-200">{formatCents(period.costCents)}</strong>
+              </span>
+              <span className="text-emerald-400 font-black">
+                Ganancia: {formatCents(period.profitCents)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-slate-400">
+              <span>
+                Bs congelado:{" "}
+                <strong className="text-slate-200">
+                  {period.bsCoveredOrders > 0 ? formatBsCents(period.totalBsCents) : "—"}
+                </strong>
+              </span>
+              {period.missingCostOrders > 0 && (
+                <span className="text-amber-300">
+                  {period.missingCostOrders} sin costo
+                </span>
+              )}
+            </div>
           </div>
-          <div className="text-2xl font-black text-white">{orders.length}</div>
-          <div className="text-[11px] text-slate-400">
-            Volumen: {formatCents(paidRevenueCents)} USD
-          </div>
-        </div>
+        ))}
+      </div>
+
+      {/* Operational KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
 
         <div
           className={`rounded-3xl apple-glass p-5 space-y-1 ${
@@ -127,6 +173,98 @@ async function AdminOverviewContent() {
               : "Operando con bóveda propia"}
           </div>
         </div>
+      </div>
+
+      {/* Recent Sales Snapshot */}
+      <div className="rounded-3xl apple-glass p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-black text-white">
+              Fotografía de últimas ventas
+            </h2>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              Cada fila conserva el monto USD, la tasa Bs vigente en ese momento y el costo del código.
+            </p>
+          </div>
+          <Link
+            href="/admin/orders"
+            className="text-xs font-bold text-sky-400 hover:text-sky-300"
+          >
+            Ver registro completo →
+          </Link>
+        </div>
+
+        {settledSnapshots.length === 0 ? (
+          <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] p-5 flex items-center gap-3 text-xs text-slate-400">
+            <Receipt className="w-5 h-5 text-slate-500 shrink-0" />
+            <span>Aún no hay ventas confirmadas registradas.</span>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="text-slate-400 uppercase text-[10px] border-b border-white/[0.08]">
+                <tr>
+                  <th className="pb-2.5 pr-4">Orden</th>
+                  <th className="pb-2.5 pr-4">Cobrado USD</th>
+                  <th className="pb-2.5 pr-4">Equivalente Bs (congelado)</th>
+                  <th className="pb-2.5 pr-4">Costo</th>
+                  <th className="pb-2.5 text-right">Ganancia</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/[0.06]">
+                {settledSnapshots.map(({ order, snap }) => (
+                  <tr key={order.id} className="hover:bg-white/[0.02]">
+                    <td className="py-3 pr-4">
+                      <Link
+                        href={`/admin/orders/${order.id}`}
+                        className="font-mono font-bold text-white hover:text-sky-300"
+                      >
+                        {order.orderNumber}
+                      </Link>
+                      <div className="text-[11px] text-slate-400">
+                        {new Date(order.createdAt).toLocaleString()}
+                      </div>
+                    </td>
+                    <td className="py-3 pr-4 font-black text-white">
+                      {formatCents(snap.revenueCents)}
+                    </td>
+                    <td className="py-3 pr-4 text-slate-300">
+                      {snap.totalBsCents !== null && snap.bsRateCents !== null ? (
+                        <div>
+                          <span className="font-bold text-white">
+                            {formatBsCents(snap.totalBsCents)}
+                          </span>
+                          <span className="text-[11px] text-slate-400 block">
+                            @ {formatBsRate(snap.bsRateCents)}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-slate-500">Sin tasa</span>
+                      )}
+                    </td>
+                    <td className="py-3 pr-4 text-slate-300">
+                      {snap.costCents !== null ? formatCents(snap.costCents) : "Sin costo"}
+                    </td>
+                    <td className="py-3 text-right font-black">
+                      {snap.profitCents !== null ? (
+                        <span
+                          className={
+                            snap.profitCents >= 0 ? "text-emerald-400" : "text-rose-400"
+                          }
+                        >
+                          {snap.profitCents >= 0 ? "+" : ""}
+                          {formatCents(snap.profitCents)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 font-normal">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Attention Required & Low Stock Grid */}

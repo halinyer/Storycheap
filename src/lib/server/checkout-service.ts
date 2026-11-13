@@ -13,6 +13,7 @@ import {
   appendCreditLedgerEntry,
   createOrderWithItems,
   ensureCustomerProfile,
+  getBsRateCents,
   getProviderConfig,
   getUserCreditBalanceCents,
   releaseReservedCodesForOrder,
@@ -78,12 +79,20 @@ export async function initiateCheckout(
     }
   }
 
+  const bsRateCents = await getBsRateCents();
+  const totalBsCents =
+    bsRateCents && bsRateCents > 0
+      ? Math.round((subtotalCents * bsRateCents) / 100)
+      : null;
+
   const order = await createOrderWithItems({
     userId: customerUserId,
     email,
     subtotalCents,
     creditAppliedCents,
     amountDueCents,
+    bsRateCents,
+    totalBsCents,
     paymentGateway: input.paymentGateway,
     ipAddress: input.ipAddress,
     items: validatedLines.map((l) => ({
@@ -93,6 +102,7 @@ export async function initiateCheckout(
       denominationLabel: l.variant.denominationLabel,
       region: l.product.region,
       unitPriceCents: l.variant.salePriceCents,
+      unitCostCents: l.variant.unitCostCents ?? null,
       quantity: l.quantity,
     })),
   });

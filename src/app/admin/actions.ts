@@ -14,6 +14,7 @@ import {
   markOrderAttentionFlag,
   previewCsvInventoryBatch,
   releaseExpiredReservations,
+  setBsRateCents,
   updateProviderConfig,
   updateVariantAdmin,
   voidInventoryCode,
@@ -176,6 +177,7 @@ export async function refundOrderToCreditAction(input: {
 export async function updateVariantAdminAction(input: {
   variantId: string;
   salePriceCents: number;
+  unitCostCents: number | null;
   sourcePriority: SourcePriority;
   reloadlyProductId: number | null;
   lowStockThreshold: number;
@@ -185,6 +187,7 @@ export async function updateVariantAdminAction(input: {
 
   await updateVariantAdmin(input.variantId, {
     salePriceCents: input.salePriceCents,
+    unitCostCents: input.unitCostCents,
     sourcePriority: input.sourcePriority,
     reloadlyProductId: input.reloadlyProductId,
     lowStockThreshold: input.lowStockThreshold,
@@ -203,6 +206,32 @@ export async function updateVariantAdminAction(input: {
   revalidatePath("/");
   revalidatePath("/admin/products");
   revalidatePath("/admin");
+}
+
+export async function updateBsRateAction(rateBsPerUsd: number | null) {
+  const adminUser = await requireAdminUser();
+
+  let bsRateCents: number | null = null;
+  if (rateBsPerUsd !== null) {
+    if (!Number.isFinite(rateBsPerUsd) || rateBsPerUsd <= 0) {
+      throw new Error("La tasa Bs/USD debe ser mayor que cero.");
+    }
+    bsRateCents = Math.round(rateBsPerUsd * 100);
+  }
+
+  await setBsRateCents(bsRateCents, adminUser.id);
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "settings.update_bs_rate",
+    targetType: "store_settings",
+    targetId: "bs_exchange_rate",
+    metadata: { bsRateCents },
+  });
+
+  revalidatePath("/admin");
+  revalidatePath("/admin/orders");
 }
 
 export async function adjustCustomerCreditAction(input: {

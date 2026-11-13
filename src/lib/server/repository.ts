@@ -126,6 +126,7 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       denominationLabel: v.denomination_label,
       faceValueCents: v.face_value_cents,
       salePriceCents: v.sale_price_cents,
+      unitCostCents: v.unit_cost_cents ?? null,
       currency: v.currency,
       sourcePriority: v.source_priority as SourcePriority,
       reloadlyProductId: v.reloadly_product_id ?? null,
@@ -184,6 +185,7 @@ export async function updateVariantAdmin(
   variantId: string,
   patch: Partial<{
     salePriceCents: number;
+    unitCostCents: number | null;
     faceValueCents: number;
     sourcePriority: SourcePriority;
     reloadlyProductId: number | null;
@@ -198,6 +200,7 @@ export async function updateVariantAdmin(
       const target = prod.variants.find((v) => v.id === variantId);
       if (target) {
         if (patch.salePriceCents !== undefined) target.salePriceCents = patch.salePriceCents;
+        if (patch.unitCostCents !== undefined) target.unitCostCents = patch.unitCostCents;
         if (patch.faceValueCents !== undefined) target.faceValueCents = patch.faceValueCents;
         if (patch.sourcePriority !== undefined) target.sourcePriority = patch.sourcePriority;
         if (patch.reloadlyProductId !== undefined) target.reloadlyProductId = patch.reloadlyProductId;
@@ -211,6 +214,7 @@ export async function updateVariantAdmin(
 
   const dbPatch: Record<string, unknown> = {};
   if (patch.salePriceCents !== undefined) dbPatch.sale_price_cents = patch.salePriceCents;
+  if (patch.unitCostCents !== undefined) dbPatch.unit_cost_cents = patch.unitCostCents;
   if (patch.faceValueCents !== undefined) dbPatch.face_value_cents = patch.faceValueCents;
   if (patch.sourcePriority !== undefined) dbPatch.source_priority = patch.sourcePriority;
   if (patch.reloadlyProductId !== undefined) dbPatch.reloadly_product_id = patch.reloadlyProductId;
@@ -817,6 +821,8 @@ export interface CreateOrderInput {
   subtotalCents: number;
   creditAppliedCents: number;
   amountDueCents: number;
+  bsRateCents?: number | null;
+  totalBsCents?: number | null;
   paymentGateway: PaymentGatewayId;
   ipAddress: string | null;
   items: Array<{
@@ -826,8 +832,43 @@ export interface CreateOrderInput {
     denominationLabel: string;
     region: string;
     unitPriceCents: number;
+    unitCostCents?: number | null;
     quantity: number;
   }>;
+}
+
+export async function getBsRateCents(): Promise<number | null> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    return getSandboxState().bsRateCents;
+  }
+  const { data, error } = await ctx.admin
+    .from("store_settings")
+    .select("value")
+    .eq("key", "bs_exchange_rate")
+    .maybeSingle();
+  if (error) return null;
+  const raw = (data?.value as { bsRateCents?: unknown } | null)?.bsRateCents;
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.round(raw) : null;
+}
+
+export async function setBsRateCents(
+  bsRateCents: number | null,
+  updatedBy?: string | null
+): Promise<void> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    getSandboxState().bsRateCents = bsRateCents;
+    return;
+  }
+  const { error } = await ctx.admin
+    .from("store_settings")
+    .upsert({
+      key: "bs_exchange_rate",
+      value: { bsRateCents },
+      updated_by: updatedBy ?? null,
+    });
+  if (error) throw error;
 }
 
 export async function createOrderWithItems(
@@ -848,6 +889,7 @@ export async function createOrderWithItems(
       denominationLabel: it.denominationLabel,
       region: it.region,
       unitPriceCents: it.unitPriceCents,
+      unitCostCents: it.unitCostCents ?? null,
       quantity: it.quantity,
       deliveredCount: 0,
       status: "PENDING" as const,
@@ -863,6 +905,8 @@ export async function createOrderWithItems(
       creditAppliedCents: input.creditAppliedCents,
       amountDueCents: input.amountDueCents,
       paidCents: 0,
+      bsRateCents: input.bsRateCents ?? null,
+      totalBsCents: input.totalBsCents ?? null,
       paymentGateway: input.paymentGateway,
       gatewayCheckoutId: null,
       gatewayCheckoutUrl: null,
@@ -890,6 +934,8 @@ export async function createOrderWithItems(
       credit_applied_cents: input.creditAppliedCents,
       amount_due_cents: input.amountDueCents,
       paid_cents: 0,
+      bs_rate_cents: input.bsRateCents ?? null,
+      total_bs_cents: input.totalBsCents ?? null,
       payment_gateway: input.paymentGateway,
       ip_address: input.ipAddress,
     })
@@ -906,6 +952,7 @@ export async function createOrderWithItems(
       denomination_label: it.denominationLabel,
       region: it.region,
       unit_price_cents: it.unitPriceCents,
+      unit_cost_cents: it.unitCostCents ?? null,
       quantity: it.quantity,
       status: "PENDING",
     }))
@@ -998,6 +1045,8 @@ export async function getOrderById(orderId: string): Promise<OrderDTO | null> {
     creditAppliedCents: o.credit_applied_cents,
     amountDueCents: o.amount_due_cents,
     paidCents: o.paid_cents,
+    bsRateCents: o.bs_rate_cents ?? null,
+    totalBsCents: o.total_bs_cents ?? null,
     paymentGateway: o.payment_gateway,
     gatewayCheckoutId: o.gateway_checkout_id,
     gatewayCheckoutUrl: o.gateway_checkout_url,
@@ -1015,6 +1064,7 @@ export async function getOrderById(orderId: string): Promise<OrderDTO | null> {
       denominationLabel: it.denomination_label,
       region: it.region,
       unitPriceCents: it.unit_price_cents,
+      unitCostCents: it.unit_cost_cents ?? null,
       quantity: it.quantity,
       deliveredCount: it.delivered_count,
       status: it.status,

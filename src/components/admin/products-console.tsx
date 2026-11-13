@@ -15,6 +15,11 @@ function VariantRowEditor({
   variant: ProductVariantDTO;
 }) {
   const [priceUsd, setPriceUsd] = useState((variant.salePriceCents / 100).toFixed(2));
+  const [costUsd, setCostUsd] = useState(
+    typeof variant.unitCostCents === "number"
+      ? (variant.unitCostCents / 100).toFixed(2)
+      : ""
+  );
   const [sourcePriority, setSourcePriority] = useState<SourcePriority>(
     variant.sourcePriority
   );
@@ -25,10 +30,27 @@ function VariantRowEditor({
   const [active, setActive] = useState(variant.active);
   const [saving, setSaving] = useState(false);
 
+  const parsedPricePreview = Math.round(Number.parseFloat(priceUsd) * 100);
+  const parsedCostPreview =
+    costUsd.trim() === "" ? null : Math.round(Number.parseFloat(costUsd) * 100);
+  const marginCents =
+    Number.isFinite(parsedPricePreview) &&
+    parsedCostPreview !== null &&
+    Number.isFinite(parsedCostPreview)
+      ? parsedPricePreview - parsedCostPreview
+      : null;
+
   const handleSave = async () => {
     const parsedPrice = Math.round(Number.parseFloat(priceUsd) * 100);
     if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) {
       toast.error("Precio USD inválido");
+      return;
+    }
+    const trimmedCost = costUsd.trim();
+    const parsedCost =
+      trimmedCost === "" ? null : Math.round(Number.parseFloat(trimmedCost) * 100);
+    if (parsedCost !== null && (!Number.isFinite(parsedCost) || parsedCost < 0)) {
+      toast.error("Costo USD inválido");
       return;
     }
     setSaving(true);
@@ -36,6 +58,7 @@ function VariantRowEditor({
       await updateVariantAdminAction({
         variantId: variant.id,
         salePriceCents: parsedPrice,
+        unitCostCents: parsedCost,
         sourcePriority,
         reloadlyProductId: reloadlyId.trim() ? Number(reloadlyId.trim()) : null,
         lowStockThreshold: Math.max(0, Number.parseInt(threshold, 10) || 0),
@@ -70,6 +93,27 @@ function VariantRowEditor({
           onChange={(e) => setPriceUsd(e.target.value)}
           className="w-24 rounded-lg bg-slate-950 border border-white/15 px-2.5 py-1.5 text-white font-mono"
         />
+      </td>
+      <td className="px-4 py-3.5">
+        <input
+          type="number"
+          step="0.01"
+          min="0"
+          placeholder="Sin costo"
+          value={costUsd}
+          onChange={(e) => setCostUsd(e.target.value)}
+          className="w-24 rounded-lg bg-slate-950 border border-white/15 px-2.5 py-1.5 text-white font-mono"
+        />
+        {marginCents !== null && (
+          <div
+            className={`text-[10px] font-bold mt-1 ${
+              marginCents >= 0 ? "text-emerald-400" : "text-rose-400"
+            }`}
+          >
+            {marginCents >= 0 ? "+" : ""}
+            {formatCents(marginCents)}
+          </div>
+        )}
       </td>
       <td className="px-4 py-3.5">
         <select
@@ -133,6 +177,7 @@ export function ProductsConsole({ catalog }: { catalog: ProductDTO[] }) {
               <th className="px-4 py-3">Producto / Variante</th>
               <th className="px-4 py-3">Stock CSV</th>
               <th className="px-4 py-3">Precio Venta (USD)</th>
+              <th className="px-4 py-3">Costo Unit. (USD)</th>
               <th className="px-4 py-3">Fuente de entrega</th>
               <th className="px-4 py-3">Reloadly ID</th>
               <th className="px-4 py-3">Alerta min</th>

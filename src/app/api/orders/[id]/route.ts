@@ -26,9 +26,19 @@ export async function GET(
     );
   }
 
+  const sanitizedOrder = isAdmin
+    ? order
+    : {
+        ...order,
+        items: order.items.map(({ unitCostCents: _omit, ...rest }) => {
+          void _omit;
+          return rest;
+        }),
+      };
+
   return NextResponse.json(
     {
-      order,
+      order: sanitizedOrder,
       statusMeta: ORDER_STATUS_META[order.status],
     },
     {

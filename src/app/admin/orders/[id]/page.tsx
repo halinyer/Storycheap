@@ -5,6 +5,11 @@ import { connection } from "next/server";
 import { OrderDetailActions } from "@/components/admin/order-detail-actions";
 import { formatCents } from "@/lib/catalog-seed";
 import { getOrderById } from "@/lib/server/repository";
+import {
+  formatBsCents,
+  formatBsRate,
+  getOrderSnapshot,
+} from "@/lib/server/sales-metrics";
 import { AlertTriangle, ArrowLeft, Shield } from "lucide-react";
 
 async function AdminOrderDetailContent({
@@ -16,6 +21,7 @@ async function AdminOrderDetailContent({
   const { id } = await params;
   const order = await getOrderById(id);
   if (!order) notFound();
+  const snap = getOrderSnapshot(order);
 
   return (
     <div className="space-y-6">
@@ -80,6 +86,35 @@ async function AdminOrderDetailContent({
             <span className="text-slate-400 block">Pagado verificado</span>
             <span className="font-black text-sky-400 text-sm">
               {formatCents(order.paidCents)}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/[0.08]">
+            <span className="text-slate-400 block">Fotografía en Bs</span>
+            <span className="font-black text-white text-sm">
+              {snap.totalBsCents !== null && snap.bsRateCents !== null
+                ? `${formatBsCents(snap.totalBsCents)} (${formatBsRate(snap.bsRateCents)})`
+                : "Sin tasa registrada"}
+            </span>
+          </div>
+          <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/[0.08]">
+            <span className="text-slate-400 block">Costo códigos</span>
+            <span className="font-black text-slate-200 text-sm">
+              {snap.costCents !== null ? formatCents(snap.costCents) : "Sin costo"}
+            </span>
+          </div>
+          <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/[0.08]">
+            <span className="text-slate-400 block">Ganancia estimada</span>
+            <span
+              className={`font-black text-sm ${
+                snap.profitCents !== null && snap.profitCents < 0
+                  ? "text-rose-400"
+                  : "text-emerald-400"
+              }`}
+            >
+              {snap.profitCents !== null ? formatCents(snap.profitCents) : "—"}
             </span>
           </div>
         </div>

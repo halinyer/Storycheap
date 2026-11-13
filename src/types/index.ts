@@ -43,6 +43,7 @@ export interface ProductVariantDTO {
   denominationLabel: string;
   faceValueCents: number;
   salePriceCents: number;
+  unitCostCents?: number | null;
   currency: string;
   sourcePriority: SourcePriority;
   reloadlyProductId: number | null;
@@ -81,6 +82,7 @@ export interface CartItem {
   imageUrl: string;
   denominationLabel: string;
   unitPriceCents: number;
+  unitCostCents?: number | null;
   quantity: number;
 }
 
@@ -93,6 +95,7 @@ export interface OrderItemDTO {
   denominationLabel: string;
   region: string;
   unitPriceCents: number;
+  unitCostCents?: number | null;
   quantity: number;
   deliveredCount: number;
   status: OrderItemStatus;
@@ -131,6 +134,8 @@ export interface OrderDTO {
   creditAppliedCents: number;
   amountDueCents: number;
   paidCents: number;
+  bsRateCents?: number | null;
+  totalBsCents?: number | null;
   paymentGateway: PaymentGatewayId;
   gatewayCheckoutId: string | null;
   gatewayCheckoutUrl: string | null;

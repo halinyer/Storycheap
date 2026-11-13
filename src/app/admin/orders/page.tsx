@@ -3,6 +3,11 @@ import Link from "next/link";
 import { connection } from "next/server";
 import { formatCents } from "@/lib/catalog-seed";
 import { listOrdersAdmin } from "@/lib/server/repository";
+import {
+  formatBsCents,
+  formatBsRate,
+  getOrderSnapshot,
+} from "@/lib/server/sales-metrics";
 import { AlertTriangle, ArrowRight } from "lucide-react";
 
 async function AdminOrdersContent({
@@ -66,13 +71,17 @@ async function AdminOrdersContent({
                   <th className="px-5 py-3">Orden</th>
                   <th className="px-5 py-3">Cliente</th>
                   <th className="px-5 py-3">Estado</th>
-                  <th className="px-5 py-3">Total</th>
+                  <th className="px-5 py-3">Total USD</th>
+                  <th className="px-5 py-3">Bs (congelado)</th>
+                  <th className="px-5 py-3">Ganancia</th>
                   <th className="px-5 py-3">Pasarela</th>
                   <th className="px-5 py-3 text-right">Inspeccionar</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.06]">
-                {orders.map((o) => (
+                {orders.map((o) => {
+                  const snap = getOrderSnapshot(o);
+                  return (
                   <tr key={o.id} className="hover:bg-white/[0.02]">
                     <td className="px-5 py-4">
                       <div className="font-mono font-bold text-white">
@@ -99,6 +108,34 @@ async function AdminOrdersContent({
                     <td className="px-5 py-4 font-black text-white">
                       {formatCents(o.subtotalCents)} USD
                     </td>
+                    <td className="px-5 py-4 text-slate-300">
+                      {snap.totalBsCents !== null && snap.bsRateCents !== null ? (
+                        <div>
+                          <div className="font-bold text-white">
+                            {formatBsCents(snap.totalBsCents)}
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            @ {formatBsRate(snap.bsRateCents)}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </td>
+                    <td className="px-5 py-4 font-black">
+                      {snap.profitCents !== null ? (
+                        <span
+                          className={
+                            snap.profitCents >= 0 ? "text-emerald-400" : "text-rose-400"
+                          }
+                        >
+                          {snap.profitCents >= 0 ? "+" : ""}
+                          {formatCents(snap.profitCents)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 font-normal">—</span>
+                      )}
+                    </td>
                     <td className="px-5 py-4 text-slate-300 uppercase">
                       {o.paymentGateway}
                     </td>
@@ -112,7 +149,8 @@ async function AdminOrdersContent({
                       </Link>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

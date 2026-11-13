@@ -69,6 +69,7 @@ export interface SandboxState {
   providerConfigs: ProviderConfigDTO[];
   auditLog: AuditLogEntryDTO[];
   profiles: SandboxProfile[];
+  bsRateCents: number | null;
 }
 
 declare global {
@@ -175,6 +176,7 @@ function createInitialSandboxState(): SandboxState {
     providerConfigs,
     auditLog: [],
     profiles,
+    bsRateCents: null,
   };
 }
 
