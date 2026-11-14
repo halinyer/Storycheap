@@ -1,9 +1,8 @@
-import React, { Suspense } from "react";
+import React from "react";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "sonner";
 import { CartDrawer } from "@/components/cart/cart-drawer";
-import { DevRoleSwitcher } from "@/components/layout/dev-role-switcher";
 import { Footer } from "@/components/layout/footer";
 import { Navbar } from "@/components/layout/navbar";
 import { StoreProvider } from "@/context/store-context";
@@ -31,22 +30,15 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="es" className="dark">
+    <html lang="es" className="dark" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen flex flex-col bg-[#08090e] text-[#f5f6fa]`}
       >
         <StoreProvider>
-          <Suspense
-            fallback={
-              <header className="sticky top-0 z-40 w-full h-16 border-b border-white/[0.08] bg-[#08090e]/80 backdrop-blur-2xl" />
-            }
-          >
-            <Navbar />
-          </Suspense>
+          <Navbar />
           <CartDrawer />
           <main className="flex-1">{children}</main>
           <Footer />
-          <DevRoleSwitcher />
           <Toaster
             theme="dark"
             position="bottom-left"

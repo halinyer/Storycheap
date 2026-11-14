@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { initiateCheckout } from "@/lib/server/checkout-service";
 import { encryptCode, extractLast4, sha256CodeHash } from "@/lib/server/crypto";
-import { processVerifiedWebhookEvent } from "@/lib/server/fulfillment";
+import {
+  processVerifiedWebhookEvent,
+  resolveOrderUnderpayment,
+} from "@/lib/server/fulfillment";
 import { setSandboxZenoCheckout } from "@/lib/server/payments/zenobank";
 import {
   getOrderById,
@@ -372,5 +375,110 @@ describe("Checkout -> Webhook -> Fulfillment -> Vault Integration & Concurrency"
     expect(settledOrder?.status).toBe("REFUNDED_CREDIT");
     expect(settledOrder?.fulfillments.length).toBe(0);
     expect(await getUserCreditBalanceCents(settledOrder!.userId!)).toBe(1035);
+  });
+
+  it("never loses pre-applied store credit when a partial-credit order expires or underpays", async () => {
+    // Customer starts with 350 cents ($3.50) store credit
+    expect(await getUserCreditBalanceCents(CUSTOMER_SESSION.id)).toBe(350);
+
+    // Order is $10.50: applies $3.50 credit, owes $7.00 via ZenoBank
+    const checkout = await initiateCheckout({
+      email: CUSTOMER_SESSION.email,
+      items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+      applyStoreCredit: true,
+      paymentGateway: "zenobank",
+      sessionUser: CUSTOMER_SESSION,
+      ipAddress: "127.0.0.1",
+    });
+    expect(checkout.order.creditAppliedCents).toBe(350);
+    expect(checkout.order.amountDueCents).toBe(700);
+    expect(await getUserCreditBalanceCents(CUSTOMER_SESSION.id)).toBe(0);
+
+    // Customer sends only $4.00 (400 cents) instead of $7.00 and checkout completes/expires
+    const checkoutId = checkout.order.gatewayCheckoutId!;
+    setSandboxZenoCheckout({
+      id: checkoutId,
+      orderId: checkout.order.id,
+      priceCurrency: "USD",
+      priceAmount: "7.00",
+      paidAmount: "4.00",
+      status: "COMPLETED",
+      expiresAt: checkout.order.expiresAt,
+      checkoutUrl: checkout.checkoutUrl,
+      createdAt: checkout.order.createdAt,
+      successRedirectUrl: null,
+    });
+
+    const res = await processVerifiedWebhookEvent({
+      gateway: "zenobank",
+      eventId: "evt_credit_underpay_1",
+      eventType: "checkout.completed",
+      orderId: checkout.order.id,
+      checkoutId,
+      priceCents: 700,
+      paidCents: 400,
+      status: "COMPLETED",
+      rawPayload: {},
+    });
+
+    expect(res.outcome).toBe("partial_underpaid_credited");
+    // Must have refunded the $3.50 applied credit + $4.00 partial crypto payment = $7.50 (750 cents)
+    expect(await getUserCreditBalanceCents(CUSTOMER_SESSION.id)).toBe(750);
+  });
+
+  it("allows instant self-service underpayment resolution (complete with credit or convert to credit now)", async () => {
+    // Customer starts with 350 cents ($3.50) store credit, does NOT apply it at checkout
+    const checkout = await initiateCheckout({
+      email: CUSTOMER_SESSION.email,
+      items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+      applyStoreCredit: false,
+      paymentGateway: "zenobank",
+      sessionUser: CUSTOMER_SESSION,
+      ipAddress: "127.0.0.1",
+    });
+
+    const checkoutId = checkout.order.gatewayCheckoutId!;
+    const futureIso = new Date(Date.now() + 15 * 60_000).toISOString();
+
+    // Customer sends $9.00 out of $10.50 (missing $1.50 = 150 cents) while link is still open
+    setSandboxZenoCheckout({
+      id: checkoutId,
+      orderId: checkout.order.id,
+      priceCurrency: "USD",
+      priceAmount: "10.50",
+      paidAmount: "9.00",
+      status: "PARTIALLY_PAID",
+      expiresAt: futureIso,
+      checkoutUrl: checkout.checkoutUrl,
+      createdAt: checkout.order.createdAt,
+      successRedirectUrl: null,
+    });
+
+    await processVerifiedWebhookEvent({
+      gateway: "zenobank",
+      eventId: "evt_self_resolve_1",
+      eventType: "checkout.partially_paid",
+      orderId: checkout.order.id,
+      checkoutId,
+      priceCents: 1050,
+      paidCents: 900,
+      status: "PARTIALLY_PAID",
+      expiresAt: futureIso,
+      rawPayload: {},
+    });
+
+    // Customer clicks "Cubrir $1.50 con mi saldo a favor y recibir código ahora"
+    const resolved = await resolveOrderUnderpayment({
+      orderId: checkout.order.id,
+      actorUser: CUSTOMER_SESSION,
+      mode: "complete_with_credit",
+      skipRemoteDoubleCheck: true,
+    });
+
+    expect(resolved.outcome).toBe("fulfilled");
+    expect(resolved.order.status).toBe("DELIVERED");
+    expect(resolved.order.fulfillments.length).toBe(1);
+    // 350 initial credit - 150 covered = 200 cents remaining
+    expect(await getUserCreditBalanceCents(CUSTOMER_SESSION.id)).toBe(200);
   });
 });

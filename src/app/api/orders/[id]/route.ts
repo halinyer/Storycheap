@@ -1,13 +1,21 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServerSessionUser } from "@/lib/server/auth";
 import { isZenoBankConfigured } from "@/lib/server/env";
-import { processVerifiedWebhookEvent } from "@/lib/server/fulfillment";
+import {
+  processVerifiedWebhookEvent,
+  syncCentralOneOrderProgress,
+} from "@/lib/server/fulfillment";
 import { hasOrderAccessCookie } from "@/lib/server/order-access";
 import { getPaymentGateway } from "@/lib/server/payments";
-import { getOrderById } from "@/lib/server/repository";
+import {
+  getOrderById,
+  getUserCreditBalanceCents,
+  listPendingSupplierOrdersForOrder,
+} from "@/lib/server/repository";
 import { ORDER_STATUS_META } from "@/lib/server/state-machine";
 
 const lastPollReconcileAt = new Map<string, number>();
+const lastSupplierPollAt = new Map<string, number>();
 
 export async function GET(
   _request: NextRequest,
@@ -88,6 +96,36 @@ export async function GET(
     }
   }
 
+  // Opportunistic live reconciliation for async Central One orders so codes are never left "al aire"
+  if (order.status === "FULFILLING" || order.status === "PARTIAL") {
+    const now = Date.now();
+    const prev = lastSupplierPollAt.get(order.id) ?? 0;
+    if (now - prev >= 4_000) {
+      lastSupplierPollAt.set(order.id, now);
+      try {
+        const pendingSuppliers = await listPendingSupplierOrdersForOrder(
+          order.id,
+          "centralone"
+        );
+        let syncedAny = false;
+        for (const so of pendingSuppliers) {
+          if (!so.externalOrderId) continue;
+          const res = await syncCentralOneOrderProgress(so.externalOrderId);
+          if (res.ok) syncedAny = true;
+        }
+        if (syncedAny) {
+          order = (await getOrderById(id)) ?? order;
+        }
+      } catch {
+        // Non-blocking if supplier API is temporarily unreachable
+      }
+    }
+  }
+
+  const userCreditBalanceCents = sessionUser
+    ? await getUserCreditBalanceCents(sessionUser.id).catch(() => 0)
+    : 0;
+
   const sanitizedOrder = isAdmin
     ? order
     : {
@@ -102,6 +140,7 @@ export async function GET(
     {
       order: sanitizedOrder,
       statusMeta: ORDER_STATUS_META[order.status],
+      userCreditBalanceCents,
     },
     {
       status: 200,

@@ -22,50 +22,117 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
+interface SummaryRow {
+  label: string;
+  value: string;
+  mono?: boolean;
+}
+
 function renderEmailShell(params: {
-  badge: string;
+  preheader: string;
+  headerRight: string;
   title: string;
-  introHtml: string;
-  noteHtml: string;
+  intro: string;
+  rows: SummaryRow[];
   ctaLabel: string;
   ctaUrl: string;
-  footerText: string;
+  securityNote: string;
 }): string {
-  return `
-  <div style="margin: 0; padding: 32px 16px; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a;">
-    <div style="max-width: 560px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 25px rgba(15, 23, 42, 0.06);">
-      <div style="background: linear-gradient(135deg, #08090e 0%, #0f172a 100%); padding: 24px 28px; border-bottom: 1px solid #1e293b;">
-        <div style="font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #38bdf8; margin-bottom: 6px;">
-          ${escapeHtml(params.badge)}
-        </div>
-        <div style="font-size: 20px; font-weight: 800; color: #ffffff; letter-spacing: -0.02em;">
-          StoryCheap
-        </div>
-      </div>
+  const rowsHtml = params.rows
+    .map(
+      (row, idx) => `
+      <tr>
+        <td style="padding: 12px 0; font-size: 13px; color: #6e6e73; border-bottom: ${
+          idx === params.rows.length - 1 ? "none" : "1px solid #e8e8ed"
+        };">
+          ${escapeHtml(row.label)}
+        </td>
+        <td align="right" style="padding: 12px 0; font-size: 13px; font-weight: 500; color: #1d1d1f; ${
+          row.mono
+            ? "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"
+            : ""
+        } border-bottom: ${
+        idx === params.rows.length - 1 ? "none" : "1px solid #e8e8ed"
+      };">
+          ${escapeHtml(row.value)}
+        </td>
+      </tr>`
+    )
+    .join("");
 
-      <div style="padding: 28px;">
-        <h1 style="margin: 0 0 12px; font-size: 20px; line-height: 1.3; font-weight: 800; color: #0f172a;">
-          ${escapeHtml(params.title)}
-        </h1>
-        <p style="margin: 0 0 18px; font-size: 15px; line-height: 1.6; color: #334155;">
-          ${params.introHtml}
-        </p>
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(params.title)}</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f5f5f7; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1d1d1f; -webkit-font-smoothing: antialiased;">
+  <div style="display: none; max-height: 0; overflow: hidden; opacity: 0; color: transparent;">
+    ${escapeHtml(params.preheader)}
+  </div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #f5f5f7; padding: 40px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width: 540px; background-color: #ffffff; border: 1px solid #e5e5ea; border-radius: 12px;">
+          <tr>
+            <td style="padding: 28px 32px 20px; border-bottom: 1px solid #e8e8ed;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td style="font-size: 16px; font-weight: 600; letter-spacing: -0.02em; color: #1d1d1f;">
+                    StoryCheap
+                  </td>
+                  <td align="right" style="font-size: 12px; color: #6e6e73;">
+                    ${escapeHtml(params.headerRight)}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 28px 32px 32px;">
+              <h1 style="margin: 0 0 10px; font-size: 22px; line-height: 1.25; font-weight: 600; letter-spacing: -0.02em; color: #1d1d1f;">
+                ${escapeHtml(params.title)}
+              </h1>
+              <p style="margin: 0 0 24px; font-size: 15px; line-height: 1.55; color: #424245;">
+                ${escapeHtml(params.intro)}
+              </p>
 
-        <div style="margin: 0 0 24px; padding: 14px 16px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; font-size: 13px; line-height: 1.5; color: #475569;">
-          ${params.noteHtml}
-        </div>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin: 0 0 26px; border-top: 1px solid #e8e8ed; border-bottom: 1px solid #e8e8ed;">
+                ${rowsHtml}
+              </table>
 
-        <a href="${escapeHtml(params.ctaUrl)}" style="display: inline-block; background-color: #0f172a; color: #ffffff; text-decoration: none; font-size: 14px; font-weight: 700; padding: 13px 24px; border-radius: 10px;">
-          ${escapeHtml(params.ctaLabel)}
-        </a>
+              <table role="presentation" cellspacing="0" cellpadding="0" style="margin: 0 0 22px;">
+                <tr>
+                  <td style="border-radius: 8px; background-color: #111827;">
+                    <a href="${escapeHtml(params.ctaUrl)}" style="display: inline-block; padding: 12px 22px; font-size: 14px; font-weight: 500; color: #ffffff; text-decoration: none; letter-spacing: -0.01em;">
+                      ${escapeHtml(params.ctaLabel)}
+                    </a>
+                  </td>
+                </tr>
+              </table>
 
-        <p style="margin: 24px 0 0; padding-top: 18px; border-top: 1px solid #e2e8f0; font-size: 12px; line-height: 1.5; color: #64748b;">
-          ${escapeHtml(params.footerText)} Si tienes alguna consulta, responde directamente a este correo o escríbenos a
-          <a href="mailto:soporte@storycheap.com" style="color: #0284c7; text-decoration: none; font-weight: 600;">soporte@storycheap.com</a>.
-        </p>
-      </div>
-    </div>
-  </div>`;
+              <p style="margin: 0; font-size: 12px; line-height: 1.55; color: #6e6e73;">
+                ${escapeHtml(params.securityNote)}
+              </p>
+            </td>
+          </tr>
+        </table>
+
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width: 540px;">
+          <tr>
+            <td style="padding: 18px 8px 0; text-align: center; font-size: 12px; line-height: 1.5; color: #86868b;">
+              ¿Necesitas ayuda? Responde a este correo o escribe a
+              <a href="mailto:soporte@storycheap.com" style="color: #1d1d1f; text-decoration: underline;">soporte@storycheap.com</a>.<br />
+              StoryCheap · Correo transaccional automático
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
 }
 
 async function dispatchEmail(params: {
@@ -116,24 +183,36 @@ export async function sendOrderReadyEmail(params: {
   partial?: boolean;
 }) {
   const orderUrl = `${getSiteUrl()}/order/${params.orderId}`;
-  const safeOrderNumber = escapeHtml(params.orderNumber);
   const subject = params.partial
-    ? `Entrega parcial disponible: Pedido ${params.orderNumber} — StoryCheap`
-    : `Pedido ${params.orderNumber} confirmado: tus códigos están listos`;
+    ? `Entrega parcial disponible · Pedido ${params.orderNumber}`
+    : `Tu pedido ${params.orderNumber} está listo`;
 
   const html = renderEmailShell({
-    badge: "Entrega Digital Segura",
+    preheader: params.partial
+      ? `Ya tienes códigos disponibles para el pedido ${params.orderNumber}.`
+      : `Confirmamos tu pago. Accede para revelar tus códigos del pedido ${params.orderNumber}.`,
+    headerRight: `Pedido ${params.orderNumber}`,
     title: params.partial
-      ? "Primeros códigos disponibles en tu bóveda"
-      : "Tu entrega digital está lista",
-    introHtml: params.partial
-      ? `Tu pedido <strong>${safeOrderNumber}</strong> ya cuenta con códigos listos en tu bóveda segura mientras completamos la validación restante.`
-      : `Confirmamos tu pago para el pedido <strong>${safeOrderNumber}</strong> (${params.itemCount} tarjeta${params.itemCount === 1 ? "" : "s"}). Ya puedes acceder a tus pines digitales.`,
-    noteHtml:
-      "Por tu seguridad, nunca enviamos códigos ni PINs en texto plano por correo electrónico. Solo tú puedes revelarlos desde tu bóveda cifrada.",
-    ctaLabel: "Acceder a mi bóveda y ver códigos",
+      ? "Primeros códigos disponibles"
+      : "Tu pedido está listo",
+    intro: params.partial
+      ? "Algunos artículos de tu compra ya fueron emitidos y puedes verlos ahora mientras completamos el resto."
+      : "Confirmamos tu pago y emitimos tus tarjetas digitales. Ya puedes consultarlas desde tu cuenta.",
+    rows: [
+      { label: "N.° de pedido", value: params.orderNumber, mono: true },
+      {
+        label: "Artículos",
+        value: `${params.itemCount} tarjeta${params.itemCount === 1 ? "" : "s"}`,
+      },
+      {
+        label: "Estado",
+        value: params.partial ? "Entrega parcial" : "Disponible",
+      },
+    ],
+    ctaLabel: "Ver mis códigos",
     ctaUrl: orderUrl,
-    footerText: `Referencia de pedido: ${params.orderNumber}.`,
+    securityNote:
+      "Por tu seguridad, los pines y códigos digitales nunca se envían en texto plano por correo electrónico.",
   });
 
   return dispatchEmail({
@@ -152,27 +231,72 @@ export async function sendCreditAdjustmentEmail(params: {
 }) {
   const accountUrl = `${getSiteUrl()}/account`;
   const dollars = (params.amountCents / 100).toFixed(2);
-  const subject = `Saldo a favor acreditado ($${dollars} USD) — StoryCheap`;
-  const safeReason = escapeHtml(params.reasonText);
-  const orderSuffix = params.orderNumber
-    ? ` correspondiente al pedido <strong>${escapeHtml(params.orderNumber)}</strong>`
-    : "";
+  const subject = `Saldo a favor acreditado ($${dollars} USD) · StoryCheap`;
+
+  const rows: SummaryRow[] = [
+    { label: "Monto acreditado", value: `$${dollars} USD` },
+  ];
+  if (params.orderNumber) {
+    rows.push({ label: "N.° de pedido", value: params.orderNumber, mono: true });
+  }
+  rows.push({ label: "Motivo", value: params.reasonText });
 
   const html = renderEmailShell({
-    badge: "Actualización de Cuenta",
-    title: `Se acreditaron $${dollars} USD a tu saldo`,
-    introHtml: `Hemos abonado <strong>$${dollars} USD</strong> en tu saldo a favor dentro de StoryCheap${orderSuffix}. Puedes usarlo automáticamente en tu próxima compra.`,
-    noteHtml: `<strong>Motivo:</strong> ${safeReason}`,
-    ctaLabel: "Ver saldo en Mi Cuenta",
+    preheader: `Se acreditaron $${dollars} USD en tu saldo de StoryCheap.`,
+    headerRight: "Aviso de cuenta",
+    title: `Se acreditaron $${dollars} USD`,
+    intro:
+      "Este saldo quedó disponible en tu cuenta de StoryCheap y se aplicará automáticamente cuando quieras en tu próximo pedido.",
+    rows,
+    ctaLabel: "Ir a mi cuenta",
     ctaUrl: accountUrl,
-    footerText: params.orderNumber
-      ? `Referencia de pedido: ${params.orderNumber}.`
-      : "Movimiento registrado en tu cuenta StoryCheap.",
+    securityNote:
+      "Este movimiento quedó registrado en el historial de tu cuenta.",
   });
 
   return dispatchEmail({
     to: params.to,
     subject,
     html,
+  });
+}
+
+export async function sendAuthVerificationEmail(params: {
+  to: string;
+  actionUrl: string;
+  kind: "signup" | "magiclink";
+}) {
+  const isSignup = params.kind === "signup";
+  const subject = isSignup
+    ? "Confirma tu cuenta en StoryCheap"
+    : "Tu enlace de acceso a StoryCheap";
+
+  const html = renderEmailShell({
+    preheader: isSignup
+      ? "Confirma tu correo electrónico para activar tu cuenta de StoryCheap."
+      : "Usa este enlace personal para iniciar sesión en StoryCheap.",
+    headerRight: isSignup ? "Registro de cuenta" : "Acceso seguro",
+    title: isSignup ? "Confirma tu correo" : "Inicia sesión en StoryCheap",
+    intro: isSignup
+      ? "Gracias por registrarte en StoryCheap. Haz clic en el botón de abajo para confirmar tu correo y continuar."
+      : "Solicitaste un enlace de acceso rápido para entrar a tu cuenta y ver tus códigos.",
+    rows: [
+      { label: "Cuenta", value: params.to },
+      {
+        label: "Acción",
+        value: isSignup ? "Confirmar registro" : "Acceso único",
+      },
+    ],
+    ctaLabel: isSignup ? "Confirmar cuenta" : "Iniciar sesión",
+    ctaUrl: params.actionUrl,
+    securityNote:
+      "Si no solicitaste este correo, puedes ignorarlo de forma segura. El enlace es personal y expira automáticamente.",
+  });
+
+  return dispatchEmail({
+    to: params.to,
+    subject,
+    html,
+    sandboxLink: params.actionUrl,
   });
 }

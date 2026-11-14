@@ -30,13 +30,9 @@ export default function CheckoutPage() {
     refreshSession,
   } = useStore();
 
-  const [emailInput, setEmailInput] = useState("");
   const [applyCredit, setApplyCredit] = useState(true);
   const [acceptedRegionPolicy, setAcceptedRegionPolicy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-
-  const effectiveEmail =
-    sessionUser?.email || emailInput.trim();
 
   const usableCreditCents =
     sessionUser && applyCredit
@@ -50,8 +46,9 @@ export default function CheckoutPage() {
       toast.error("Tu carrito está vacío.");
       return;
     }
-    if (!effectiveEmail.includes("@")) {
-      toast.error("Ingresa un correo electrónico válido.");
+    if (!sessionUser) {
+      toast.error("Inicia sesión o crea tu cuenta antes de finalizar la compra.");
+      router.push("/login?mode=register&next=/checkout");
       return;
     }
     if (!acceptedRegionPolicy) {
@@ -67,7 +64,7 @@ export default function CheckoutPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          email: effectiveEmail,
+          email: sessionUser.email,
           items: cartItems.map((it) => ({
             variantId: it.variantId,
             quantity: it.quantity,
@@ -154,46 +151,64 @@ export default function CheckoutPage() {
       >
         {/* Left Column: Customer Info, Credit Toggle, Payment Method */}
         <div className="lg:col-span-7 space-y-6">
-          {/* Step 1: Email */}
+          {/* Step 1: Account Verification Required */}
           <div className="rounded-3xl apple-glass p-6 space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
               <h2 className="text-base font-extrabold text-white flex items-center gap-2">
                 <Mail className="w-4 h-4 text-sky-400" />
-                <span>1. Correo para entrega y bóveda</span>
+                <span>1. Cuenta para entrega y bóveda</span>
               </h2>
-              {!sessionUser && (
-                <Link
-                  href="/login?next=/checkout"
-                  className="text-xs font-bold text-sky-400 hover:text-sky-300"
-                >
-                  ¿Ya tienes saldo? Inicia sesión
-                </Link>
+              {sessionUser ? (
+                <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-black uppercase text-emerald-300">
+                  Verificada
+                </span>
+              ) : (
+                <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-[10px] font-black uppercase text-amber-300">
+                  Requerida
+                </span>
               )}
             </div>
 
-            <div>
-              <label
-                htmlFor="checkout-email"
-                className="block text-xs font-bold text-slate-300 mb-2"
-              >
-                Correo electrónico
-              </label>
-              <input
-                id="checkout-email"
-                type="email"
-                required
-                value={sessionUser ? sessionUser.email : emailInput}
-                onChange={(e) => setEmailInput(e.target.value)}
-                placeholder="tu-correo@ejemplo.com"
-                readOnly={Boolean(sessionUser)}
-                className="w-full rounded-2xl bg-slate-950/80 border border-white/15 px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500/50 disabled:opacity-70"
-              />
-              <p className="text-[11px] text-slate-400 mt-2">
-                {sessionUser
-                  ? "Sesión verificada. Tus códigos quedarán guardados automáticamente en Mi Cuenta."
-                  : "Por seguridad, enviaremos a este correo la confirmación de orden (nunca códigos en texto plano)."}
-              </p>
-            </div>
+            {sessionUser ? (
+              <div>
+                <label
+                  htmlFor="checkout-email"
+                  className="block text-xs font-bold text-slate-300 mb-2"
+                >
+                  Correo de tu cuenta
+                </label>
+                <input
+                  id="checkout-email"
+                  type="email"
+                  readOnly
+                  value={sessionUser.email}
+                  className="w-full rounded-2xl bg-slate-950/80 border border-white/15 px-4 py-3 text-sm text-white focus:outline-none opacity-90"
+                />
+                <p className="text-[11px] text-slate-400 mt-2">
+                  Tus códigos quedarán guardados automáticamente en Mi Cuenta y te notificaremos a este correo cuando estén listos.
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-2xl bg-slate-950/70 border border-white/10 p-5 space-y-4">
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Para proteger tus códigos en tu bóveda cifrada y resguardar tu saldo a favor ante cualquier diferencia de pago, debes iniciar sesión o crear tu cuenta antes de pagar.
+                </p>
+                <div className="flex flex-wrap gap-2.5">
+                  <Link
+                    href="/login?mode=register&next=/checkout"
+                    className="px-4 py-2.5 rounded-xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs transition-colors"
+                  >
+                    Crear cuenta gratis
+                  </Link>
+                  <Link
+                    href="/login?next=/checkout"
+                    className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 text-white font-bold text-xs transition-colors"
+                  >
+                    Ya tengo cuenta · Entrar
+                  </Link>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Internal Store Credit (Only if authenticated & balance > 0) */}
@@ -358,20 +373,30 @@ export default function CheckoutPage() {
             </div>
           </div>
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full py-4 px-5 rounded-2xl bg-white hover:bg-sky-300 disabled:bg-slate-700 disabled:text-slate-300 text-slate-950 font-black text-sm flex items-center justify-center gap-2 transition-all shadow-xl"
-          >
-            <Lock className="w-4 h-4" />
-            <span>
-              {submitting
-                ? "Creando orden segura..."
-                : amountDueCents === 0
-                ? "Confirmar con Saldo a favor"
-                : "Continuar al pago en ZenoBank"}
-            </span>
-          </button>
+          {sessionUser ? (
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full py-4 px-5 rounded-2xl bg-white hover:bg-sky-300 disabled:bg-slate-700 disabled:text-slate-300 text-slate-950 font-black text-sm flex items-center justify-center gap-2 transition-all shadow-xl"
+            >
+              <Lock className="w-4 h-4" />
+              <span>
+                {submitting
+                  ? "Creando orden segura..."
+                  : amountDueCents === 0
+                  ? "Confirmar con Saldo a favor"
+                  : "Continuar al pago en ZenoBank"}
+              </span>
+            </button>
+          ) : (
+            <Link
+              href="/login?mode=register&next=/checkout"
+              className="w-full py-4 px-5 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-sm flex items-center justify-center gap-2 transition-all shadow-xl"
+            >
+              <Lock className="w-4 h-4" />
+              <span>Crear cuenta o iniciar sesión para pagar</span>
+            </Link>
+          )}
 
           <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] p-3.5 text-[11px] text-slate-400 flex items-start gap-2.5">
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />

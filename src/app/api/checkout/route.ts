@@ -11,7 +11,7 @@ import { isStorePreviewMode } from "@/lib/server/env";
 import { checkRateLimit } from "@/lib/server/rate-limit";
 
 const checkoutSchema = z.object({
-  email: z.string().trim().email("Correo electrónico inválido"),
+  email: z.string().trim().email("Correo electrónico inválido").optional(),
   items: z
     .array(
       z.object({
@@ -75,8 +75,18 @@ export async function POST(request: NextRequest) {
 
   try {
     const sessionUser = await getServerSessionUser();
+    if (!sessionUser) {
+      return NextResponse.json(
+        {
+          error: "Debes iniciar sesión o crear una cuenta antes de comprar.",
+          code: "AUTH_REQUIRED",
+        },
+        { status: 401 }
+      );
+    }
+
     const result = await initiateCheckout({
-      email: parsed.data.email,
+      email: sessionUser.email,
       items: parsed.data.items,
       applyStoreCredit: parsed.data.applyStoreCredit,
       paymentGateway: parsed.data.paymentGateway,

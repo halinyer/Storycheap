@@ -6,18 +6,30 @@ import { useStore } from "@/context/store-context";
 import { KeyRound, Lock, Mail, Shield, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
+type AuthMode = "password" | "register" | "magic-link";
+
+function resolveInitialAuthMode(rawMode: string | null): AuthMode {
+  if (rawMode === "register") return "register";
+  if (rawMode === "magic-link") return "magic-link";
+  return "password";
+}
+
 function LoginFormInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const nextPath = searchParams.get("next") || "/account";
-  const safeNext = nextPath.startsWith("/") ? nextPath : "/account";
+  const safeNext =
+    nextPath.startsWith("/") && !nextPath.startsWith("//")
+      ? nextPath
+      : "/account";
 
   const { sandboxEnabled, refreshSession, signInSandbox } = useStore();
-  const [authMode, setAuthMode] = useState<"password" | "magic-link">(
-    nextPath.includes("admin") ? "password" : "password"
+  const [authMode, setAuthMode] = useState<AuthMode>(() =>
+    resolveInitialAuthMode(searchParams.get("mode"))
   );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [sentMessage, setSentMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -40,11 +52,41 @@ function LoginFormInner() {
         await refreshSession();
         toast.success("Sesión iniciada con éxito");
         router.push(safeNext);
+      } else if (authMode === "register") {
+        if (password.length < 6) {
+          throw new Error("La contraseña debe tener al menos 6 caracteres.");
+        }
+        if (password !== confirmPassword) {
+          throw new Error("Las contraseñas no coinciden.");
+        }
+        const res = await fetch("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password, next: safeNext }),
+        });
+        const data = (await res.json()) as {
+          error?: string;
+          mode?: string;
+          message?: string;
+        };
+        if (!res.ok) {
+          throw new Error(data.error ?? "No se pudo crear tu cuenta.");
+        }
+        if (data.mode === "sandbox_signed_in" || data.mode === "signed_in") {
+          await refreshSession();
+          toast.success("Cuenta creada con éxito");
+          router.push(safeNext);
+        } else {
+          setSentMessage(
+            data.message ??
+              "Te enviamos un correo para confirmar tu cuenta y continuar."
+          );
+        }
       } else {
         const res = await fetch("/api/auth/magic-link", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email }),
+          body: JSON.stringify({ email, next: safeNext }),
         });
         const data = (await res.json()) as {
           error?: string;
@@ -80,16 +122,20 @@ function LoginFormInner() {
           <div className="w-12 h-12 rounded-2xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center mx-auto text-sky-400">
             <Lock className="w-5 h-5" />
           </div>
-          <h1 className="text-2xl font-black text-white">Accede a StoryCheap</h1>
+          <h1 className="text-2xl font-black text-white">
+            {authMode === "register" ? "Crea tu cuenta" : "Accede a StoryCheap"}
+          </h1>
           <p className="text-xs text-slate-400 leading-relaxed">
             {authMode === "password"
-              ? "Ingresa con tu correo y contraseña registrada."
-              : "Te enviamos un enlace mágico a tu correo para acceder sin contraseña."}
+              ? "Ingresa con tu correo y contraseña para ver tu bóveda."
+              : authMode === "register"
+                ? "Registra tu cuenta para guardar tus códigos y saldo a favor."
+                : "Te enviamos un enlace mágico a tu correo para entrar sin contraseña."}
           </p>
         </div>
 
         {/* Tab Selector */}
-        <div className="grid grid-cols-2 p-1 rounded-2xl bg-slate-950/60 border border-white/10 text-xs font-bold">
+        <div className="grid grid-cols-3 p-1 rounded-2xl bg-slate-950/60 border border-white/10 text-xs font-bold">
           <button
             type="button"
             onClick={() => {
@@ -102,7 +148,21 @@ function LoginFormInner() {
                 : "text-slate-400 hover:text-white"
             }`}
           >
-            Contraseña
+            Entrar
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMode("register");
+              setSentMessage(null);
+            }}
+            className={`py-2 rounded-xl transition-all ${
+              authMode === "register"
+                ? "bg-white text-slate-950 shadow-sm"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            Crear cuenta
           </button>
           <button
             type="button"
@@ -116,7 +176,7 @@ function LoginFormInner() {
                 : "text-slate-400 hover:text-white"
             }`}
           >
-            Enlace mágico
+            Enlace
           </button>
         </div>
 
@@ -149,7 +209,7 @@ function LoginFormInner() {
               </div>
             </div>
 
-            {authMode === "password" && (
+            {(authMode === "password" || authMode === "register") && (
               <div>
                 <label
                   htmlFor="login-password"
@@ -163,9 +223,36 @@ function LoginFormInner() {
                     id="login-password"
                     type="password"
                     required
+                    minLength={authMode === "register" ? 6 : 1}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••••••"
+                    placeholder={
+                      authMode === "register" ? "Mínimo 6 caracteres" : "••••••••••••"
+                    }
+                    className="w-full rounded-2xl bg-slate-950/80 border border-white/15 pl-10 pr-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500/50"
+                  />
+                </div>
+              </div>
+            )}
+
+            {authMode === "register" && (
+              <div>
+                <label
+                  htmlFor="register-password-confirm"
+                  className="block text-xs font-bold text-slate-300 mb-2"
+                >
+                  Confirmar contraseña
+                </label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                  <input
+                    id="register-password-confirm"
+                    type="password"
+                    required
+                    minLength={6}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Repite tu contraseña"
                     className="w-full rounded-2xl bg-slate-950/80 border border-white/15 pl-10 pr-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500/50"
                   />
                 </div>
@@ -181,7 +268,9 @@ function LoginFormInner() {
                 ? "Procesando..."
                 : authMode === "password"
                   ? "Iniciar sesión"
-                  : "Continuar con correo"}
+                  : authMode === "register"
+                    ? "Crear cuenta"
+                    : "Enviar enlace de acceso"}
             </button>
           </form>
         )}

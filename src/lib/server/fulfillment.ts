@@ -7,12 +7,14 @@ import type { NormalizedPaymentWebhookEvent } from "./payments/types";
 import {
   appendAuditLog,
   appendCreditLedgerEntry,
+  applyAdditionalCreditToOrder,
   commitReservedCodesForOrder,
   ensureCustomerProfile,
   getOrderByGatewayCheckoutId,
   getOrderById,
   getProviderConfig,
   getSupplierOrderByExternalId,
+  getUserCreditBalanceCents,
   getVariantsLookupByIds,
   insertFulfillmentRecord,
   markOrderAttentionFlag,
@@ -231,7 +233,14 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
 
           if (c1Order.status === "completed" && c1Order.deliveredCount > 0) {
             const codes = await getCentralOneOrderCodes(c1Order.externalOrderId);
-            for (const c of codes.slice(0, remaining)) {
+            const existingC1Count = order.fulfillments.filter(
+              (f) => f.orderItemId === item.id && f.source === "centralone"
+            ).length;
+            const unseenCodes = codes.slice(
+              existingC1Count,
+              existingC1Count + remaining
+            );
+            for (const c of unseenCodes) {
               await insertFulfillmentRecord({
                 orderItemId: item.id,
                 orderId: order.id,
@@ -365,23 +374,41 @@ async function settleUnderpaymentToCredit(params: {
     attentionReason: params.attentionReason,
   });
 
-  if (transitioned && params.paidCents > 0) {
+  if (transitioned) {
     const userId =
       params.order.userId ?? (await ensureCustomerProfile(params.order.email));
-    await appendCreditLedgerEntry({
-      userId,
-      orderId: params.order.id,
-      deltaCents: params.paidCents,
-      reason: "partial_payment",
-      note: params.note,
-      createdBy: null,
-    });
-    await sendCreditAdjustmentEmail({
-      to: params.order.email,
-      orderNumber: params.order.orderNumber,
-      amountCents: params.paidCents,
-      reasonText: params.note,
-    }).catch(() => {});
+
+    if (params.order.creditAppliedCents > 0) {
+      await appendCreditLedgerEntry({
+        userId,
+        orderId: params.order.id,
+        deltaCents: params.order.creditAppliedCents,
+        reason: "fulfillment_refund",
+        note: `Devolución automática de saldo aplicado en orden no completada (${params.order.orderNumber})`,
+        createdBy: null,
+      });
+    }
+
+    if (params.paidCents > 0) {
+      await appendCreditLedgerEntry({
+        userId,
+        orderId: params.order.id,
+        deltaCents: params.paidCents,
+        reason: "partial_payment",
+        note: params.note,
+        createdBy: null,
+      });
+    }
+
+    const totalCreditedCents = params.paidCents + params.order.creditAppliedCents;
+    if (totalCreditedCents > 0) {
+      await sendCreditAdjustmentEmail({
+        to: params.order.email,
+        orderNumber: params.order.orderNumber,
+        amountCents: totalCreditedCents,
+        reasonText: params.note,
+      }).catch(() => {});
+    }
   }
 
   return transitioned;
@@ -450,16 +477,23 @@ export async function processVerifiedWebhookEvent(
     authoritativeStatus === "EXPIRED" ||
     authoritativeStatus === "CANCELLED"
   ) {
-    if (authoritativePaidCents > 0) {
+    if (authoritativePaidCents > 0 || matchedOrder.creditAppliedCents > 0) {
       await settleUnderpaymentToCredit({
         order: matchedOrder,
         paidCents: authoritativePaidCents,
-        note: `Pago parcial recibido tras expiración (${matchedOrder.orderNumber})`,
+        note:
+          authoritativePaidCents > 0
+            ? `Pago parcial recibido tras expiración (${matchedOrder.orderNumber})`
+            : `Devolución de saldo aplicado por orden expirada (${matchedOrder.orderNumber})`,
         needsAttention: false,
         attentionReason: null,
       });
       await updateWebhookEventStatus(recordId, "processed");
-      return { outcome: "partial_underpaid_credited", orderId: matchedOrder.id };
+      return {
+        outcome:
+          authoritativePaidCents > 0 ? "partial_underpaid_credited" : "expired",
+        orderId: matchedOrder.id,
+      };
     }
 
     await releaseReservedCodesForOrder(matchedOrder.id);
@@ -500,12 +534,22 @@ export async function processVerifiedWebhookEvent(
     }
 
     if (shouldSettleToCredit && authoritativePaidCents === 0) {
-      await releaseReservedCodesForOrder(matchedOrder.id);
-      await transitionOrderStatus({
-        orderId: matchedOrder.id,
-        expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
-        nextStatus: "EXPIRED",
-      });
+      if (matchedOrder.creditAppliedCents > 0) {
+        await settleUnderpaymentToCredit({
+          order: matchedOrder,
+          paidCents: 0,
+          note: `Devolución de saldo aplicado por orden expirada (${matchedOrder.orderNumber})`,
+          needsAttention: false,
+          attentionReason: null,
+        });
+      } else {
+        await releaseReservedCodesForOrder(matchedOrder.id);
+        await transitionOrderStatus({
+          orderId: matchedOrder.id,
+          expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
+          nextStatus: "EXPIRED",
+        });
+      }
       await updateWebhookEventStatus(recordId, "processed");
       return { outcome: "expired", orderId: matchedOrder.id };
     }
@@ -739,4 +783,165 @@ export async function syncCentralOneOrderProgress(
   }
 
   return { ok: true, status: live.status, addedCodes };
+}
+
+/**
+ * Self-service resolution for partially paid orders (`PENDING_PAYMENT` with `paidCents > 0`).
+ * Customers can either cover the missing difference with existing store credit (`complete_with_credit`)
+ * or convert the partial payment immediately into store credit (`convert_to_credit_now`) without waiting for expiry.
+ */
+export async function resolveOrderUnderpayment(params: {
+  orderId: string;
+  actorUser: SessionUser;
+  mode: "complete_with_credit" | "convert_to_credit_now";
+  skipRemoteDoubleCheck?: boolean;
+}): Promise<{
+  outcome: "fulfilled" | "converted_to_credit";
+  order: OrderDTO;
+  creditDeltaCents: number;
+}> {
+  const order = await getOrderById(params.orderId);
+  if (!order) {
+    throw new Error("ORDER_NOT_FOUND");
+  }
+
+  const isOwner = order.userId === params.actorUser.id;
+  const isAdmin = params.actorUser.role === "admin";
+  if (!isOwner && !isAdmin) {
+    throw new Error("FORBIDDEN_ORDER_OWNER");
+  }
+
+  if (order.status !== "PENDING_PAYMENT" && order.status !== "CREATED") {
+    throw new Error(`INVALID_ORDER_STATUS:${order.status}`);
+  }
+
+  let authoritativePaidCents = order.paidCents;
+  if (
+    !params.skipRemoteDoubleCheck &&
+    order.paymentGateway === "zenobank" &&
+    order.gatewayCheckoutId
+  ) {
+    try {
+      const gw = getPaymentGateway("zenobank");
+      const liveSession = await gw.getCheckout(order.gatewayCheckoutId);
+      authoritativePaidCents = Math.max(order.paidCents, liveSession.paidCents);
+    } catch {
+      // Fallback to persisted paidCents if gateway query temporarily fails
+    }
+  }
+
+  if (authoritativePaidCents <= 0) {
+    throw new Error("NO_PARTIAL_PAYMENT_DETECTED");
+  }
+
+  // If the customer actually completed full payment in the meantime, fulfill directly
+  if (authoritativePaidCents >= order.amountDueCents) {
+    const transitioned = await transitionOrderStatus({
+      orderId: order.id,
+      expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
+      nextStatus: "PAID",
+      paidCents: authoritativePaidCents,
+    });
+    if (transitioned) {
+      await fulfillOrder(order.id);
+    }
+    const updated = (await getOrderById(order.id)) ?? order;
+    return {
+      outcome: "fulfilled",
+      order: updated,
+      creditDeltaCents: 0,
+    };
+  }
+
+  if (params.mode === "convert_to_credit_now") {
+    const settled = await settleUnderpaymentToCredit({
+      order,
+      paidCents: authoritativePaidCents,
+      note: `Pago parcial acreditado a solicitud del cliente (${order.orderNumber})`,
+      needsAttention: false,
+      attentionReason: null,
+    });
+    if (!settled) {
+      throw new Error("ORDER_STATE_CONFLICT");
+    }
+    await appendAuditLog({
+      actorId: params.actorUser.id,
+      actorRole: params.actorUser.role,
+      action: "order.underpayment_converted_to_credit",
+      targetType: "order",
+      targetId: order.id,
+      metadata: {
+        paidCents: authoritativePaidCents,
+        creditAppliedCents: order.creditAppliedCents,
+      },
+    });
+    const updated = (await getOrderById(order.id)) ?? order;
+    return {
+      outcome: "converted_to_credit",
+      order: updated,
+      creditDeltaCents: authoritativePaidCents + order.creditAppliedCents,
+    };
+  }
+
+  // mode === "complete_with_credit"
+  const missingCents = order.amountDueCents - authoritativePaidCents;
+  const targetUserId = order.userId ?? params.actorUser.id;
+  const availableCredit = await getUserCreditBalanceCents(targetUserId);
+
+  if (availableCredit < missingCents) {
+    throw new Error(
+      `INSUFFICIENT_CREDIT_FOR_DIFFERENCE:needed=${missingCents},available=${availableCredit}`
+    );
+  }
+
+  // Deduct missing cents from customer's credit ledger
+  await appendCreditLedgerEntry({
+    userId: targetUserId,
+    orderId: order.id,
+    deltaCents: -missingCents,
+    reason: "checkout_apply",
+    note: `Cobertura de diferencia faltante en orden ${order.orderNumber}`,
+    createdBy: params.actorUser.id,
+  });
+
+  const transitioned = await transitionOrderStatus({
+    orderId: order.id,
+    expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
+    nextStatus: "PAID",
+    paidCents: authoritativePaidCents,
+  });
+
+  if (!transitioned) {
+    // Rollback ledger deduction if concurrent webhook already transitioned the order
+    await appendCreditLedgerEntry({
+      userId: targetUserId,
+      orderId: order.id,
+      deltaCents: missingCents,
+      reason: "fulfillment_refund",
+      note: `Reverso por transición concurrente en orden ${order.orderNumber}`,
+      createdBy: null,
+    });
+    throw new Error("ORDER_STATE_CONFLICT");
+  }
+
+  await applyAdditionalCreditToOrder(order.id, missingCents);
+
+  await appendAuditLog({
+    actorId: params.actorUser.id,
+    actorRole: params.actorUser.role,
+    action: "order.underpayment_completed_with_credit",
+    targetType: "order",
+    targetId: order.id,
+    metadata: {
+      paidCents: authoritativePaidCents,
+      creditCoveredCents: missingCents,
+    },
+  });
+
+  const fulfilledOrder = await fulfillOrder(order.id);
+  return {
+    outcome: "fulfilled",
+    order: fulfilledOrder,
+    creditDeltaCents: -missingCents,
+  };
 }

@@ -54,21 +54,26 @@ export default function HelpPage() {
             Pagos parciales, expirados o excedentes
           </h2>
           <p className="text-xs text-slate-300 leading-relaxed">
-            Si envías por error menos cripto de lo indicado (o pagas después de expirar el cronómetro) o si envías un monto superior, nunca pierdes tus fondos:
+            Si envías por error menos cripto de lo indicado (por ejemplo por comisión de red) o un monto superior, nunca pierdes ni un centavo:
           </p>
           <p className="text-xs text-slate-400 leading-relaxed">
-            El sistema acredita automáticamente el monto exacto verificado a tu{" "}
-            <strong className="text-white">saldo a favor interno</strong> en tu cuenta para que completes o hagas otra compra sin pagar de más.
+            Desde la página de tu orden puedes{" "}
+            <strong className="text-white">cubrir la diferencia al instante con tu saldo a favor</strong>{" "}
+            para recibir el código de inmediato, o{" "}
+            <strong className="text-white">convertir el pago parcial en saldo a favor en un clic</strong>{" "}
+            sin esperar a que expire el cronómetro. Cualquier excedente también se acredita automáticamente 1:1.
           </p>
         </div>
 
         <div className="rounded-3xl apple-glass p-6 space-y-3">
           <Lock className="w-6 h-6 text-sky-400" />
           <h2 className="text-base font-black text-white">
-            Privacidad de tus códigos
+            Notificación por correo y bóveda cifrada
           </h2>
           <p className="text-xs text-slate-300 leading-relaxed">
-            Nunca enviamos códigos ni PINs en texto plano por correo electrónico ni WhatsApp. Todo código permanece cifrado con AES-256-GCM en el servidor hasta que tú mismo haces clic en &quot;Revelar códigos&quot; dentro de tu orden.
+            Apenas se confirma tu pago, te enviamos un correo automático desde{" "}
+            <span className="font-mono text-white">pedidos@storycheap.com</span>{" "}
+            con el recibo y el enlace directo a tu orden. Por seguridad contra accesos no autorizados a tu bandeja de correo, el PIN secreto permanece cifrado con AES-256-GCM y solo se descifra cuando haces clic en &quot;Revelar códigos&quot; dentro de tu cuenta (jamás pedimos datos ni enviamos códigos por WhatsApp).
           </p>
         </div>
 

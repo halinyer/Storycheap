@@ -1023,7 +1023,21 @@ export async function releaseExpiredReservations(): Promise<{
         order.expiresAt &&
         Date.parse(order.expiresAt) < nowMs
       ) {
-        order.status = "EXPIRED";
+        if (order.creditAppliedCents > 0) {
+          const userId =
+            order.userId ?? (await ensureCustomerProfile(order.email));
+          await appendCreditLedgerEntry({
+            userId,
+            orderId: order.id,
+            deltaCents: order.creditAppliedCents,
+            reason: "fulfillment_refund",
+            note: `Devolución automática de saldo aplicado al vencer orden (${order.orderNumber})`,
+            createdBy: null,
+          });
+          order.status = "REFUNDED_CREDIT";
+        } else {
+          order.status = "EXPIRED";
+        }
         order.updatedAt = new Date().toISOString();
         expiredOrders += 1;
       }
@@ -1031,12 +1045,44 @@ export async function releaseExpiredReservations(): Promise<{
     return { releasedCodes, expiredOrders };
   }
 
+  // Before running SQL expiration, refund pre-applied store credit on expired PENDING_PAYMENT orders
+  const nowIso = new Date().toISOString();
+  const { data: expiredWithCredit } = await ctx.admin
+    .from("orders")
+    .select("id, order_number, user_id, email, credit_applied_cents, paid_cents")
+    .eq("status", "PENDING_PAYMENT")
+    .gt("credit_applied_cents", 0)
+    .lt("expires_at", nowIso);
+
+  for (const row of expiredWithCredit ?? []) {
+    const transitioned = await transitionOrderStatus({
+      orderId: row.id,
+      expectedStatuses: ["PENDING_PAYMENT"],
+      nextStatus: "REFUNDED_CREDIT",
+      paidCents: Number(row.paid_cents ?? 0),
+    });
+    if (transitioned) {
+      await releaseReservedCodesForOrder(row.id);
+      const userId =
+        row.user_id ?? (await ensureCustomerProfile(String(row.email)));
+      await appendCreditLedgerEntry({
+        userId,
+        orderId: row.id,
+        deltaCents: Number(row.credit_applied_cents),
+        reason: "fulfillment_refund",
+        note: `Devolución automática de saldo aplicado al vencer orden (${row.order_number})`,
+        createdBy: null,
+      });
+    }
+  }
+
   const { data, error } = await ctx.admin.rpc("release_expired_reservations");
   if (error) throw error;
   const first = Array.isArray(data) ? data[0] : data;
   return {
     releasedCodes: Number(first?.released_codes ?? 0),
-    expiredOrders: Number(first?.expired_orders ?? 0),
+    expiredOrders:
+      Number(first?.expired_orders ?? 0) + (expiredWithCredit?.length ?? 0),
   };
 }
 
@@ -1662,6 +1708,41 @@ export async function updateOrderPartialPaymentCents(
     .eq("id", orderId)
     .in("status", ["PENDING_PAYMENT", "CREATED"])
     .lt("paid_cents", paidCents);
+  if (error) throw error;
+}
+
+export async function applyAdditionalCreditToOrder(
+  orderId: string,
+  additionalCreditCents: number
+): Promise<void> {
+  if (!Number.isInteger(additionalCreditCents) || additionalCreditCents <= 0) return;
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const order = getSandboxState().orders.find((o) => o.id === orderId);
+    if (order) {
+      order.creditAppliedCents += additionalCreditCents;
+      order.amountDueCents = Math.max(0, order.amountDueCents - additionalCreditCents);
+      order.updatedAt = new Date().toISOString();
+    }
+    return;
+  }
+
+  const { data: row, error: readErr } = await ctx.admin
+    .from("orders")
+    .select("credit_applied_cents, amount_due_cents")
+    .eq("id", orderId)
+    .single();
+  if (readErr || !row) throw readErr ?? new Error("Order not found");
+
+  const nextCredit = Number(row.credit_applied_cents ?? 0) + additionalCreditCents;
+  const nextDue = Math.max(0, Number(row.amount_due_cents ?? 0) - additionalCreditCents);
+  const { error } = await ctx.admin
+    .from("orders")
+    .update({
+      credit_applied_cents: nextCredit,
+      amount_due_cents: nextDue,
+    })
+    .eq("id", orderId);
   if (error) throw error;
 }
 
@@ -2309,6 +2390,25 @@ export async function listPendingSupplierOrders(
     .in("status", ["pending", "confirmed", "processing"])
     .order("created_at", { ascending: true })
     .limit(limit);
+
+  if (error) throw error;
+  return (data ?? []).map((r) => mapSupplierOrderRow(r as Record<string, unknown>));
+}
+
+export async function listPendingSupplierOrdersForOrder(
+  orderId: string,
+  provider = "centralone"
+): Promise<SupplierOrderRecord[]> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") return [];
+
+  const { data, error } = await ctx.admin
+    .from("supplier_orders")
+    .select("*")
+    .eq("order_id", orderId)
+    .eq("provider", provider)
+    .in("status", ["pending", "confirmed", "processing"])
+    .order("created_at", { ascending: true });
 
   if (error) throw error;
   return (data ?? []).map((r) => mapSupplierOrderRow(r as Record<string, unknown>));

@@ -24,6 +24,52 @@ const REASON_LABELS: Record<CreditLedgerEntryDTO["reason"], string> = {
   admin_adjust: "Ajuste manual de soporte",
 };
 
+const ORDER_STATUS_BADGES: Record<
+  OrderDTO["status"],
+  { label: string; className: string }
+> = {
+  CREATED: {
+    label: "Orden creada",
+    className: "bg-slate-500/15 border-slate-500/30 text-slate-300",
+  },
+  PENDING_PAYMENT: {
+    label: "Esperando pago",
+    className: "bg-amber-500/15 border-amber-500/30 text-amber-300",
+  },
+  PAID: {
+    label: "Pago confirmado",
+    className: "bg-sky-500/15 border-sky-500/30 text-sky-300",
+  },
+  FULFILLING: {
+    label: "Preparando código",
+    className: "bg-sky-500/15 border-sky-500/30 text-sky-300",
+  },
+  DELIVERED: {
+    label: "Listo para canjear",
+    className: "bg-emerald-500/15 border-emerald-500/30 text-emerald-300",
+  },
+  PARTIAL: {
+    label: "Entrega parcial",
+    className: "bg-amber-500/15 border-amber-500/30 text-amber-300",
+  },
+  EXPIRED: {
+    label: "Expirada",
+    className: "bg-slate-500/15 border-slate-500/30 text-slate-400",
+  },
+  CANCELLED: {
+    label: "Cancelada",
+    className: "bg-rose-500/15 border-rose-500/30 text-rose-300",
+  },
+  REFUNDED_CREDIT: {
+    label: "Saldo acreditado",
+    className: "bg-emerald-500/15 border-emerald-500/30 text-emerald-300",
+  },
+  MANUAL_REVIEW: {
+    label: "En verificación",
+    className: "bg-amber-500/15 border-amber-500/30 text-amber-300",
+  },
+};
+
 export default function AccountPage() {
   const { sessionUser, isSessionLoading } = useStore();
   const [tab, setTab] = useState<AccountTab>("orders");
@@ -193,8 +239,13 @@ export default function AccountPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-4">
-                    <span className="px-3 py-1 rounded-xl bg-white/[0.06] border border-white/10 text-xs font-bold text-sky-300">
-                      {o.status}
+                    <span
+                      className={`px-3 py-1 rounded-xl border text-xs font-bold ${
+                        ORDER_STATUS_BADGES[o.status]?.className ??
+                        "bg-white/[0.06] border-white/10 text-sky-300"
+                      }`}
+                    >
+                      {ORDER_STATUS_BADGES[o.status]?.label ?? o.status}
                     </span>
                     <div className="text-right">
                       <div className="text-sm font-black text-white">

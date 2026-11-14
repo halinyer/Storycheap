@@ -71,7 +71,7 @@ const METHODS: MethodMark[] = [
 ];
 
 /**
- * Minimalist Apple-inspired payment trust bar (`strip` on Home, `card` below product preview).
+ * Minimalist borderless payment ribbon (`strip` on Home, `card` below product preview).
  */
 export function PayYourWay({ variant }: { variant: "strip" | "card" }) {
   if (variant === "card") {
@@ -103,31 +103,33 @@ export function PayYourWay({ variant }: { variant: "strip" | "card" }) {
   }
 
   return (
-    <section className="max-w-7xl mx-auto px-4 sm:px-6 mb-7">
-      <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] px-5 py-3.5 sm:px-6 flex flex-col md:flex-row md:items-center md:justify-between gap-3.5">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-          <span className="text-sm font-semibold text-white tracking-tight">
-            Paga a tu manera
-          </span>
-          <span className="text-xs text-slate-400">
-            Pagos verificados al instante y entrega cifrada.
+    <section className="max-w-7xl mx-auto px-4 sm:px-6 pt-2 pb-1">
+      <div className="flex flex-wrap items-center justify-center sm:justify-between gap-4 py-2.5 px-2 text-xs">
+        <div className="flex items-center gap-2.5 text-slate-400">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400" />
+          <span className="font-bold text-slate-200">Paga a tu manera</span>
+          <span className="hidden sm:inline text-white/15">•</span>
+          <span className="hidden sm:inline text-slate-400">
+            Verificación cripto al instante y bóveda cifrada
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
           {METHODS.map((item) => (
             <span
               key={item.id}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+              className={`inline-flex items-center gap-1.5 text-xs font-semibold transition-opacity ${
                 item.soon
-                  ? "border-white/[0.06] bg-transparent text-slate-400"
-                  : "border-white/[0.1] bg-white/[0.03] text-slate-100"
+                  ? "text-slate-500 opacity-70"
+                  : "text-slate-200 hover:text-white"
               }`}
             >
               {item.icon}
               <span>{item.label}</span>
               {item.soon && (
-                <span className="text-[10px] text-slate-500">· pronto</span>
+                <span className="text-[10px] font-normal text-slate-500">
+                  (pronto)
+                </span>
               )}
             </span>
           ))}

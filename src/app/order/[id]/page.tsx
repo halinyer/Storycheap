@@ -59,27 +59,36 @@ function OrderDetailInner() {
     tone: string;
   } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [authRequired, setAuthRequired] = useState(false);
   const [loading, setLoading] = useState(true);
   const [revealing, setRevealing] = useState(false);
   const [revealedCodes, setRevealedCodes] = useState<RevealedCodeDTO[] | null>(
     null
   );
   const [simulating, setSimulating] = useState(false);
+  const [resolvingUnderpayment, setResolvingUnderpayment] = useState(false);
+  const [userCreditBalanceCents, setUserCreditBalanceCents] = useState(0);
 
   const fetchOrder = useCallback(async () => {
     try {
       const res = await fetch(`/api/orders/${orderId}`, { cache: "no-store" });
       if (!res.ok) {
         const err = (await res.json().catch(() => ({}))) as { error?: string };
+        setAuthRequired(res.status === 401 || res.status === 403);
         setErrorMsg(err.error ?? "No se pudo cargar la orden.");
         return;
       }
       const data = (await res.json()) as {
         order: OrderDTO;
         statusMeta: { label: string; description: string; tone: string };
+        userCreditBalanceCents?: number;
       };
       setOrder(data.order);
       setStatusMeta(data.statusMeta);
+      if (typeof data.userCreditBalanceCents === "number") {
+        setUserCreditBalanceCents(data.userCreditBalanceCents);
+      }
+      setAuthRequired(false);
       setErrorMsg(null);
     } catch {
       setErrorMsg("Error de red al consultar el estado de la orden.");
@@ -94,16 +103,24 @@ function OrderDetailInner() {
       .then(async (res) => {
         if (!res.ok) {
           const err = (await res.json().catch(() => ({}))) as { error?: string };
-          if (active) setErrorMsg(err.error ?? "No se pudo cargar la orden.");
+          if (active) {
+            setAuthRequired(res.status === 401 || res.status === 403);
+            setErrorMsg(err.error ?? "No se pudo cargar la orden.");
+          }
           return;
         }
         const data = (await res.json()) as {
           order: OrderDTO;
           statusMeta: { label: string; description: string; tone: string };
+          userCreditBalanceCents?: number;
         };
         if (active) {
           setOrder(data.order);
           setStatusMeta(data.statusMeta);
+          if (typeof data.userCreditBalanceCents === "number") {
+            setUserCreditBalanceCents(data.userCreditBalanceCents);
+          }
+          setAuthRequired(false);
           setErrorMsg(null);
         }
       })
@@ -175,6 +192,38 @@ function OrderDetailInner() {
     }
   };
 
+  const handleResolveUnderpayment = async (
+    mode: "complete_with_credit" | "convert_to_credit_now"
+  ) => {
+    setResolvingUnderpayment(true);
+    try {
+      const res = await fetch(`/api/orders/${orderId}/resolve-underpayment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        outcome?: "fulfilled" | "converted_to_credit";
+        order?: OrderDTO;
+      };
+      if (!res.ok) {
+        throw new Error(data.error ?? "No se pudo resolver el pago parcial.");
+      }
+      if (data.order) setOrder(data.order);
+      await fetchOrder();
+      if (data.outcome === "fulfilled") {
+        toast.success("Diferencia cubierta con tu saldo a favor. Orden entregada.");
+      } else {
+        toast.success("Pago parcial acreditado inmediatamente a tu saldo a favor.");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error al procesar");
+    } finally {
+      setResolvingUnderpayment(false);
+    }
+  };
+
   const copyCode = async (value: string) => {
     await navigator.clipboard.writeText(value);
     toast.success("Código copiado al portapapeles");
@@ -189,20 +238,35 @@ function OrderDetailInner() {
   }
 
   if (errorMsg || !order) {
+    const loginNext = encodeURIComponent(`/order/${orderId}`);
     return (
       <div className="max-w-xl mx-auto px-4 sm:px-6 py-16 text-center space-y-4">
         <AlertCircle className="w-10 h-10 text-amber-400 mx-auto" />
-        <h1 className="text-xl font-black text-white">Acceso restringido o no encontrado</h1>
+        <h1 className="text-xl font-black text-white">
+          {authRequired
+            ? "Inicia sesión para abrir tu bóveda"
+            : "Orden no encontrada"}
+        </h1>
         <p className="text-xs text-slate-400 leading-relaxed">
-          {errorMsg ?? "Inicia sesión con el correo usado en tu compra para ver esta orden."}
+          {authRequired
+            ? "Por seguridad, solo el titular de la compra puede ver y revelar estos códigos digitales. Inicia sesión con el correo usado en tu pedido."
+            : errorMsg ?? "Verifica el enlace o consulta tus pedidos desde tu cuenta."}
         </p>
-        <div className="flex justify-center gap-3 pt-2">
+        <div className="flex flex-wrap justify-center gap-3 pt-2">
           <Link
-            href="/login"
+            href={`/login?next=${loginNext}`}
             className="px-4 py-2.5 rounded-xl bg-white text-slate-950 font-black text-xs"
           >
             Iniciar sesión
           </Link>
+          {authRequired && (
+            <Link
+              href={`/login?mode=magic-link&next=${loginNext}`}
+              className="px-4 py-2.5 rounded-xl bg-sky-500/15 border border-sky-400/30 text-sky-200 font-bold text-xs"
+            >
+              Entrar con enlace mágico
+            </Link>
+          )}
           <Link
             href="/"
             className="px-4 py-2.5 rounded-xl border border-white/10 text-slate-200 font-bold text-xs"
@@ -286,32 +350,70 @@ function OrderDetailInner() {
         {order.status === "PENDING_PAYMENT" &&
           order.paidCents > 0 &&
           order.paidCents < order.amountDueCents && (
-            <div className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-4 flex flex-wrap items-center justify-between gap-4">
-              <div className="text-xs text-amber-100 leading-relaxed max-w-xl">
-                <span className="font-bold text-amber-300 block mb-0.5">
-                  Pago parcial recibido: {formatCents(order.paidCents)} de{" "}
-                  {formatCents(order.amountDueCents)} USD
-                </span>
-                Te faltan{" "}
-                <strong className="text-white">
-                  {formatCents(order.amountDueCents - order.paidCents)} USD
-                </strong>{" "}
-                (por ejemplo por décimas o comisión de red). Completa esa
-                diferencia en ZenoBank antes de que venza el enlace; si expira,
-                acreditaremos tus {formatCents(order.paidCents)} USD como saldo
-                a favor automático para tu siguiente compra.
-              </div>
-              {order.gatewayCheckoutUrl && (
-                <a
-                  href={order.gatewayCheckoutUrl}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs shrink-0"
-                >
-                  <span>
-                    Completar {formatCents(order.amountDueCents - order.paidCents)} en ZenoBank
+            <div className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-5 space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="text-xs text-amber-100 leading-relaxed max-w-xl">
+                  <span className="font-bold text-amber-300 block mb-0.5">
+                    Pago parcial recibido: {formatCents(order.paidCents)} de{" "}
+                    {formatCents(order.amountDueCents)} USD
                   </span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              )}
+                  Te faltan{" "}
+                  <strong className="text-white">
+                    {formatCents(order.amountDueCents - order.paidCents)} USD
+                  </strong>{" "}
+                  (por ejemplo por décimas o comisión de red). Puedes completar la
+                  diferencia en ZenoBank, cubrirla con tu saldo a favor o
+                  convertir tus {formatCents(order.paidCents)} USD en saldo a
+                  favor ahora mismo sin esperar a que venza el enlace.
+                </div>
+                {order.gatewayCheckoutUrl && (
+                  <a
+                    href={order.gatewayCheckoutUrl}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs shrink-0"
+                  >
+                    <span>
+                      Completar {formatCents(order.amountDueCents - order.paidCents)} en ZenoBank
+                    </span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
+              </div>
+
+              <div className="pt-3 border-t border-amber-400/20 flex flex-wrap items-center gap-2.5">
+                {userCreditBalanceCents >=
+                  order.amountDueCents - order.paidCents && (
+                  <button
+                    type="button"
+                    disabled={resolvingUnderpayment}
+                    onClick={() =>
+                      void handleResolveUnderpayment("complete_with_credit")
+                    }
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-400 hover:bg-emerald-300 disabled:opacity-50 text-slate-950 font-black text-xs"
+                  >
+                    <Wallet className="w-3.5 h-3.5" />
+                    <span>
+                      Cubrir{" "}
+                      {formatCents(order.amountDueCents - order.paidCents)} con
+                      mi saldo a favor y recibir código ahora
+                    </span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  disabled={resolvingUnderpayment}
+                  onClick={() =>
+                    void handleResolveUnderpayment("convert_to_credit_now")
+                  }
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 disabled:opacity-50 border border-white/15 text-white font-bold text-xs"
+                >
+                  <Wallet className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>
+                    Convertir mis {formatCents(order.paidCents)} USD en saldo a
+                    favor ahora
+                  </span>
+                </button>
+              </div>
             </div>
           )}
 
@@ -407,8 +509,8 @@ function OrderDetailInner() {
               <div className="text-xs text-emerald-100 leading-relaxed">
                 <span className="font-bold block">
                   Saldo a favor acreditado:{" "}
-                  {order.paidCents > 0
-                    ? `${formatCents(order.paidCents)} USD`
+                  {order.paidCents + order.creditAppliedCents > 0
+                    ? `${formatCents(order.paidCents + order.creditAppliedCents)} USD`
                     : "Disponible en tu cuenta"}
                 </span>
                 No perdiste tu dinero. En tu próxima compra se aplicará

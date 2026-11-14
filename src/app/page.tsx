@@ -70,10 +70,10 @@ export default function HomePage() {
                 02
               </div>
               <h3 className="text-base font-extrabold text-white">
-                Paga directo sin recargar billetera
+                Inicia sesión y paga el monto exacto
               </h3>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Ingresa tu correo y completa el pago seguro vía ZenoBank (cripto). Si ya tienes saldo a favor previo, puedes aplicarlo automáticamente.
+                Tu orden queda protegida en tu cuenta StoryCheap. Si tienes saldo a favor se descuenta automáticamente y, si un pago cripto queda incompleto, puedes cubrir la diferencia o acreditarlo al instante.
               </p>
             </div>
 
@@ -82,10 +82,12 @@ export default function HomePage() {
                 03
               </div>
               <h3 className="text-base font-extrabold text-white">
-                Revela tu código en tu bóveda
+                Recibe correo y revela en tu bóveda
               </h3>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Tu pago se verifica criptográficamente en segundos y desbloqueamos tu código cifrado en pantalla y en tu cuenta.
+                Al confirmarse el pago te enviamos un correo automático desde{" "}
+                <span className="text-slate-200 font-semibold">pedidos@storycheap.com</span>{" "}
+                y desbloqueamos tu código cifrado en pantalla y en tu cuenta.
               </p>
             </div>
           </div>
