@@ -81,6 +81,15 @@ export async function initiateCheckout(
   }
 
   const bsRateCents = await getBsRateCents();
+  if (
+    amountDueCents > 0 &&
+    (input.paymentGateway === "pagomovil" || input.paymentGateway === "pablito")
+  ) {
+    const { assertPagoMovilCheckoutReady } = await import(
+      "./payments/pagomovil-bot"
+    );
+    await assertPagoMovilCheckoutReady(bsRateCents);
+  }
   const totalBsCents =
     bsRateCents && bsRateCents > 0
       ? Math.round((subtotalCents * bsRateCents) / 100)

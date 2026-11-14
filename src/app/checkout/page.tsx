@@ -1,7 +1,7 @@
 /* eslint-disable @next/next/no-img-element */
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useStore } from "@/context/store-context";
@@ -10,16 +10,28 @@ import {
   ArrowLeft,
   CheckCircle2,
   Coins,
-  CreditCard,
   ExternalLink,
   Loader2,
   Lock,
   Mail,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   Wallet,
 } from "lucide-react";
 import { toast } from "sonner";
+
+interface PagoMovilAvailability {
+  enabled: boolean;
+  configured: boolean;
+  available: boolean;
+  bsRateCents: number | null;
+  watchdogOnline: boolean;
+  watchdogRequired: boolean;
+  activeDevices: number;
+  receiverBankName: string | null;
+  receiverAccountType: "natural" | "juridical" | null;
+}
 
 export default function CheckoutPage() {
   const router = useRouter();
@@ -34,12 +46,31 @@ export default function CheckoutPage() {
 
   const [applyCredit, setApplyCredit] = useState(true);
   const [acceptedRegionPolicy, setAcceptedRegionPolicy] = useState(false);
+  const [paymentGateway, setPaymentGateway] = useState<"zenobank" | "pagomovil">("zenobank");
+  const [pmAvailability, setPmAvailability] = useState<PagoMovilAvailability | null>(
+    null
+  );
   const [submitting, setSubmitting] = useState(false);
   const [redirecting, setRedirecting] = useState<{
-    mode: "zenobank" | "vault";
+    mode: "zenobank" | "pagomovil" | "vault";
     orderId: string;
     checkoutUrl?: string;
   } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/payments/pagomovil/availability", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: PagoMovilAvailability | null) => {
+        if (active && data) {
+          setPmAvailability(data);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const usableCreditCents =
     sessionUser && applyCredit
@@ -77,7 +108,7 @@ export default function CheckoutPage() {
             quantity: it.quantity,
           })),
           applyStoreCredit: Boolean(sessionUser && applyCredit),
-          paymentGateway: "zenobank",
+          paymentGateway: amountDueCents === 0 ? "zenobank" : paymentGateway,
         }),
       });
 
@@ -95,7 +126,9 @@ export default function CheckoutPage() {
       }
 
       const targetMode =
-        data.paidInFullByCredit || !data.checkoutUrl ? "vault" : "zenobank";
+        data.paidInFullByCredit || !data.checkoutUrl || amountDueCents === 0
+          ? "vault"
+          : paymentGateway;
       setRedirecting({
         mode: targetMode,
         orderId: data.orderId,
@@ -110,7 +143,7 @@ export default function CheckoutPage() {
         return;
       }
 
-      // If sandbox local URL, navigate via Next router; if external ZenoBank URL, redirect browser immediately
+      // If sandbox/local hosted URL (/pay/pagomovil/[id]), navigate via Next router; if external ZenoBank URL, redirect browser immediately
       if (data.checkoutUrl.startsWith(window.location.origin)) {
         const rel = data.checkoutUrl.slice(window.location.origin.length);
         router.push(rel);
@@ -128,6 +161,7 @@ export default function CheckoutPage() {
 
   if (redirecting) {
     const isZeno = redirecting.mode === "zenobank";
+    const isPagoMovil = redirecting.mode === "pagomovil";
     return (
       <div className="max-w-xl mx-auto px-4 sm:px-6 py-20">
         <div className="rounded-3xl apple-glass p-8 sm:p-10 text-center space-y-5 border border-sky-500/25">
@@ -138,24 +172,32 @@ export default function CheckoutPage() {
             <h1 className="text-2xl font-black text-white">
               {isZeno
                 ? "Conectando con ZenoBank..."
-                : "Pago confirmado · Abriendo tu bóveda..."}
+                : isPagoMovil
+                  ? "Abriendo ventana de Pago Móvil (Bs)..."
+                  : "Pago confirmado · Abriendo tu bóveda..."}
             </h1>
             <p className="text-xs text-slate-300 leading-relaxed">
               {isZeno
                 ? "Tu orden ya fue creada de forma segura. En un instante se abrirá la pasarela crypto de ZenoBank para completar tu pago."
-                : "Tu saldo cubrió el total de la orden. Te estamos llevando a tus códigos."}
+                : isPagoMovil
+                  ? "Tu orden ya fue creada con la tasa en Bolívares congelada. En un instante verás los datos bancarios y el verificador automático."
+                  : "Tu saldo cubrió el total de la orden. Te estamos llevando a tus códigos."}
             </p>
           </div>
           <div className="text-[11px] font-mono text-slate-400 bg-slate-950/70 border border-white/10 rounded-xl px-3 py-2 inline-block">
             Orden: {redirecting.orderId}
           </div>
           <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
-            {isZeno && redirecting.checkoutUrl && (
+            {(isZeno || isPagoMovil) && redirecting.checkoutUrl && (
               <a
                 href={redirecting.checkoutUrl}
                 className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs transition-colors"
               >
-                <span>Abrir ZenoBank ahora</span>
+                <span>
+                  {isPagoMovil
+                    ? "Abrir ventana Pago Móvil"
+                    : "Abrir ZenoBank ahora"}
+                </span>
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
             )}
@@ -322,7 +364,15 @@ export default function CheckoutPage() {
               </div>
             ) : (
               <div className="space-y-3">
-                <div className="rounded-2xl border-2 border-sky-500/60 bg-sky-500/10 p-4 flex items-start justify-between gap-4">
+                <button
+                  type="button"
+                  onClick={() => setPaymentGateway("zenobank")}
+                  className={`w-full text-left rounded-2xl p-4 flex items-start justify-between gap-4 transition-all ${
+                    paymentGateway === "zenobank"
+                      ? "border-2 border-sky-500/70 bg-sky-500/10"
+                      : "border border-white/10 bg-white/[0.02] hover:bg-white/[0.04]"
+                  }`}
+                >
                   <div className="flex items-start gap-3">
                     <div className="w-9 h-9 rounded-xl bg-sky-500/20 flex items-center justify-center text-sky-300 shrink-0 mt-0.5">
                       <Sparkles className="w-4 h-4" />
@@ -336,27 +386,81 @@ export default function CheckoutPage() {
                       </p>
                     </div>
                   </div>
-                  <span className="px-2.5 py-1 rounded-lg bg-sky-400 text-slate-950 text-[10px] font-black uppercase shrink-0">
-                    Activo
+                  <span
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase shrink-0 ${
+                      paymentGateway === "zenobank"
+                        ? "bg-sky-400 text-slate-950"
+                        : "bg-white/10 text-slate-300"
+                    }`}
+                  >
+                    {paymentGateway === "zenobank" ? "Seleccionado" : "Disponible"}
                   </span>
-                </div>
+                </button>
 
-                <div className="rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4 flex items-center justify-between opacity-55">
-                  <div className="flex items-center gap-3">
-                    <CreditCard className="w-5 h-5 text-slate-400" />
+                <button
+                  type="button"
+                  disabled={!pmAvailability?.available}
+                  onClick={() => {
+                    if (pmAvailability?.available) {
+                      setPaymentGateway("pagomovil");
+                    }
+                  }}
+                  className={`w-full text-left rounded-2xl p-4 flex items-start justify-between gap-4 transition-all ${
+                    !pmAvailability?.available
+                      ? "border border-white/[0.06] bg-white/[0.02] opacity-60 cursor-not-allowed"
+                      : paymentGateway === "pagomovil"
+                        ? "border-2 border-emerald-400/75 bg-emerald-500/10"
+                        : "border border-white/10 bg-white/[0.02] hover:bg-white/[0.04]"
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-500/20 flex items-center justify-center text-emerald-300 shrink-0 mt-0.5">
+                      <Smartphone className="w-4 h-4" />
+                    </div>
                     <div>
-                      <div className="text-xs font-bold text-slate-300">
-                        Pago Móvil Venezuela (Pablito API)
+                      <div className="text-sm font-black text-white">
+                        Pago Móvil Venezuela (Bs · Bot Propio)
                       </div>
-                      <div className="text-[11px] text-slate-500">
-                        Próximamente disponible
-                      </div>
+                      <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
+                        {pmAvailability?.available
+                          ? `Transferencia directa a ${pmAvailability.receiverBankName ?? "Bancamiga"} con verificación automática 24/7.${
+                              pmAvailability.bsRateCents
+                                ? ` Estimado: Bs ${(
+                                    Math.round(
+                                      (amountDueCents * pmAvailability.bsRateCents) / 100
+                                    ) / 100
+                                  ).toLocaleString("es-VE", {
+                                    minimumFractionDigits: 2,
+                                    maximumFractionDigits: 2,
+                                  })}.`
+                                : ""
+                            }`
+                          : !pmAvailability
+                            ? "Verificando disponibilidad..."
+                            : !pmAvailability.enabled
+                              ? "Desactivado temporalmente en Consola Admin."
+                              : !pmAvailability.configured
+                                ? "Requiere tasa Bs y cuenta bancaria configurada."
+                                : "Bot verificador bancario temporalmente fuera de línea."}
+                      </p>
                     </div>
                   </div>
-                  <span className="text-[10px] font-bold uppercase text-slate-500">
-                    Pronto
+                  <span
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase shrink-0 ${
+                      paymentGateway === "pagomovil" && pmAvailability?.available
+                        ? "bg-emerald-400 text-slate-950"
+                        : pmAvailability?.available
+                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/30"
+                          : "bg-white/5 text-slate-400"
+                    }`}
+                  >
+                    {paymentGateway === "pagomovil" && pmAvailability?.available
+                      ? "Seleccionado"
+                      : pmAvailability?.available
+                        ? "Bs Automático"
+                        : "Inactivo"}
                   </span>
-                </div>
+                </button>
               </div>
             )}
 
@@ -432,6 +536,36 @@ export default function CheckoutPage() {
                 {formatCents(amountDueCents)} USD
               </span>
             </div>
+            {paymentGateway === "pagomovil" &&
+              pmAvailability?.bsRateCents &&
+              amountDueCents > 0 && (
+                <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3.5 py-2.5 flex items-center justify-between">
+                  <div>
+                    <div className="text-[11px] font-bold text-emerald-300">
+                      Total estimado en Bolívares
+                    </div>
+                    <div className="text-[10px] text-slate-400">
+                      Tasa: Bs{" "}
+                      {(pmAvailability.bsRateCents / 100).toLocaleString("es-VE", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}{" "}
+                      / USD
+                    </div>
+                  </div>
+                  <div className="text-base font-black text-emerald-300 font-mono">
+                    Bs{" "}
+                    {(
+                      Math.round(
+                        (amountDueCents * pmAvailability.bsRateCents) / 100
+                      ) / 100
+                    ).toLocaleString("es-VE", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </div>
+                </div>
+              )}
           </div>
 
           {sessionUser ? (
@@ -445,8 +579,10 @@ export default function CheckoutPage() {
                 {submitting
                   ? "Creando orden segura..."
                   : amountDueCents === 0
-                  ? "Confirmar con Saldo a favor"
-                  : "Continuar al pago en ZenoBank"}
+                    ? "Confirmar con Saldo a favor"
+                    : paymentGateway === "pagomovil"
+                      ? "Continuar a Pago Móvil (Bs)"
+                      : "Continuar al pago en ZenoBank"}
               </span>
             </button>
           ) : (

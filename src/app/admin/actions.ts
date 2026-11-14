@@ -2,11 +2,26 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
+import {
+  BANK_BY_CODE,
+  DEFAULT_ANDROID_PACKAGES_BY_BANK,
+  normalizeVePhone,
+} from "@/lib/catalog-banks";
 import { requireAdminUser } from "@/lib/server/auth";
 import {
   adminRefundOrderToCredit,
   fulfillOrder,
 } from "@/lib/server/fulfillment";
+import {
+  deleteBotDevice,
+  listBankNotifications,
+  registerBotDevice,
+  savePagoMovilBotSettings,
+  saveReceiverBankAccount,
+  setBotDeviceActive,
+} from "@/lib/server/pagomovil-store";
+import { adminManualConfirmPagoMovil } from "@/lib/server/payments/pagomovil-bot";
+import { parseBankNotification } from "@/lib/server/payments/parsers";
 import {
   appendAuditLog,
   appendCreditLedgerEntry,
@@ -42,7 +57,12 @@ import {
   getFazerCardsCatalog,
 } from "@/lib/server/suppliers/fazercards";
 import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
-import type { ProviderConfigDTO, SourcePriority } from "@/types";
+import type {
+  BotDeviceDTO,
+  PagoMovilBotSettingsDTO,
+  ProviderConfigDTO,
+  SourcePriority,
+} from "@/types";
 
 export async function parseCsvCodesAction(rawText: string): Promise<CsvPreviewRow[]> {
   await requireAdminUser();
@@ -689,4 +709,260 @@ export async function captureMonthlyCapitalSnapshotAction(
 
   revalidatePath("/admin");
   return updated;
+}
+
+// ============================================================================
+// PAGO MOVIL BOT VERIFIER ADMIN ACTIONS
+// ============================================================================
+
+export async function saveReceiverBankAccountAction(input: {
+  id?: string;
+  bankCode: string;
+  accountType: "natural" | "juridical";
+  phone: string;
+  dni: string;
+  holderName: string;
+  allowedPackagesRaw?: string;
+  active: boolean;
+}) {
+  const adminUser = await requireAdminUser();
+  const bankInfo = BANK_BY_CODE.get(input.bankCode.trim());
+  const normalizedPhone = normalizeVePhone(input.phone);
+  if (!normalizedPhone || normalizedPhone.length < 10) {
+    throw new Error("Ingresa un teléfono Pago Móvil venezolano válido (ej. 04121234567).");
+  }
+  const cleanDni = input.dni.trim().toUpperCase();
+  if (cleanDni.length < 5) {
+    throw new Error("Ingresa la cédula o RIF (ej. V-24123456).");
+  }
+  const cleanHolder = input.holderName.trim();
+  if (cleanHolder.length < 3) {
+    throw new Error("Ingresa el nombre del titular de la cuenta.");
+  }
+
+  const parsedPackages = input.allowedPackagesRaw
+    ? input.allowedPackagesRaw
+        .split(/[,\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : DEFAULT_ANDROID_PACKAGES_BY_BANK[input.bankCode.trim()] ?? [
+        "SMS",
+        "EMAIL",
+      ];
+
+  const saved = await saveReceiverBankAccount(
+    {
+      id: input.id,
+      bankCode: input.bankCode.trim(),
+      bankName: bankInfo?.name ?? "Bancamiga",
+      accountType: input.accountType,
+      phone: normalizedPhone,
+      dni: cleanDni,
+      holderName: cleanHolder,
+      allowedPackages: parsedPackages,
+      active: input.active,
+    },
+    adminUser.id
+  );
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "pagomovil.save_receiver_account",
+    targetType: "receiver_bank_account",
+    targetId: saved.id,
+    metadata: {
+      bankCode: saved.bankCode,
+      accountType: saved.accountType,
+      active: saved.active,
+    },
+  });
+
+  revalidatePath("/admin/pagomovil");
+  revalidatePath("/checkout");
+  return saved;
+}
+
+export async function registerBotDeviceAction(input: {
+  name: string;
+  channelType: BotDeviceDTO["channelType"];
+  allowPlainBearer: boolean;
+  deviceIdentifier?: string;
+}) {
+  const adminUser = await requireAdminUser();
+  const cleanName = input.name.trim();
+  if (cleanName.length < 2) {
+    throw new Error("El nombre del dispositivo debe tener al menos 2 caracteres.");
+  }
+
+  const res = await registerBotDevice(
+    {
+      name: cleanName,
+      channelType: input.channelType,
+      allowPlainBearer: input.allowPlainBearer,
+      deviceIdentifier: input.deviceIdentifier?.trim() || undefined,
+    },
+    adminUser.id
+  );
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "pagomovil.register_device",
+    targetType: "bot_device",
+    targetId: res.device.id,
+    metadata: {
+      name: res.device.name,
+      channelType: res.device.channelType,
+      allowPlainBearer: res.device.allowPlainBearer,
+    },
+  });
+
+  revalidatePath("/admin/pagomovil");
+  return res;
+}
+
+export async function toggleBotDeviceAction(input: {
+  deviceId: string;
+  active: boolean;
+}) {
+  const adminUser = await requireAdminUser();
+  await setBotDeviceActive(input.deviceId, input.active, adminUser.id);
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "pagomovil.toggle_device",
+    targetType: "bot_device",
+    targetId: input.deviceId,
+    metadata: { active: input.active },
+  });
+  revalidatePath("/admin/pagomovil");
+}
+
+export async function deleteBotDeviceAction(deviceId: string) {
+  const adminUser = await requireAdminUser();
+  await deleteBotDevice(deviceId, adminUser.id);
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "pagomovil.delete_device",
+    targetType: "bot_device",
+    targetId: deviceId,
+    metadata: {},
+  });
+  revalidatePath("/admin/pagomovil");
+}
+
+export async function savePagoMovilBotSettingsAction(
+  input: Partial<PagoMovilBotSettingsDTO>
+) {
+  const adminUser = await requireAdminUser();
+  const saved = await savePagoMovilBotSettings(input, adminUser.id);
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "pagomovil.save_settings",
+    targetType: "store_settings",
+    targetId: "pagomovil_bot_settings",
+    metadata: { ...saved },
+  });
+  revalidatePath("/admin/pagomovil");
+  revalidatePath("/checkout");
+  return saved;
+}
+
+export async function testNotificationParserAction(input: {
+  title?: string;
+  content: string;
+  appPackage?: string;
+  sourceType?: "APP_PUSH" | "SMS" | "EMAIL";
+  preferredBankCode?: string;
+}) {
+  await requireAdminUser();
+  if (!input.content.trim()) {
+    throw new Error("Ingresa el texto de prueba de la notificación.");
+  }
+  const parsed = parseBankNotification({
+    title: input.title ?? null,
+    content: input.content,
+    appPackage: input.appPackage ?? null,
+    sourceType: input.sourceType ?? "APP_PUSH",
+    preferredBankCode: input.preferredBankCode ?? "0172",
+  });
+  const senderBankName = parsed.senderBankCode
+    ? BANK_BY_CODE.get(parsed.senderBankCode)?.name ?? null
+    : null;
+  return { ...parsed, senderBankName };
+}
+
+export async function manualConfirmPagoMovilAction(input: {
+  orderId: string;
+  referenceDigits: string;
+  paidBsCents?: number | null;
+  notificationId?: string | null;
+  note?: string;
+}) {
+  const adminUser = await requireAdminUser();
+  const res = await adminManualConfirmPagoMovil({
+    orderId: input.orderId,
+    adminUser,
+    referenceDigits: input.referenceDigits,
+    paidBsCents: input.paidBsCents,
+    notificationId: input.notificationId,
+    note: input.note,
+  });
+  revalidatePath("/admin/pagomovil");
+  revalidatePath("/admin/orders");
+  revalidatePath(`/order/${input.orderId}`);
+  return res;
+}
+
+export async function listBankNotificationsAdminAction() {
+  await requireAdminUser();
+  return listBankNotifications(100);
+}
+
+export async function fetchLiveVenezuelaRatesAction(): Promise<{
+  officialBcv: number | null;
+  paralelo: number | null;
+  source: string;
+  fetchedAt: string;
+}> {
+  await requireAdminUser();
+  try {
+    const res = await fetch("https://ve.dolarapi.com/v1/dolares", {
+      signal: AbortSignal.timeout(5000),
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const items = (await res.json()) as Array<{
+      fuente?: string;
+      nombre?: string;
+      promedio?: number;
+    }>;
+    let officialBcv: number | null = null;
+    let paralelo: number | null = null;
+    for (const item of items) {
+      const f = (item.fuente ?? item.nombre ?? "").toLowerCase();
+      if (f.includes("oficial") && typeof item.promedio === "number") {
+        officialBcv = item.promedio;
+      } else if (f.includes("paralelo") && typeof item.promedio === "number") {
+        paralelo = item.promedio;
+      }
+    }
+    return {
+      officialBcv,
+      paralelo,
+      source: "ve.dolarapi.com",
+      fetchedAt: new Date().toISOString(),
+    };
+  } catch (err) {
+    throw new Error(
+      err instanceof Error
+        ? `No se pudo consultar ve.dolarapi.com (${err.message})`
+        : "No se pudo consultar tasa en vivo."
+    );
+  }
 }

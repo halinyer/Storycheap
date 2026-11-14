@@ -691,21 +691,37 @@ export async function listProviderConfigs(): Promise<ProviderConfigDTO[]> {
     .select("*")
     .order("id");
   if (error) throw error;
-  return (data ?? []).map((r) => ({
-    id: r.id,
+  const rows = (data ?? []).map((r) => ({
+    id: r.id as ProviderConfigDTO["id"],
     label: (r.config?.label as string) || r.id,
     enabled: Boolean(r.enabled),
     sandboxMode: Boolean(r.sandbox_mode),
     minBalanceAlertCents: Number(r.min_balance_alert_cents ?? 0),
-    updatedAt: r.updated_at,
+    updatedAt: r.updated_at as string,
   }));
+
+  const hasPagomovil = rows.some((r) => r.id === "pagomovil");
+  const pablitoRow = rows.find((r) => r.id === "pablito");
+  const filtered = rows.filter((r) => r.id !== "pablito");
+  if (!hasPagomovil) {
+    filtered.push({
+      id: "pagomovil",
+      label: "Pago Móvil Venezuela (Bot Propio)",
+      enabled: pablitoRow ? pablitoRow.enabled : false,
+      sandboxMode: false,
+      minBalanceAlertCents: 0,
+      updatedAt: pablitoRow?.updatedAt ?? new Date().toISOString(),
+    });
+  }
+  return filtered;
 }
 
 export async function getProviderConfig(
   id: ProviderConfigDTO["id"]
 ): Promise<ProviderConfigDTO | null> {
+  const normalizedId = id === "pablito" ? "pagomovil" : id;
   const all = await listProviderConfigs();
-  return all.find((c) => c.id === id) ?? null;
+  return all.find((c) => c.id === normalizedId) ?? null;
 }
 
 export async function updateProviderConfig(
@@ -713,11 +729,12 @@ export async function updateProviderConfig(
   patch: Partial<{ enabled: boolean; sandboxMode: boolean; minBalanceAlertCents: number }>,
   actorId: string | null
 ) {
+  const normalizedId = id === "pablito" ? "pagomovil" : id;
   const ctx = assertDbOrSandbox();
   const now = new Date().toISOString();
   if (ctx.mode === "sandbox") {
     const state = getSandboxState();
-    const row = state.providerConfigs.find((c) => c.id === id);
+    const row = state.providerConfigs.find((c) => c.id === normalizedId);
     if (!row) throw new Error(`Provider config not found: ${id}`);
     if (patch.enabled !== undefined) row.enabled = patch.enabled;
     if (patch.sandboxMode !== undefined) row.sandboxMode = patch.sandboxMode;
@@ -736,10 +753,29 @@ export async function updateProviderConfig(
   if (patch.minBalanceAlertCents !== undefined)
     dbPatch.min_balance_alert_cents = patch.minBalanceAlertCents;
 
+  if (normalizedId === "pagomovil") {
+    const existing = await getProviderConfig("pagomovil");
+    const { error } = await ctx.admin.from("provider_configs").upsert(
+      {
+        id: "pagomovil",
+        enabled: patch.enabled ?? existing?.enabled ?? false,
+        sandbox_mode: patch.sandboxMode ?? existing?.sandboxMode ?? false,
+        min_balance_alert_cents:
+          patch.minBalanceAlertCents ?? existing?.minBalanceAlertCents ?? 0,
+        config: { label: "Pago Móvil Venezuela (Bot Propio)" },
+        updated_at: now,
+        updated_by: actorId,
+      },
+      { onConflict: "id" }
+    );
+    if (error) throw error;
+    return;
+  }
+
   const { error } = await ctx.admin
     .from("provider_configs")
     .update(dbPatch)
-    .eq("id", id);
+    .eq("id", normalizedId);
   if (error) throw error;
 }
 
@@ -1643,6 +1679,57 @@ export async function setOrderGatewaySession(
       status: params.nextStatus,
     })
     .eq("id", orderId);
+  if (error) throw error;
+}
+
+export async function updateOrderBsSnapshot(
+  orderId: string,
+  params: { bsRateCents: number; totalBsCents: number }
+): Promise<void> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const order = getSandboxState().orders.find((o) => o.id === orderId);
+    if (!order) throw new Error(`Order not found: ${orderId}`);
+    order.bsRateCents = params.bsRateCents;
+    order.totalBsCents = params.totalBsCents;
+    order.updatedAt = new Date().toISOString();
+    return;
+  }
+
+  const { error } = await ctx.admin
+    .from("orders")
+    .update({
+      bs_rate_cents: params.bsRateCents,
+      total_bs_cents: params.totalBsCents,
+    })
+    .eq("id", orderId);
+  if (error) throw error;
+}
+
+export async function setOrderPaidCentsForManualReview(
+  orderId: string,
+  paidCents: number
+): Promise<void> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const order = getSandboxState().orders.find((o) => o.id === orderId);
+    if (!order) throw new Error(`Order not found: ${orderId}`);
+    order.paidCents = paidCents;
+    order.needsAttention = false;
+    order.attentionReason = null;
+    order.updatedAt = new Date().toISOString();
+    return;
+  }
+
+  const { error } = await ctx.admin
+    .from("orders")
+    .update({
+      paid_cents: paidCents,
+      needs_attention: false,
+      attention_reason: null,
+    })
+    .eq("id", orderId)
+    .eq("status", "MANUAL_REVIEW");
   if (error) throw error;
 }
 

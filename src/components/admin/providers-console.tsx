@@ -155,7 +155,7 @@ export function ProvidersConsole({
         <div className="px-6 py-4 border-b border-white/[0.08] flex items-center justify-between">
           <h2 className="text-sm font-black text-white flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-sky-400" />
-            <span>Eventos Webhook Verificados (ZenoBank Svix)</span>
+            <span>Eventos Webhook Verificados (ZenoBank Svix & Pago Móvil)</span>
           </h2>
           <span className="text-[11px] text-slate-400">
             Idempotencia por event_id

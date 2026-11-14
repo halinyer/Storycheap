@@ -616,26 +616,65 @@ function OrderDetailInner() {
           {/* Payment Link if still PENDING_PAYMENT with 0 paid */}
           {order.status === "PENDING_PAYMENT" &&
             order.paidCents === 0 &&
-            order.gatewayCheckoutUrl &&
+            (order.gatewayCheckoutUrl ||
+              order.paymentGateway === "pagomovil" ||
+              order.paymentGateway === "pablito") &&
             !isSandboxCheckout &&
             !order.gatewayCheckoutId?.startsWith("zbk_sbx_") && (
-              <div className="rounded-2xl bg-indigo-500/10 border border-indigo-400/30 p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4">
+              <div
+                className={`rounded-2xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4 border ${
+                  order.paymentGateway === "pagomovil" ||
+                  order.paymentGateway === "pablito"
+                    ? "bg-emerald-500/10 border-emerald-400/30"
+                    : "bg-indigo-500/10 border-indigo-400/30"
+                }`}
+              >
                 <div className="flex items-center gap-3.5">
-                  <div className="w-10 h-10 rounded-xl bg-indigo-500/20 border border-indigo-400/35 flex items-center justify-center shrink-0">
-                    <Clock className="w-5 h-5 text-indigo-300" />
+                  <div
+                    className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
+                      order.paymentGateway === "pagomovil" ||
+                      order.paymentGateway === "pablito"
+                        ? "bg-emerald-500/20 border-emerald-400/35"
+                        : "bg-indigo-500/20 border-indigo-400/35"
+                    }`}
+                  >
+                    <Clock
+                      className={`w-5 h-5 ${
+                        order.paymentGateway === "pagomovil" ||
+                        order.paymentGateway === "pablito"
+                          ? "text-emerald-300"
+                          : "text-indigo-300"
+                      }`}
+                    />
                   </div>
                   <div className="text-xs text-slate-200">
                     <span className="font-bold text-white block text-sm">
-                      Esperando confirmación de pago ({formatCents(order.amountDueCents)} USD)
+                      {order.paymentGateway === "pagomovil" ||
+                      order.paymentGateway === "pablito"
+                        ? `Esperando verificación de Pago Móvil (${formatCents(order.amountDueCents)} USD)`
+                        : `Esperando confirmación de pago (${formatCents(order.amountDueCents)} USD)`}
                     </span>
-                    Si cerraste la ventana de pago de ZenoBank, puedes volver a abrirla aquí.
+                    {order.paymentGateway === "pagomovil" ||
+                    order.paymentGateway === "pablito"
+                      ? "Abre la ventana de Pago Móvil para copiar los datos bancarios y reportar tu referencia."
+                      : "Si cerraste la ventana de pago de ZenoBank, puedes volver a abrirla aquí."}
                   </div>
                 </div>
                 <a
-                  href={order.gatewayCheckoutUrl}
+                  href={
+                    order.paymentGateway === "pagomovil" ||
+                    order.paymentGateway === "pablito"
+                      ? `/pay/pagomovil/${order.id}`
+                      : order.gatewayCheckoutUrl ?? "#"
+                  }
                   className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-white hover:bg-slate-200 text-slate-950 font-black text-xs transition-colors"
                 >
-                  <span>Abrir pasarela de pago</span>
+                  <span>
+                    {order.paymentGateway === "pagomovil" ||
+                    order.paymentGateway === "pablito"
+                      ? "Abrir ventana de Pago Móvil (Bs)"
+                      : "Abrir pasarela de pago"}
+                  </span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               </div>

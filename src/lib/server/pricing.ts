@@ -33,7 +33,10 @@ export class CheckoutValidationError extends Error {
       | "EMPTY_CART"
       | "INVALID_VARIANT"
       | "OUT_OF_STOCK"
-      | "QUANTITY_LIMIT",
+      | "QUANTITY_LIMIT"
+      | "PAGOMOVIL_NOT_CONFIGURED"
+      | "BS_RATE_UNAVAILABLE"
+      | "PAGOMOVIL_BOT_OFFLINE",
     message: string,
     public readonly statusCode = 400
   ) {

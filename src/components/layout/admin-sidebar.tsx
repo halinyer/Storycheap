@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   PackageSearch,
   PlugZap,
+  Smartphone,
   Receipt,
   ShieldAlert,
   Users,
@@ -44,6 +45,7 @@ export function AdminSidebar({
     { href: "/admin/products", label: "Gift Cards", icon: PackageSearch },
     { href: "/admin/customers", label: "Clientes y Saldo", icon: Users },
     { href: "/admin/providers", label: "Pasarelas y Webhooks", icon: PlugZap },
+    { href: "/admin/pagomovil", label: "Bot Pago Móvil", icon: Smartphone },
     { href: "/admin/audit", label: "Auditoría", icon: Activity },
   ];
 

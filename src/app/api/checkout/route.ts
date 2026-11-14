@@ -22,7 +22,11 @@ const checkoutSchema = z.object({
     .min(1, "Agrega al menos un producto al carrito")
     .max(20),
   applyStoreCredit: z.boolean().optional().default(true),
-  paymentGateway: z.enum(["zenobank", "pablito"]).optional().default("zenobank"),
+  paymentGateway: z
+    .enum(["zenobank", "pagomovil", "pablito"])
+    .optional()
+    .default("zenobank")
+    .transform((v) => (v === "pablito" ? ("pagomovil" as const) : v)),
 });
 
 export async function POST(request: NextRequest) {

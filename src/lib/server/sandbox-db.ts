@@ -2,13 +2,17 @@ import "server-only";
 import { CATALOG_SEED } from "@/lib/catalog-seed";
 import type {
   AuditLogEntryDTO,
+  BankPaymentNotificationDTO,
+  BotDeviceDTO,
   CreditLedgerEntryDTO,
   CustomerSummaryDTO,
   InventoryStatus,
   OrderDTO,
   OrderItemDTO,
+  PagoMovilBotSettingsDTO,
   ProductDTO,
   ProviderConfigDTO,
+  ReceiverBankAccountDTO,
   WebhookEventDTO,
 } from "@/types";
 import {
@@ -57,6 +61,31 @@ export interface SandboxProfile {
   createdAt: string;
 }
 
+export interface SandboxBotDeviceRow extends BotDeviceDTO {
+  secretCiphertext: string;
+}
+
+export interface SandboxOrderPagoMovilReport {
+  orderId: string;
+  amountDueBsCents: number | null;
+  rateExpiresAt: string | null;
+  reportedReference: string | null;
+  reportedSenderPhone: string | null;
+  reportedSenderBank: string | null;
+  reportedAt: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+}
+
+export interface SandboxPagoMovilState {
+  devices: SandboxBotDeviceRow[];
+  receiverAccounts: ReceiverBankAccountDTO[];
+  notifications: BankPaymentNotificationDTO[];
+  orderReports: Record<string, SandboxOrderPagoMovilReport>;
+  settings: PagoMovilBotSettingsDTO;
+  webhookSecretCiphertext: string | null;
+}
+
 export interface SandboxState {
   products: ProductDTO[];
   inventory: SandboxInventoryRow[];
@@ -70,6 +99,7 @@ export interface SandboxState {
   auditLog: AuditLogEntryDTO[];
   profiles: SandboxProfile[];
   bsRateCents: number | null;
+  pagoMovil: SandboxPagoMovilState;
 }
 
 declare global {
@@ -157,8 +187,8 @@ function createInitialSandboxState(): SandboxState {
       updatedAt: now,
     },
     {
-      id: "pablito",
-      label: "Pablito Pago Móvil (Próximamente)",
+      id: "pagomovil",
+      label: "Pago Móvil Venezuela (Bot Propio)",
       enabled: false,
       sandboxMode: true,
       minBalanceAlertCents: 0,
@@ -193,6 +223,36 @@ function createInitialSandboxState(): SandboxState {
     auditLog: [],
     profiles,
     bsRateCents: null,
+    pagoMovil: {
+      devices: [],
+      receiverAccounts: [
+        {
+          id: "90000000-0000-4000-8000-000000000172",
+          bankCode: "0172",
+          bankName: "Bancamiga Banco Universal",
+          accountType: "natural",
+          phone: "04120000000",
+          dni: "V-00000000",
+          holderName: "StoryCheap Demo Bancamiga",
+          allowedPackages: ["com.bancamiga.suite", "com.bancamiga", "com.bancamiga.mobile", "SMS", "EMAIL"],
+          active: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      notifications: [],
+      orderReports: {},
+      settings: {
+        rateExpirationMinutes: 20,
+        orderExpirationMinutes: 25,
+        amountToleranceBsCents: 5,
+        watchdogOfflineMinutes: 15,
+        enforceWatchdog: false,
+        requireSenderPhone: false,
+        minReferenceDigits: 4,
+      },
+      webhookSecretCiphertext: null,
+    },
   };
 }
 

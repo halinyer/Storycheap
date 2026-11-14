@@ -11,7 +11,7 @@ export type SourcePriority =
 
 export type FulfillmentSource = "manual" | "reloadly" | "centralone";
 
-export type PaymentGatewayId = "zenobank" | "pablito";
+export type PaymentGatewayId = "zenobank" | "pagomovil" | "pablito";
 
 export type OrderStatus =
   | "CREATED"
@@ -213,12 +213,83 @@ export interface ProviderConfigDTO {
     | "reloadly"
     | "centralone"
     | "fazercards"
+    | "pagomovil"
     | "pablito";
   label: string;
   enabled: boolean;
   sandboxMode: boolean;
   minBalanceAlertCents: number;
   updatedAt: string;
+}
+
+export interface BotDeviceDTO {
+  id: string;
+  name: string;
+  deviceIdentifier: string;
+  channelType: "ANDROID_PUSH" | "ANDROID_SMS" | "EMAIL_SCRIPT";
+  allowPlainBearer?: boolean;
+  lastHeartbeatAt: string | null;
+  batteryLevel: number | null;
+  networkType: string | null;
+  appVersion: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReceiverBankAccountDTO {
+  id: string;
+  bankCode: string;
+  bankName: string;
+  accountType: "natural" | "juridical";
+  phone: string;
+  dni: string;
+  holderName: string;
+  allowedPackages: string[];
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type BankNotificationStatus =
+  | "UNMATCHED"
+  | "MATCHED"
+  | "DUPLICATE"
+  | "IGNORED"
+  | "UNPARSED";
+
+export interface BankPaymentNotificationDTO {
+  id: string;
+  deviceId: string | null;
+  receiverAccountId: string | null;
+  sourceType: "APP_PUSH" | "SMS" | "EMAIL" | "MANUAL";
+  appPackage: string | null;
+  rawContentHash: string;
+  rawContentPreview: string;
+  amountBsCents: number | null;
+  currency: "VES" | "USD" | "USDT";
+  referenceFull: string | null;
+  referenceLast6: string | null;
+  referenceLast4: string | null;
+  senderPhone: string | null;
+  senderDni: string | null;
+  senderBankCode: string | null;
+  parserUsed: string | null;
+  postedAt: string;
+  status: BankNotificationStatus;
+  matchedOrderId: string | null;
+  matchedAt: string | null;
+  createdAt: string;
+}
+
+export interface PagoMovilBotSettingsDTO {
+  rateExpirationMinutes: number;
+  orderExpirationMinutes: number;
+  amountToleranceBsCents: number;
+  watchdogOfflineMinutes: number;
+  enforceWatchdog: boolean;
+  requireSenderPhone: boolean;
+  minReferenceDigits: number;
 }
 
 export interface AuditLogEntryDTO {

@@ -692,7 +692,11 @@ export async function processVerifiedWebhookEvent(
       to: matchedOrder.email,
       orderNumber: matchedOrder.orderNumber,
       amountCents: surplusCents,
-      reasonText: "Excedente enviado en tu pago cripto",
+      reasonText:
+        matchedOrder.paymentGateway === "pagomovil" ||
+        matchedOrder.paymentGateway === "pablito"
+          ? "Excedente enviado en tu Pago Móvil"
+          : "Excedente enviado en tu pago cripto",
     }).catch(() => {});
   }
 
