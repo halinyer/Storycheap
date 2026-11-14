@@ -693,7 +693,10 @@ export async function listProviderConfigs(): Promise<ProviderConfigDTO[]> {
   if (error) throw error;
   const rows = (data ?? []).map((r) => ({
     id: r.id as ProviderConfigDTO["id"],
-    label: (r.config?.label as string) || r.id,
+    label:
+      r.id === "pagomovil"
+        ? "Pago Móvil Venezuela (Bs)"
+        : (r.config?.label as string) || r.id,
     enabled: Boolean(r.enabled),
     sandboxMode: Boolean(r.sandbox_mode),
     minBalanceAlertCents: Number(r.min_balance_alert_cents ?? 0),
@@ -706,7 +709,7 @@ export async function listProviderConfigs(): Promise<ProviderConfigDTO[]> {
   if (!hasPagomovil) {
     filtered.push({
       id: "pagomovil",
-      label: "Pago Móvil Venezuela (Bot Propio)",
+      label: "Pago Móvil Venezuela (Bs)",
       enabled: pablitoRow ? pablitoRow.enabled : false,
       sandboxMode: false,
       minBalanceAlertCents: 0,
@@ -762,7 +765,7 @@ export async function updateProviderConfig(
         sandbox_mode: patch.sandboxMode ?? existing?.sandboxMode ?? false,
         min_balance_alert_cents:
           patch.minBalanceAlertCents ?? existing?.minBalanceAlertCents ?? 0,
-        config: { label: "Pago Móvil Venezuela (Bot Propio)" },
+        config: { label: "Pago Móvil Venezuela (Bs)" },
         updated_at: now,
         updated_by: actorId,
       },

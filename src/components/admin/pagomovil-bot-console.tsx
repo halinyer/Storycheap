@@ -277,7 +277,7 @@ export function PagoMovilBotConsole(props: PagoMovilBotConsoleProps) {
         enforceWatchdog,
         requireSenderPhone,
       });
-      toast.success("Parámetros del bot verificador guardados");
+      toast.success("Parámetros de verificación guardados");
       router.refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Error guardando reglas");
@@ -1034,7 +1034,7 @@ function checkBankEmails() {
               ) : (
                 <ShieldCheck className="w-4 h-4" />
               )}
-              <span>Guardar Configuración del Bot</span>
+              <span>Guardar Configuración</span>
             </button>
           </form>
         </div>
@@ -1421,7 +1421,7 @@ function checkBankEmails() {
             <pre className="rounded-2xl bg-slate-950 border border-white/10 p-4 text-xs font-mono text-emerald-300 overflow-x-auto">
               {simResult
                 ? JSON.stringify(simResult, null, 2)
-                : "// Haz clic en 'Probar Extracción de Campos' para ver cómo nuestro bot interpreta el texto."}
+                : "// Haz clic en 'Probar Extracción de Campos' para ver cómo el parser interpreta el texto."}
             </pre>
           </div>
         </div>

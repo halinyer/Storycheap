@@ -27,7 +27,7 @@ async function AdminProvidersContent() {
           Pasarelas, Kill Switches y Webhooks
         </h1>
         <p className="text-xs text-slate-400 mt-1">
-          Detén el checkout o una pasarela al instante ante cualquier anomalía, e inspecciona las firmas recibidas de ZenoBank, Bot Pago Móvil, FazerCards y Central One.
+          Detén el checkout o una pasarela al instante ante cualquier anomalía, e inspecciona las firmas recibidas de ZenoBank, Pago Móvil, FazerCards y Central One.
         </p>
       </div>
       <ProvidersConsole

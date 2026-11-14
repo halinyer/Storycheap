@@ -419,7 +419,7 @@ export default function CheckoutPage() {
                     </div>
                     <div>
                       <div className="text-sm font-black text-white">
-                        Pago Móvil Venezuela (Bs · Bot Propio)
+                        Pago Móvil Venezuela (Bs)
                       </div>
                       <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
                         {pmAvailability?.available
@@ -441,7 +441,7 @@ export default function CheckoutPage() {
                               ? "Desactivado temporalmente en Consola Admin."
                               : !pmAvailability.configured
                                 ? "Requiere tasa Bs y cuenta bancaria configurada."
-                                : "Bot verificador bancario temporalmente fuera de línea."}
+                                : "Servicio de verificación bancaria temporalmente no disponible."}
                       </p>
                     </div>
                   </div>

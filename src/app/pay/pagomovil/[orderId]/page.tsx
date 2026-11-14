@@ -447,7 +447,7 @@ function PagoMovilHostedCheckoutContent() {
         <div className="space-y-1">
           <div className="inline-flex items-center gap-2 text-[11px] font-black uppercase tracking-wider text-emerald-400">
             <Smartphone className="w-3.5 h-3.5" />
-            <span>StoryPay · Pago Móvil Automático</span>
+            <span>Pago Móvil Automático · Venezuela</span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
             Orden #{data.orderNumber}

@@ -188,7 +188,7 @@ function createInitialSandboxState(): SandboxState {
     },
     {
       id: "pagomovil",
-      label: "Pago Móvil Venezuela (Bot Propio)",
+      label: "Pago Móvil Venezuela (Bs)",
       enabled: false,
       sandboxMode: true,
       minBalanceAlertCents: 0,

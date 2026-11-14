@@ -232,7 +232,7 @@ export async function assertPagoMovilCheckoutReady(
     if (!health.online) {
       throw new CheckoutValidationError(
         "PAGOMOVIL_BOT_OFFLINE",
-        "El bot verificador de Pago Móvil está temporalmente fuera de línea. Usa ZenoBank mientras reconecta.",
+        "Pago Móvil está temporalmente fuera de línea. Usa ZenoBank mientras se restablece.",
         503
       );
     }
@@ -925,7 +925,7 @@ export async function verifyOrderPagoMovilClaim(params: {
     ok: true,
     code: "WAITING_BANK_CONFIRMATION",
     message:
-      "Referencia registrada. Esperando confirmación automática de Bancamiga (tarda unos segundos)...",
+      "Referencia registrada. Esperando confirmación bancaria automática (tarda unos segundos)...",
     order,
     expectedBsCents,
   };

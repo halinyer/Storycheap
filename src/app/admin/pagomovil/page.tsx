@@ -48,10 +48,10 @@ async function AdminPagoMovilContent() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-black text-white">
-          Bot Verificador Pago Móvil (StoryPay · Bancamiga)
+          Pasarela Pago Móvil Venezuela
         </h1>
         <p className="text-xs text-slate-400 mt-1">
-          Motor propio sin RIF jurídico ni comisiones por llamada: conecta tu app Bancamiga (MacroDroid) o Gmail (Apps Script) por HMAC-SHA256 para conciliar referencias y liberar gift cards 24/7.
+          Conciliación automática de transferencias y Pago Móvil vía notificaciones bancarias o correo cifrado con HMAC-SHA256.
         </p>
       </div>
 
@@ -75,7 +75,7 @@ export default function AdminPagoMovilPage() {
     <Suspense
       fallback={
         <div className="text-xs text-slate-400">
-          Cargando consola Bot Pago Móvil...
+          Cargando consola Pago Móvil...
         </div>
       }
     >
