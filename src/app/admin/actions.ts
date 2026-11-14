@@ -34,6 +34,10 @@ import {
   getCentralOneCatalog,
   type CentralOneCatalogItem,
 } from "@/lib/server/suppliers/centralone";
+import {
+  getFazerCardsBalance,
+  getFazerCardsCatalog,
+} from "@/lib/server/suppliers/fazercards";
 import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
 import type { ProviderConfigDTO, SourcePriority } from "@/types";
 
@@ -354,6 +358,13 @@ export async function fetchCentralOneCatalogAdminAction(): Promise<CentralOneCat
   return getCentralOneCatalog();
 }
 
+export async function fetchFazerCardsCatalogAdminAction(
+  query?: string
+): Promise<CentralOneCatalogItem[]> {
+  await requireAdminUser();
+  return getFazerCardsCatalog(query);
+}
+
 export async function toggleProductActiveAction(input: {
   productId: string;
   active: boolean;
@@ -543,8 +554,9 @@ export async function captureMonthlyCapitalSnapshotAction(
       ? targetMonth
       : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 
-  const [centralOne, reloadly, catalog] = await Promise.all([
+  const [centralOne, fazerCards, reloadly, catalog] = await Promise.all([
     getCentralOneBalance(),
+    getFazerCardsBalance(),
     getReloadlyBalance(),
     listCatalog(true),
   ]);
@@ -560,11 +572,15 @@ export async function captureMonthlyCapitalSnapshotAction(
 
   const byProvider: Record<string, number> = {
     centralone: centralOne.balanceCents ?? 0,
+    fazercards: fazerCards.balanceCents ?? 0,
     manual: manualCostCents,
     reloadly: reloadly.balanceCents ?? 0,
   };
   const totalCents =
-    byProvider.centralone + byProvider.manual + byProvider.reloadly;
+    byProvider.centralone +
+    byProvider.fazercards +
+    byProvider.manual +
+    byProvider.reloadly;
 
   const updated = await saveMonthlyCapitalSnapshot(
     {

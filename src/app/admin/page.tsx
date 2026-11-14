@@ -13,6 +13,7 @@ import {
   listProviderConfigs,
 } from "@/lib/server/repository";
 import { getCentralOneBalance } from "@/lib/server/suppliers/centralone";
+import { getFazerCardsBalance } from "@/lib/server/suppliers/fazercards";
 import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
 
 async function AdminOverviewContent() {
@@ -25,6 +26,7 @@ async function AdminOverviewContent() {
     providers,
     reloadly,
     centralOne,
+    fazerCards,
     bsRateCents,
     capitalSnapshots,
   ] = await Promise.all([
@@ -35,6 +37,7 @@ async function AdminOverviewContent() {
     listProviderConfigs(),
     getReloadlyBalance(),
     getCentralOneBalance(),
+    getFazerCardsBalance(),
     getBsRateCents(),
     getMonthlyCapitalSnapshots(),
   ]);
@@ -51,6 +54,15 @@ async function AdminOverviewContent() {
   const providerMap = new Map(providers.map((p) => [p.id, p]));
 
   const providerStatuses: ProviderCapitalCardData[] = [
+    {
+      id: "fazercards",
+      label: "FazerCards API v2",
+      subtitle: "Netflix, Gift Cards y Top-Ups",
+      enabled: providerMap.get("fazercards")?.enabled ?? true,
+      configured: fazerCards.configured,
+      balanceCents: fazerCards.balanceCents,
+      previousBalanceCents: null,
+    },
     {
       id: "centralone",
       label: "Central One API",

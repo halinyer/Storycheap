@@ -212,6 +212,7 @@ export interface ProviderConfigDTO {
     | "manual_inventory"
     | "reloadly"
     | "centralone"
+    | "fazercards"
     | "pablito";
   label: string;
   enabled: boolean;

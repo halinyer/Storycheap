@@ -12,11 +12,13 @@ export function ProvidersConsole({
   providers,
   reloadlyStatus,
   centralOneStatus,
+  fazerCardsStatus,
   webhooks,
 }: {
   providers: ProviderConfigDTO[];
   reloadlyStatus: SupplierBalanceStatus;
   centralOneStatus: SupplierBalanceStatus;
+  fazerCardsStatus?: SupplierBalanceStatus;
   webhooks: WebhookEventDTO[];
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -41,7 +43,31 @@ export function ProvidersConsole({
   return (
     <div className="space-y-8">
       {/* Supplier Balances & Notices */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {fazerCardsStatus && (
+          <div className="rounded-3xl bg-rose-500/10 border border-rose-500/25 p-5 flex items-start gap-3">
+            <ShieldCheck className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-rose-100 leading-relaxed space-y-1">
+              <div className="font-black text-rose-300">
+                FazerCards Reseller API v2 (Netflix & Gift Cards)
+              </div>
+              <p>
+                Webhook: <code>/api/webhooks/fazercards</code> (HMAC-SHA256{" "}
+                <code>X-Webhook-Signature</code>). Base URL:{" "}
+                <code>https://api.fzr.cards/api/v2</code>.
+              </p>
+              <p className="text-rose-200/90 font-bold">
+                Saldo actual:{" "}
+                {fazerCardsStatus.configured
+                  ? fazerCardsStatus.balanceCents !== null
+                    ? `${formatCents(fazerCardsStatus.balanceCents)} ${fazerCardsStatus.currency}`
+                    : fazerCardsStatus.errorMessage ?? "Error"
+                  : fazerCardsStatus.errorMessage}
+              </p>
+            </div>
+          </div>
+        )}
+
         <div className="rounded-3xl bg-sky-500/10 border border-sky-500/25 p-5 flex items-start gap-3">
           <ShieldCheck className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
           <div className="text-xs text-sky-100 leading-relaxed space-y-1">

@@ -164,6 +164,22 @@ function createInitialSandboxState(): SandboxState {
       minBalanceAlertCents: 0,
       updatedAt: now,
     },
+    {
+      id: "centralone",
+      label: "Central One Reseller API",
+      enabled: true,
+      sandboxMode: false,
+      minBalanceAlertCents: 1000,
+      updatedAt: now,
+    },
+    {
+      id: "fazercards",
+      label: "FazerCards API v2 (Netflix, Gift Cards & Top-Ups)",
+      enabled: true,
+      sandboxMode: false,
+      minBalanceAlertCents: 1000,
+      updatedAt: now,
+    },
   ];
 
   return {

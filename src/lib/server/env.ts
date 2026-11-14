@@ -46,6 +46,29 @@ export function getCentralOneBaseUrl(): string {
   return (configured || "https://portal.centraloneglobal.com/api/v1").replace(/\/+$/, "");
 }
 
+export function isFazerCardsConfigured(): boolean {
+  return Boolean(
+    process.env.FAZERCARDS_API_KEY?.trim() || process.env.FAZER_API_KEY?.trim()
+  );
+}
+
+export function getFazerCardsApiKey(): string | null {
+  return (
+    process.env.FAZERCARDS_API_KEY?.trim() ||
+    process.env.FAZER_API_KEY?.trim() ||
+    null
+  );
+}
+
+export function getFazerCardsWebhookSecret(): string | null {
+  return process.env.FAZERCARDS_WEBHOOK_SECRET?.trim() || null;
+}
+
+export function getFazerCardsBaseUrl(): string {
+  const configured = process.env.FAZERCARDS_BASE_URL?.trim();
+  return (configured || "https://api.fzr.cards/api/v2").replace(/\/+$/, "");
+}
+
 export function isResendConfigured(): boolean {
   return Boolean(process.env.RESEND_API_KEY?.trim());
 }

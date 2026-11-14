@@ -6,6 +6,7 @@ import {
   createProductAction,
   createVariantAction,
   fetchCentralOneCatalogAdminAction,
+  fetchFazerCardsCatalogAdminAction,
   toggleProductActiveAction,
   updateProductMetaAction,
   updateVariantAdminAction,
@@ -72,6 +73,8 @@ function VariantRow({
   reloadlyEnabled,
   centralOneEnabled,
   centralOneBalanceCents,
+  fazerCardsEnabled,
+  fazerCardsBalanceCents,
   onOpenCentralOnePicker,
   onSaved,
 }: {
@@ -82,6 +85,8 @@ function VariantRow({
   reloadlyEnabled: boolean;
   centralOneEnabled: boolean;
   centralOneBalanceCents: number | null;
+  fazerCardsEnabled: boolean;
+  fazerCardsBalanceCents: number | null;
   onOpenCentralOnePicker: (
     applySelection: (item: CentralOneCatalogItem) => void,
     initialQuery?: string
@@ -121,10 +126,17 @@ function VariantRow({
   const effectiveC1Sku = c1Sku || liveC1Item?.sku || "";
   const effectiveC1Region = c1Region || liveC1Item?.region || "";
 
+  const isFazerLinked = centraloneId.trim().toLowerCase().startsWith("fazer:");
   const sourceOptions: Array<{ value: SourcePriority; label: string }> = [
     { value: "manual_only", label: "Stock CSV" },
-    { value: "centralone_only", label: "Central One" },
-    { value: "manual_then_centralone", label: "CSV → Central One" },
+    {
+      value: "centralone_only",
+      label: isFazerLinked ? "FazerCards API" : "API (C1 / Fazer)",
+    },
+    {
+      value: "manual_then_centralone",
+      label: isFazerLinked ? "CSV → FazerCards" : "CSV → API",
+    },
     ...(reloadlyEnabled
       ? ([
           { value: "manual_then_reloadly", label: "CSV → Reloadly" },
@@ -286,21 +298,33 @@ function VariantRow({
           {usesCentralOne && (
             <span
               className={`shrink-0 px-2 py-1 rounded-md text-[11px] font-medium whitespace-nowrap ${
-                !centralOneEnabled
+                !(isFazerLinked ? fazerCardsEnabled : centralOneEnabled)
                   ? "bg-amber-500/10 text-amber-300"
                   : (variant.supplierStock ?? 0) > 0
                     ? "bg-emerald-500/10 text-emerald-300"
                     : "bg-rose-500/10 text-rose-300"
               }`}
-              title="Capacidad real según tu saldo en Central One"
+              title={
+                isFazerLinked
+                  ? "Capacidad real según tu saldo en FazerCards API v2"
+                  : "Capacidad real según tu saldo en Central One"
+              }
             >
-              {!centralOneEnabled
-                ? "C1: Pausado"
-                : centralOneBalanceCents !== null && parsedCostFloat && parsedCostFloat > 0
-                  ? `C1: ${Math.floor(centralOneBalanceCents / 100 / parsedCostFloat)} disp.`
-                  : typeof variant.supplierStock === "number"
-                    ? `C1: ${variant.supplierStock} disp.`
-                    : "C1: Sin saldo"}
+              {isFazerLinked
+                ? !fazerCardsEnabled
+                  ? "Fazer: Pausado"
+                  : fazerCardsBalanceCents !== null && parsedCostFloat && parsedCostFloat > 0
+                    ? `Fazer: ${Math.floor(fazerCardsBalanceCents / 100 / parsedCostFloat)} disp.`
+                    : typeof variant.supplierStock === "number"
+                      ? `Fazer: ${variant.supplierStock} disp.`
+                      : "Fazer: Sin saldo"
+                : !centralOneEnabled
+                  ? "C1: Pausado"
+                  : centralOneBalanceCents !== null && parsedCostFloat && parsedCostFloat > 0
+                    ? `C1: ${Math.floor(centralOneBalanceCents / 100 / parsedCostFloat)} disp.`
+                    : typeof variant.supplierStock === "number"
+                      ? `C1: ${variant.supplierStock} disp.`
+                      : "C1: Sin saldo"}
             </span>
           )}
         </div>
@@ -539,24 +563,31 @@ export function ProductsConsole({
   reloadlyEnabled = false,
   centralOneEnabled = false,
   centralOneBalanceCents = null,
+  fazerCardsEnabled = true,
+  fazerCardsBalanceCents = null,
 }: {
   catalog: ProductDTO[];
   pricingMetaMap?: Record<string, VariantPricingMeta>;
   reloadlyEnabled?: boolean;
   centralOneEnabled?: boolean;
   centralOneBalanceCents?: number | null;
+  fazerCardsEnabled?: boolean;
+  fazerCardsBalanceCents?: number | null;
 }) {
   const router = useRouter();
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [togglingProductId, setTogglingProductId] = useState<string | null>(null);
 
-  // Central One catalog modal state
+  // Supplier catalog modal state (Central One + FazerCards API v2)
   const [c1ModalOpen, setC1ModalOpen] = useState(false);
+  const [supplierTab, setSupplierTab] = useState<"centralone" | "fazercards">("fazercards");
   const [c1Items, setC1Items] = useState<CentralOneCatalogItem[] | null>(null);
+  const [fazerItems, setFazerItems] = useState<CentralOneCatalogItem[] | null>(null);
   const [c1Search, setC1Search] = useState("");
   const [c1ShowAllTypes, setC1ShowAllTypes] = useState(false);
   const [loadingC1, setLoadingC1] = useState(false);
+  const [loadingFazer, setLoadingFazer] = useState(false);
   const [c1Callback, setC1Callback] = useState<
     ((item: CentralOneCatalogItem) => void) | null
   >(null);
@@ -612,9 +643,11 @@ export function ProductsConsole({
     });
   }, [catalog, search, categoryFilter]);
 
+  const activeSupplierItems = supplierTab === "fazercards" ? fazerItems : c1Items;
+
   const filteredC1Items = useMemo(() => {
-    if (!c1Items) return [];
-    const availableItems = c1Items.filter((item) => {
+    if (!activeSupplierItems) return [];
+    const availableItems = activeSupplierItems.filter((item) => {
       if (!item.available) return false;
       return c1ShowAllTypes ? true : !item.requiresTarget;
     });
@@ -625,30 +658,36 @@ export function ProductsConsole({
         .toLowerCase()
         .includes(q)
     );
-  }, [c1Items, c1Search, c1ShowAllTypes]);
+  }, [activeSupplierItems, c1Search, c1ShowAllTypes]);
 
   const visibleC1Items = useMemo(() => filteredC1Items.slice(0, 80), [filteredC1Items]);
 
   const c1Map = useMemo(() => {
     const map = new Map<string, CentralOneCatalogItem>();
-    if (!c1Items) return map;
-    for (const item of c1Items) {
+    for (const item of c1Items ?? []) {
+      map.set(item.id, item);
+    }
+    for (const item of fazerItems ?? []) {
       map.set(item.id, item);
     }
     return map;
-  }, [c1Items]);
+  }, [c1Items, fazerItems]);
 
-  const openCentralOneCatalogModal = async (
-    onPick?: (item: CentralOneCatalogItem) => void,
-    initialSearch?: string
-  ) => {
-    setC1Callback(() => onPick ?? null);
-    if (typeof initialSearch === "string" && initialSearch.trim()) {
-      setC1Search(initialSearch.trim());
+  const loadFazerCatalog = async (queryText?: string) => {
+    setLoadingFazer(true);
+    try {
+      const items = await fetchFazerCardsCatalogAdminAction(queryText);
+      setFazerItems(items);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "No se pudo consultar FazerCards API v2"
+      );
+    } finally {
+      setLoadingFazer(false);
     }
-    setC1ModalOpen(true);
-    if (c1Items) return;
+  };
 
+  const loadCentralOneCatalog = async () => {
     setLoadingC1(true);
     try {
       const items = await fetchCentralOneCatalogAdminAction();
@@ -659,6 +698,24 @@ export function ProductsConsole({
       );
     } finally {
       setLoadingC1(false);
+    }
+  };
+
+  const openCentralOneCatalogModal = async (
+    onPick?: (item: CentralOneCatalogItem) => void,
+    initialSearch?: string
+  ) => {
+    setC1Callback(() => onPick ?? null);
+    const cleanQ = typeof initialSearch === "string" ? initialSearch.trim() : "";
+    if (cleanQ) {
+      setC1Search(cleanQ);
+    }
+    setC1ModalOpen(true);
+
+    if (supplierTab === "fazercards") {
+      await loadFazerCatalog(cleanQ || c1Search);
+    } else if (!c1Items) {
+      await loadCentralOneCatalog();
     }
   };
 
@@ -1032,6 +1089,8 @@ export function ProductsConsole({
                   reloadlyEnabled={reloadlyEnabled}
                   centralOneEnabled={centralOneEnabled}
                   centralOneBalanceCents={centralOneBalanceCents}
+                  fazerCardsEnabled={fazerCardsEnabled}
+                  fazerCardsBalanceCents={fazerCardsBalanceCents}
                   onOpenCentralOnePicker={(applySelection, initialQuery) =>
                     void openCentralOneCatalogModal(applySelection, initialQuery)
                   }
@@ -1388,15 +1447,17 @@ export function ProductsConsole({
         </div>
       )}
 
-      {/* Modal: Selector Central One */}
+      {/* Modal: Selector Central One + FazerCards API v2 */}
       {c1ModalOpen && (
         <div className="fixed inset-0 z-[60] bg-black/75 flex items-center justify-center p-4">
           <div className="rounded-2xl bg-slate-900 border border-white/15 max-w-2xl w-full p-6 space-y-4 text-xs shadow-2xl">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="text-base font-bold text-white">Catálogo Central One</h3>
+                <h3 className="text-base font-bold text-white">
+                  Catálogo de Proveedores API (FazerCards v2 & Central One)
+                </h3>
                 <p className="text-slate-400">
-                  Costos en tiempo real (4 decimales). Gift Cards usan productos tipo PIN sin ID de jugador.
+                  Costos mayoristas en vivo y stock instantáneo (incluye Netflix, PSN, Nintendo, Xbox, Steam, etc.).
                 </p>
               </div>
               <button
@@ -1408,6 +1469,51 @@ export function ProductsConsole({
               </button>
             </div>
 
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="inline-flex rounded-xl bg-slate-950 border border-white/10 p-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSupplierTab("fazercards");
+                    if (!fazerItems) void loadFazerCatalog(c1Search);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg font-semibold transition-colors ${
+                    supplierTab === "fazercards"
+                      ? "bg-rose-500 text-white"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  FazerCards API v2 (Netflix & Gift Cards)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSupplierTab("centralone");
+                    if (!c1Items) void loadCentralOneCatalog();
+                  }}
+                  className={`px-3 py-1.5 rounded-lg font-semibold transition-colors ${
+                    supplierTab === "centralone"
+                      ? "bg-sky-500 text-slate-950"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Central One API
+                </button>
+              </div>
+
+              {supplierTab === "fazercards" && (
+                <button
+                  type="button"
+                  disabled={loadingFazer}
+                  onClick={() => void loadFazerCatalog(c1Search)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/15 border border-rose-500/30 hover:bg-rose-500/25 text-rose-200 font-semibold"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingFazer ? "animate-spin" : ""}`} />
+                  <span>Buscar en FazerCards</span>
+                </button>
+              )}
+            </div>
+
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative flex-1 min-w-[200px]">
                 <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
@@ -1415,44 +1521,58 @@ export function ProductsConsole({
                   type="text"
                   value={c1Search}
                   onChange={(e) => setC1Search(e.target.value)}
-                  placeholder="Buscar por nombre, SKU (ej. FF-110), región o UUID..."
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && supplierTab === "fazercards") {
+                      e.preventDefault();
+                      void loadFazerCatalog(c1Search);
+                    }
+                  }}
+                  placeholder={
+                    supplierTab === "fazercards"
+                      ? "Escribe ej. netflix, playstation, steam y pulsa Enter o 'Buscar en FazerCards'..."
+                      : "Buscar por nombre, SKU (ej. FF-110), región o UUID..."
+                  }
                   className="w-full rounded-xl bg-slate-950 border border-white/10 pl-8 pr-3 py-2 text-white focus:border-sky-400 focus:outline-none"
                 />
               </div>
 
-              <div className="inline-flex rounded-xl bg-slate-950 border border-white/10 p-1">
-                <button
-                  type="button"
-                  onClick={() => setC1ShowAllTypes(false)}
-                  className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
-                    !c1ShowAllTypes
-                      ? "bg-white text-slate-950 font-semibold"
-                      : "text-slate-400 hover:text-white"
-                  }`}
-                >
-                  Solo Gift Cards / PINs
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setC1ShowAllTypes(true)}
-                  className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
-                    c1ShowAllTypes
-                      ? "bg-white text-slate-950 font-semibold"
-                      : "text-slate-400 hover:text-white"
-                  }`}
-                >
-                  Ver todos (incl. Recargas ID)
-                </button>
-              </div>
+              {supplierTab === "centralone" && (
+                <div className="inline-flex rounded-xl bg-slate-950 border border-white/10 p-1">
+                  <button
+                    type="button"
+                    onClick={() => setC1ShowAllTypes(false)}
+                    className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                      !c1ShowAllTypes
+                        ? "bg-white text-slate-950 font-semibold"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Solo Gift Cards / PINs
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setC1ShowAllTypes(true)}
+                    className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                      c1ShowAllTypes
+                        ? "bg-white text-slate-950 font-semibold"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Ver todos (incl. Recargas ID)
+                  </button>
+                </div>
+              )}
             </div>
 
-            {loadingC1 ? (
+            {(supplierTab === "fazercards" ? loadingFazer : loadingC1) ? (
               <div className="py-10 text-center text-slate-400">
-                Consultando Central One API...
+                Consultando {supplierTab === "fazercards" ? "FazerCards API v2" : "Central One API"}...
               </div>
-            ) : !c1Items || filteredC1Items.length === 0 ? (
+            ) : !activeSupplierItems || filteredC1Items.length === 0 ? (
               <div className="py-10 text-center text-slate-400">
-                Sin resultados (verifica CENTRAL_ONE_API_KEY en tu entorno).
+                {supplierTab === "fazercards"
+                  ? "Sin resultados (verifica FAZERCARDS_API_KEY en tu entorno o pulsa 'Buscar en FazerCards')."
+                  : "Sin resultados (verifica CENTRAL_ONE_API_KEY en tu entorno)."}
               </div>
             ) : (
               <>

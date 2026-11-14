@@ -37,6 +37,10 @@ import {
   computeCentralOneUnitCapacity,
   getCachedCentralOneBalanceCents,
 } from "./suppliers/centralone";
+import {
+  getCachedFazerCardsBalanceCents,
+  isFazerCardsProductId,
+} from "./suppliers/fazercards";
 
 function assertDbOrSandbox() {
   const admin = getSupabaseAdmin();
@@ -114,6 +118,7 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
   const manualEnabled = providerMap.get("manual_inventory") ?? true;
   const reloadlyEnabled = providerMap.get("reloadly") ?? false;
   const centralOneEnabled = providerMap.get("centralone") ?? false;
+  const fazerCardsEnabled = providerMap.get("fazercards") ?? true;
 
   const stockMap = new Map<string, number>();
   for (const row of stockRows ?? []) {
@@ -126,15 +131,26 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       (v) =>
         (v.source_priority === "manual_then_centralone" ||
           v.source_priority === "centralone_only") &&
-        Boolean(v.centralone_product_id)
+        Boolean(v.centralone_product_id) &&
+        !isFazerCardsProductId(v.centralone_product_id)
     );
 
-  const [centralOneBalanceCents, pricingMetaMap] = anyUsesCentralOne
-    ? await Promise.all([
-        getCachedCentralOneBalanceCents(),
-        getVariantPricingMetaMap(),
-      ])
-    : [null, {} as Record<string, VariantPricingMeta>];
+  const anyUsesFazerCards =
+    fazerCardsEnabled &&
+    (variants ?? []).some(
+      (v) =>
+        (v.source_priority === "manual_then_centralone" ||
+          v.source_priority === "centralone_only") &&
+        isFazerCardsProductId(v.centralone_product_id)
+    );
+
+  const [centralOneBalanceCents, fazerCardsBalanceCents, pricingMetaMap] = await Promise.all([
+    anyUsesCentralOne ? getCachedCentralOneBalanceCents() : Promise.resolve(null),
+    anyUsesFazerCards ? getCachedFazerCardsBalanceCents() : Promise.resolve(null),
+    anyUsesCentralOne || anyUsesFazerCards
+      ? getVariantPricingMetaMap()
+      : Promise.resolve({} as Record<string, VariantPricingMeta>),
+  ]);
 
   const variantsByProduct = new Map<string, ProductVariantDTO[]>();
   for (const v of variants ?? []) {
@@ -145,27 +161,44 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
         v.source_priority === "reloadly_only") &&
       Boolean(v.reloadly_product_id);
 
+    const isFazerSku = isFazerCardsProductId(v.centralone_product_id);
+
     const usesCentralOne =
+      !isFazerSku &&
       centralOneEnabled &&
       (v.source_priority === "manual_then_centralone" ||
         v.source_priority === "centralone_only") &&
       Boolean(v.centralone_product_id);
 
-    const c1Capacity = usesCentralOne
+    const usesFazerCards =
+      isFazerSku &&
+      fazerCardsEnabled &&
+      (v.source_priority === "manual_then_centralone" ||
+        v.source_priority === "centralone_only");
+
+    const activeSupplierBalanceCents = usesFazerCards
+      ? fazerCardsBalanceCents
+      : usesCentralOne
+      ? centralOneBalanceCents
+      : null;
+
+    const usesSupplierApi = usesCentralOne || usesFazerCards;
+
+    const c1Capacity = usesSupplierApi
       ? computeCentralOneUnitCapacity(
-          centralOneBalanceCents,
+          activeSupplierBalanceCents,
           v.unit_cost_cents ?? null,
           pricingMetaMap[v.id]?.exactCostUsd
         )
       : null;
 
     const centralOneAvail =
-      usesCentralOne &&
+      usesSupplierApi &&
       (c1Capacity === null
-        ? centralOneBalanceCents !== null && centralOneBalanceCents > 0
+        ? activeSupplierBalanceCents !== null && activeSupplierBalanceCents > 0
         : c1Capacity > 0);
 
-    const isUnboundedApi = reloadlyAvail || (usesCentralOne && c1Capacity === null);
+    const isUnboundedApi = reloadlyAvail || (usesSupplierApi && c1Capacity === null);
     const deliverableStock = isUnboundedApi
       ? null
       : manualCount + (c1Capacity ?? 0);
@@ -184,7 +217,7 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       lowStockThreshold: v.low_stock_threshold,
       active: Boolean(v.active),
       availableStock: manualCount,
-      supplierStock: usesCentralOne ? c1Capacity : null,
+      supplierStock: usesSupplierApi ? c1Capacity : null,
       deliverableStock,
       inStock: manualCount > 0 || reloadlyAvail || centralOneAvail,
     };

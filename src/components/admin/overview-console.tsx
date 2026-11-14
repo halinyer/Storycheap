@@ -24,7 +24,7 @@ import {
 import { toast } from "sonner";
 
 export interface ProviderCapitalCardData {
-  id: "centralone" | "manual" | "reloadly";
+  id: "centralone" | "fazercards" | "manual" | "reloadly";
   label: string;
   subtitle: string;
   enabled: boolean;
@@ -168,10 +168,11 @@ export function OverviewConsole({
     let bsCovered = 0;
 
     const byProvider: Record<
-      "centralone" | "manual" | "reloadly",
+      "centralone" | "fazercards" | "manual" | "reloadly",
       { consumedCents: number; profitCents: number; deliveredCodes: number }
     > = {
       centralone: { consumedCents: 0, profitCents: 0, deliveredCodes: 0 },
+      fazercards: { consumedCents: 0, profitCents: 0, deliveredCodes: 0 },
       manual: { consumedCents: 0, profitCents: 0, deliveredCodes: 0 },
       reloadly: { consumedCents: 0, profitCents: 0, deliveredCodes: 0 },
     };

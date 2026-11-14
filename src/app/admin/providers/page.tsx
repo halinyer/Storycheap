@@ -6,16 +6,19 @@ import {
   listWebhookEventsAdmin,
 } from "@/lib/server/repository";
 import { getCentralOneBalance } from "@/lib/server/suppliers/centralone";
+import { getFazerCardsBalance } from "@/lib/server/suppliers/fazercards";
 import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
 
 async function AdminProvidersContent() {
   await connection();
-  const [providers, reloadlyStatus, centralOneStatus, webhooks] = await Promise.all([
-    listProviderConfigs(),
-    getReloadlyBalance(),
-    getCentralOneBalance(),
-    listWebhookEventsAdmin(),
-  ]);
+  const [providers, reloadlyStatus, centralOneStatus, fazerCardsStatus, webhooks] =
+    await Promise.all([
+      listProviderConfigs(),
+      getReloadlyBalance(),
+      getCentralOneBalance(),
+      getFazerCardsBalance(),
+      listWebhookEventsAdmin(),
+    ]);
 
   return (
     <div className="space-y-6">
@@ -24,13 +27,14 @@ async function AdminProvidersContent() {
           Pasarelas, Kill Switches y Webhooks
         </h1>
         <p className="text-xs text-slate-400 mt-1">
-          Detén el checkout o una pasarela al instante ante cualquier anomalía, e inspecciona las firmas recibidas de ZenoBank y Central One.
+          Detén el checkout o una pasarela al instante ante cualquier anomalía, e inspecciona las firmas recibidas de ZenoBank, FazerCards y Central One.
         </p>
       </div>
       <ProvidersConsole
         providers={providers}
         reloadlyStatus={reloadlyStatus}
         centralOneStatus={centralOneStatus}
+        fazerCardsStatus={fazerCardsStatus}
         webhooks={webhooks}
       />
     </div>

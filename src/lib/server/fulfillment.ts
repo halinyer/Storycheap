@@ -34,6 +34,12 @@ import {
   getCentralOneOrderCodes,
   invalidateCentralOneBalanceCache,
 } from "./suppliers/centralone";
+import {
+  createFazerCardsGiftCardOrder,
+  getFazerCardsOrder,
+  invalidateFazerCardsBalanceCache,
+  isFazerCardsProductId,
+} from "./suppliers/fazercards";
 import { purchaseReloadlyCard } from "./suppliers/reloadly";
 
 /**
@@ -77,6 +83,7 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
   );
   const reloadlyCfg = await getProviderConfig("reloadly");
   const centralOneCfg = await getProviderConfig("centralone");
+  const fazerCardsCfg = await getProviderConfig("fazercards");
   const manualCfg = await getProviderConfig("manual_inventory");
 
   let allItemsFulfilled = true;
@@ -189,10 +196,99 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       }
     }
 
-    // Step D: Central One API fulfillment (supports both instant & async delivery)
+    // Step D: Central One / FazerCards API fulfillment (supports both instant & async delivery)
     let itemPendingAsync = false;
+    const isFazerSku = isFazerCardsProductId(variantMeta?.centraloneProductId);
+
     if (
       delivered < item.quantity &&
+      isFazerSku &&
+      (fazerCardsCfg?.enabled ?? true) &&
+      variantMeta &&
+      (variantMeta.sourcePriority === "manual_then_centralone" ||
+        variantMeta.sourcePriority === "centralone_only") &&
+      variantMeta.centraloneProductId
+    ) {
+      const remaining = item.quantity - delivered;
+      if (
+        typeof variantMeta.unitCostCents === "number" &&
+        variantMeta.unitCostCents > item.unitPriceCents
+      ) {
+        attentionReasons.push(
+          `FazerCards bloqueado para ${item.productName}: costo configurado ($${(variantMeta.unitCostCents / 100).toFixed(2)}) supera el precio de venta ($${(item.unitPriceCents / 100).toFixed(2)}).`
+        );
+      } else {
+        try {
+          const fzOrder = await createFazerCardsGiftCardOrder({
+            fazerProductId: variantMeta.centraloneProductId,
+            quantity: remaining,
+            customIdentifier: `sc-item-${item.id}`,
+          });
+
+          const fzStatusNormalized =
+            fzOrder.status === "COMPLETED"
+              ? "completed"
+              : fzOrder.status === "FAILED"
+              ? "failed"
+              : "processing";
+
+          await upsertSupplierOrder({
+            orderId: order.id,
+            orderItemId: item.id,
+            provider: "centralone",
+            idempotencyKey: `sc-item-${item.id}`,
+            externalOrderId: fzOrder.externalOrderId,
+            referenceCode: fzOrder.rawOrderId,
+            status: fzStatusNormalized,
+            expectedQty: remaining,
+            deliveredCount: fzOrder.codes.length,
+            supplierUnitCostCents: fzOrder.unitCostCents,
+            rawPayload: fzOrder.rawResponse,
+          });
+          invalidateFazerCardsBalanceCache();
+
+          if (fzOrder.codes.length > 0) {
+            const existingCount = order.fulfillments.filter(
+              (f) => f.orderItemId === item.id && f.source === "centralone"
+            ).length;
+            const unseenCodes = fzOrder.codes.slice(
+              existingCount,
+              existingCount + remaining
+            );
+            for (const codeText of unseenCodes) {
+              await insertFulfillmentRecord({
+                orderItemId: item.id,
+                orderId: order.id,
+                userId: order.userId,
+                source: "centralone",
+                codeInventoryId: null,
+                codeCiphertext: encryptCode(codeText),
+                codeLast4: extractLast4(codeText),
+                pinCiphertext: null,
+                supplierTxId: fzOrder.externalOrderId,
+              });
+              delivered += 1;
+              anyFulfilledNowOrBefore = true;
+            }
+          }
+
+          if (delivered < item.quantity && fzOrder.status === "PENDING") {
+            itemPendingAsync = true;
+            hasPendingAsyncSupplier = true;
+          } else if (delivered < item.quantity && fzOrder.status === "FAILED") {
+            attentionReasons.push(
+              `FazerCards devolvió estado FAILED para ${item.productName}${fzOrder.failReason ? ` (${fzOrder.failReason})` : ""}.`
+            );
+          }
+        } catch (err) {
+          attentionReasons.push(
+            `FazerCards falló para ${item.productName}: ${err instanceof Error ? err.message : "Error desconocido"}`
+          );
+        }
+      }
+    } else if (
+      delivered < item.quantity &&
+      !isFazerSku &&
       centralOneCfg?.enabled &&
       variantMeta &&
       (variantMeta.sourcePriority === "manual_then_centralone" ||
@@ -687,7 +783,33 @@ export async function syncCentralOneOrderProgress(
     return { ok: true, status: "stale_sequence_ignored", addedCodes: 0 };
   }
 
-  const live = await getCentralOneOrder(externalOrderId);
+  const isFazerOrder = isFazerCardsProductId(externalOrderId);
+  const live = isFazerOrder
+    ? await (async () => {
+        const fz = await getFazerCardsOrder(externalOrderId);
+        return {
+          status:
+            fz.status === "COMPLETED"
+              ? "completed"
+              : fz.status === "FAILED"
+              ? "failed"
+              : "processing",
+          deliveredCount: fz.codes.length,
+          unitCostCents: supplierOrder.supplierUnitCostCents,
+          raw: fz.rawResponse,
+          fazerCodes: fz.codes,
+          fazerFailReason: fz.failReason,
+        };
+      })()
+    : await (async () => {
+        const c1 = await getCentralOneOrder(externalOrderId);
+        return {
+          ...c1,
+          fazerCodes: null as string[] | null,
+          fazerFailReason: null as string | null,
+        };
+      })();
+
   const order = await getOrderById(supplierOrder.orderId);
   if (!order) {
     return { ok: false, status: "order_not_found", addedCodes: 0 };
@@ -705,7 +827,9 @@ export async function syncCentralOneOrderProgress(
     ).length;
 
     if (live.deliveredCount > existingCount) {
-      const codes = await getCentralOneOrderCodes(externalOrderId);
+      const codes = live.fazerCodes
+        ? live.fazerCodes.map((codePlaintext) => ({ codePlaintext, pinPlaintext: null }))
+        : await getCentralOneOrderCodes(externalOrderId);
       const pendingCodes = codes.slice(existingCount);
       for (const c of pendingCodes) {
         await insertFulfillmentRecord({
