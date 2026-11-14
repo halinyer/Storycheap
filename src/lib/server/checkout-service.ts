@@ -21,6 +21,7 @@ import {
   setOrderGatewaySession,
   transitionOrderStatus,
 } from "./repository";
+import { isFazerCardsProductId } from "./suppliers/fazercards";
 
 export interface InitiateCheckoutInput {
   email: string;
@@ -121,24 +122,30 @@ export async function initiateCheckout(
     }
 
     // 2) Atomically reserve manual codes (20-min hold) whenever manual stock should back this line
-    const [reloadlyCfg, centralOneCfg] = await Promise.all([
+    const [reloadlyCfg, centralOneCfg, fazerCardsCfg] = await Promise.all([
       getProviderConfig("reloadly"),
       getProviderConfig("centralone"),
+      getProviderConfig("fazercards"),
     ]);
     for (const line of validatedLines) {
       const canFallbackReloadly =
         Boolean(reloadlyCfg?.enabled) &&
         line.variant.sourcePriority !== "manual_only" &&
         Boolean(line.variant.reloadlyProductId);
-      const canFallbackCentralOne =
-        Boolean(centralOneCfg?.enabled) &&
-        (line.variant.sourcePriority === "manual_then_centralone" ||
-          line.variant.sourcePriority === "centralone_only") &&
-        Boolean(line.variant.centraloneProductId);
+      const isApiPriority =
+        line.variant.sourcePriority === "manual_then_centralone" ||
+        line.variant.sourcePriority === "centralone_only";
+      const isFazerSku = isFazerCardsProductId(line.variant.centraloneProductId);
+      const canFallbackApiSupplier =
+        isApiPriority &&
+        Boolean(line.variant.centraloneProductId) &&
+        (isFazerSku
+          ? (fazerCardsCfg?.enabled ?? true)
+          : Boolean(centralOneCfg?.enabled));
 
       if (
         (line.variant.sourcePriority === "reloadly_only" && canFallbackReloadly) ||
-        (line.variant.sourcePriority === "centralone_only" && canFallbackCentralOne)
+        (line.variant.sourcePriority === "centralone_only" && canFallbackApiSupplier)
       ) {
         continue;
       }
@@ -154,7 +161,7 @@ export async function initiateCheckout(
         } catch {
           if (
             line.variant.sourcePriority === "manual_only" ||
-            (!canFallbackReloadly && !canFallbackCentralOne)
+            (!canFallbackReloadly && !canFallbackApiSupplier)
           ) {
             throw new CheckoutValidationError(
               "OUT_OF_STOCK",

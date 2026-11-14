@@ -6,6 +6,12 @@ import {
   getVariantsLookupByIds,
 } from "./repository";
 import { getCentralOneBalance } from "./suppliers/centralone";
+import {
+  getFazerCardsBalance,
+  isFazerCardsProductId,
+} from "./suppliers/fazercards";
+
+type ApiSupplierKey = "centralone" | "fazercards";
 
 export interface CartLineInput {
   variantId: string;
@@ -81,14 +87,30 @@ export async function validateAndPriceCart(
   }
 
   const variantIds = Array.from(mergedQty.keys());
-  const [lookup, reloadlyCfg, centralOneCfg] = await Promise.all([
+  const [lookup, reloadlyCfg, centralOneCfg, fazerCardsCfg] = await Promise.all([
     getVariantsLookupByIds(variantIds),
     getProviderConfig("reloadly"),
     getProviderConfig("centralone"),
+    getProviderConfig("fazercards"),
   ]);
 
-  let liveCentralOneBalanceTenths: number | null = null;
+  const balanceTenthsBySupplier: Partial<Record<ApiSupplierKey, number>> = {};
   let pricingMetaMap: Record<string, { exactCostUsd?: string | null }> | null = null;
+
+  async function ensureSupplierBalanceTenths(supplier: ApiSupplierKey): Promise<number> {
+    const cached = balanceTenthsBySupplier[supplier];
+    if (cached !== undefined) return cached;
+    const status =
+      supplier === "fazercards"
+        ? await getFazerCardsBalance()
+        : await getCentralOneBalance();
+    const tenths =
+      status.healthy && status.balanceCents !== null
+        ? status.balanceCents * 100
+        : 0;
+    balanceTenthsBySupplier[supplier] = tenths;
+    return tenths;
+  }
 
   const validatedLines: ValidatedCheckoutLine[] = [];
   let subtotalCents = 0;
@@ -118,24 +140,36 @@ export async function validateAndPriceCart(
           variant.sourcePriority === "reloadly_only") &&
         Boolean(variant.reloadlyProductId);
 
+      const isApiPriority =
+        variant.sourcePriority === "manual_then_centralone" ||
+        variant.sourcePriority === "centralone_only";
+      const isFazerSku = isFazerCardsProductId(variant.centraloneProductId);
+
+      const canUseFazerCards =
+        isApiPriority &&
+        Boolean(variant.centraloneProductId) &&
+        isFazerSku &&
+        (fazerCardsCfg?.enabled ?? true);
+
       const canUseCentralOne =
-        Boolean(centralOneCfg?.enabled) &&
-        (variant.sourcePriority === "manual_then_centralone" ||
-          variant.sourcePriority === "centralone_only") &&
-        Boolean(variant.centraloneProductId);
+        isApiPriority &&
+        Boolean(variant.centraloneProductId) &&
+        !isFazerSku &&
+        Boolean(centralOneCfg?.enabled);
 
-      if (canUseCentralOne) {
-        if (liveCentralOneBalanceTenths === null) {
-          const [bal, meta] = await Promise.all([
-            getCentralOneBalance(),
-            getVariantPricingMetaMap(),
-          ]);
-          liveCentralOneBalanceTenths =
-            bal.healthy && bal.balanceCents !== null ? bal.balanceCents * 100 : 0;
-          pricingMetaMap = meta;
+      const supplierKey: ApiSupplierKey | null = canUseFazerCards
+        ? "fazercards"
+        : canUseCentralOne
+          ? "centralone"
+          : null;
+
+      if (supplierKey) {
+        if (pricingMetaMap === null) {
+          pricingMetaMap = await getVariantPricingMetaMap();
         }
+        const supplierBalanceTenths = await ensureSupplierBalanceTenths(supplierKey);
 
-        const exactStr = pricingMetaMap?.[variant.id]?.exactCostUsd;
+        const exactStr = pricingMetaMap[variant.id]?.exactCostUsd;
         const unitTenths =
           exactStr && /^\d+(\.\d+)?$/.test(exactStr.trim())
             ? Math.round(Number.parseFloat(exactStr.trim()) * 10_000)
@@ -144,9 +178,9 @@ export async function validateAndPriceCart(
               : 1; // minimal non-zero cost when uncosted, still blocked if balance is $0
 
         const requiredTenths = unitTenths * deficit;
-        if (liveCentralOneBalanceTenths < requiredTenths || liveCentralOneBalanceTenths <= 0) {
+        if (supplierBalanceTenths < requiredTenths || supplierBalanceTenths <= 0) {
           const affordableUnits =
-            unitTenths > 0 ? Math.floor(liveCentralOneBalanceTenths / unitTenths) : 0;
+            unitTenths > 0 ? Math.floor(supplierBalanceTenths / unitTenths) : 0;
           const totalAvailable = csvAvailable + affordableUnits;
           throw new CheckoutValidationError(
             "OUT_OF_STOCK",
@@ -154,7 +188,7 @@ export async function validateAndPriceCart(
             409
           );
         }
-        liveCentralOneBalanceTenths -= requiredTenths;
+        balanceTenthsBySupplier[supplierKey] = supplierBalanceTenths - requiredTenths;
       } else if (!canFallbackReloadly) {
         throw new CheckoutValidationError(
           "OUT_OF_STOCK",
