@@ -10,6 +10,19 @@ export interface CreateCheckoutInput {
   successRedirectUrl: string;
 }
 
+export interface ZenoCheckoutTransaction {
+  uid: string;
+  transactionId: string;
+  networkId: string | null;
+  tokenId: string | null;
+  tokenAmount: string;
+  from: string | null;
+  fromLabel: string | null;
+  to: string | null;
+  toLabel: string | null;
+  createdAt: string;
+}
+
 export interface GatewayCheckoutSession {
   gateway: PaymentGatewayId;
   checkoutId: string;
@@ -19,6 +32,7 @@ export interface GatewayCheckoutSession {
   priceCents: number;
   paidCents: number;
   isSandbox: boolean;
+  transactions?: ZenoCheckoutTransaction[];
 }
 
 export interface NormalizedPaymentWebhookEvent {

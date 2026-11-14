@@ -11,6 +11,7 @@ import type {
   GatewayCheckoutSession,
   NormalizedPaymentWebhookEvent,
   PaymentGatewayAdapter,
+  ZenoCheckoutTransaction,
 } from "./types";
 
 function parseUsdToCents(amountStr: string | undefined | null): number {
@@ -44,10 +45,63 @@ function createZenoClient(): ZenoBankClient {
   });
 }
 
+export function normalizeZenoTransactions(rawList: unknown): ZenoCheckoutTransaction[] {
+  if (!Array.isArray(rawList)) return [];
+  const out: ZenoCheckoutTransaction[] = [];
+  for (const item of rawList) {
+    if (!item || typeof item !== "object") continue;
+    const tx = item as Record<string, unknown>;
+    const transactionId = typeof tx.transactionId === "string" ? tx.transactionId : "";
+    const uid = typeof tx.uid === "string" ? tx.uid : transactionId;
+    if (!uid && !transactionId) continue;
+    out.push({
+      uid: uid || transactionId,
+      transactionId: transactionId || uid,
+      networkId: typeof tx.networkId === "string" ? tx.networkId : null,
+      tokenId: typeof tx.tokenId === "string" ? tx.tokenId : null,
+      tokenAmount: typeof tx.tokenAmount === "string" ? tx.tokenAmount : "0",
+      from: typeof tx.from === "string" ? tx.from : null,
+      fromLabel: typeof tx.fromLabel === "string" ? tx.fromLabel : null,
+      to: typeof tx.to === "string" ? tx.to : null,
+      toLabel: typeof tx.toLabel === "string" ? tx.toLabel : null,
+      createdAt: typeof tx.createdAt === "string" ? tx.createdAt : "",
+    });
+  }
+  return out;
+}
+
+export function extractZenoTransactionsFromPayload(
+  payload: unknown
+): ZenoCheckoutTransaction[] {
+  if (!payload || typeof payload !== "object") return [];
+  const obj = payload as Record<string, unknown>;
+  const dataObj =
+    obj.data && typeof obj.data === "object"
+      ? (obj.data as Record<string, unknown>)
+      : null;
+  const liveObj =
+    obj.liveSession && typeof obj.liveSession === "object"
+      ? (obj.liveSession as Record<string, unknown>)
+      : null;
+
+  const candidates = [
+    dataObj?.transactions,
+    liveObj?.transactions,
+    obj.transactions,
+  ];
+  for (const list of candidates) {
+    const normalized = normalizeZenoTransactions(list);
+    if (normalized.length > 0) return normalized;
+  }
+  return [];
+}
+
 function mapCheckoutDto(
   dto: CheckoutResponseDto,
   isSandbox = false
 ): GatewayCheckoutSession {
+  const rawTransactions = (dto as CheckoutResponseDto & { transactions?: unknown }).transactions;
+  const transactions = normalizeZenoTransactions(rawTransactions);
   return {
     gateway: "zenobank",
     checkoutId: dto.id,
@@ -57,6 +111,7 @@ function mapCheckoutDto(
     priceCents: parseUsdToCents(dto.priceAmount),
     paidCents: parseUsdToCents(dto.paidAmount),
     isSandbox,
+    ...(transactions.length > 0 ? { transactions } : {}),
   };
 }
 

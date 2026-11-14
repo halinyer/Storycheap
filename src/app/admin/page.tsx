@@ -4,13 +4,21 @@ import {
   OverviewConsole,
   type ProviderCapitalCardData,
 } from "@/components/admin/overview-console";
+import { isZenoBankConfigured } from "@/lib/server/env";
+import {
+  getActiveReceiverBankAccount,
+  listBankNotifications,
+} from "@/lib/server/pagomovil-store";
 import {
   getBsRateCents,
   getMonthlyCapitalSnapshots,
+  getZenoBinanceReceiver,
   listCatalog,
+  listCustomersAdmin,
   listInventoryAdmin,
   listOrdersAdmin,
   listProviderConfigs,
+  listZenoPaymentProofsAdmin,
 } from "@/lib/server/repository";
 import { getCentralOneBalance } from "@/lib/server/suppliers/centralone";
 import { getFazerCardsBalance } from "@/lib/server/suppliers/fazercards";
@@ -29,6 +37,11 @@ async function AdminOverviewContent() {
     fazerCards,
     bsRateCents,
     capitalSnapshots,
+    customers,
+    activePagoMovilAccount,
+    pagoMovilNotifications,
+    zenoReceiver,
+    zenoProofs,
   ] = await Promise.all([
     listOrdersAdmin(),
     listOrdersAdmin({ needsAttentionOnly: true }),
@@ -40,6 +53,11 @@ async function AdminOverviewContent() {
     getFazerCardsBalance(),
     getBsRateCents(),
     getMonthlyCapitalSnapshots(),
+    listCustomersAdmin(),
+    getActiveReceiverBankAccount(),
+    listBankNotifications(150),
+    getZenoBinanceReceiver(),
+    listZenoPaymentProofsAdmin(),
   ]);
 
   let manualCostCents = 0;
@@ -105,6 +123,38 @@ async function AdminOverviewContent() {
       }))
   );
 
+  const creditHolders = customers
+    .filter((c) => c.creditBalanceCents > 0)
+    .sort((a, b) => b.creditBalanceCents - a.creditBalanceCents)
+    .map((c) => ({
+      id: c.id,
+      email: c.email,
+      creditBalanceCents: c.creditBalanceCents,
+      ordersCount: c.ordersCount,
+    }));
+
+  const matchedNotificationByOrder: Record<
+    string,
+    {
+      referenceFull: string | null;
+      amountBsCents: number | null;
+      senderPhone: string | null;
+      senderBankCode: string | null;
+      postedAt: string;
+    }
+  > = {};
+  for (const n of pagoMovilNotifications) {
+    if (n.status === "MATCHED" && n.matchedOrderId && !matchedNotificationByOrder[n.matchedOrderId]) {
+      matchedNotificationByOrder[n.matchedOrderId] = {
+        referenceFull: n.referenceFull,
+        amountBsCents: n.amountBsCents,
+        senderPhone: n.senderPhone,
+        senderBankCode: n.senderBankCode,
+        postedAt: n.postedAt,
+      };
+    }
+  }
+
   return (
     <OverviewConsole
       orders={orders}
@@ -113,6 +163,12 @@ async function AdminOverviewContent() {
       providerStatuses={providerStatuses}
       initialSnapshots={capitalSnapshots}
       bsRateCents={bsRateCents}
+      creditHolders={creditHolders}
+      zenoConfigured={isZenoBankConfigured()}
+      initialZenoReceiver={zenoReceiver}
+      zenoProofs={zenoProofs}
+      activePagoMovilAccount={activePagoMovilAccount}
+      matchedPagoMovilByOrder={matchedNotificationByOrder}
     />
   );
 }

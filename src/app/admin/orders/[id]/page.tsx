@@ -4,13 +4,22 @@ import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import { OrderDetailActions } from "@/components/admin/order-detail-actions";
 import { formatCents } from "@/lib/catalog-seed";
-import { getOrderById } from "@/lib/server/repository";
+import {
+  getActiveReceiverBankAccount,
+  getMatchedNotificationForOrder,
+  getOrderPagoMovilReport,
+} from "@/lib/server/pagomovil-store";
+import {
+  getOrderById,
+  getZenoBinanceReceiver,
+  getZenoPaymentProofForOrder,
+} from "@/lib/server/repository";
 import {
   formatBsCents,
   formatBsRate,
   getOrderSnapshot,
 } from "@/lib/server/sales-metrics";
-import { AlertTriangle, ArrowLeft, Shield } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Bitcoin, Shield, Smartphone } from "lucide-react";
 
 async function AdminOrderDetailContent({
   params,
@@ -22,6 +31,23 @@ async function AdminOrderDetailContent({
   const order = await getOrderById(id);
   if (!order) notFound();
   const snap = getOrderSnapshot(order);
+
+  const [zenoReceiver, zenoProof, activeBank, pmReport, pmNotification] =
+    await Promise.all([
+      order.paymentGateway === "zenobank" ? getZenoBinanceReceiver() : Promise.resolve(null),
+      order.paymentGateway === "zenobank"
+        ? getZenoPaymentProofForOrder(order.id)
+        : Promise.resolve(null),
+      order.paymentGateway !== "zenobank"
+        ? getActiveReceiverBankAccount()
+        : Promise.resolve(null),
+      order.paymentGateway !== "zenobank"
+        ? getOrderPagoMovilReport(order.id)
+        : Promise.resolve(null),
+      order.paymentGateway !== "zenobank"
+        ? getMatchedNotificationForOrder(order.id)
+        : Promise.resolve(null),
+    ]);
 
   return (
     <div className="space-y-6">
@@ -118,6 +144,157 @@ async function AdminOrderDetailContent({
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Cuenta Receptora y Comprobante de Pago */}
+      <div className="rounded-3xl apple-glass p-6 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-base font-black text-white flex items-center gap-2">
+            {order.paymentGateway === "zenobank" ? (
+              <Bitcoin className="w-4 h-4 text-amber-400" />
+            ) : (
+              <Smartphone className="w-4 h-4 text-sky-400" />
+            )}
+            <span>Cuenta Receptora y Comprobante</span>
+          </h2>
+          <Link
+            href="/admin"
+            className="text-xs font-semibold text-sky-400 hover:text-sky-300"
+          >
+            Ver libro de receptoras →
+          </Link>
+        </div>
+
+        {order.paymentGateway === "zenobank" ? (
+          <div className="space-y-3 text-xs">
+            <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/25 space-y-1">
+              <div className="text-[11px] uppercase font-bold text-amber-300">
+                Cuenta Binance / ZenoBank Receptora
+              </div>
+              {zenoReceiver ? (
+                <>
+                  <div className="font-bold text-white">
+                    {zenoReceiver.label} — {zenoReceiver.binanceAccount}
+                  </div>
+                  <div className="text-slate-300">
+                    Red: {zenoReceiver.network}
+                    {zenoReceiver.storeReference
+                      ? ` • Store: ${zenoReceiver.storeReference}`
+                      : ""}
+                  </div>
+                </>
+              ) : (
+                <div className="text-amber-200">
+                  No has registrado tu correo/UID de Binance en{" "}
+                  <Link href="/admin" className="underline font-bold">
+                    Resumen Ejecutivo → Cuentas Receptoras
+                  </Link>
+                  . Los fondos se liquidaron a la cuenta Binance asociada a tu{" "}
+                  <code>ZENOBANK_API_KEY</code>.
+                </div>
+              )}
+              <div className="text-[11px] text-slate-400 pt-1">
+                Checkout ZenoBank: <code>{order.gatewayCheckoutId ?? "N/A"}</code>
+                {zenoProof?.eventType ? ` • Último evento: ${zenoProof.eventType}` : ""}
+              </div>
+            </div>
+
+            {zenoProof && zenoProof.transactions.length > 0 ? (
+              <div className="space-y-2">
+                {zenoProof.transactions.map((tx) => (
+                  <div
+                    key={tx.uid}
+                    className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-1"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-emerald-400">
+                        {tx.tokenAmount} {tx.tokenId ?? "USDT"}
+                      </span>
+                      <span className="text-[11px] text-slate-400">
+                        {tx.networkId ?? "Red ZenoBank"}
+                      </span>
+                    </div>
+                    {(tx.toLabel || tx.to) && (
+                      <div className="text-slate-200">
+                        Destino reportado por ZenoBank:{" "}
+                        <strong className="text-white">
+                          {tx.toLabel ? `${tx.toLabel} (${tx.to ?? ""})` : tx.to}
+                        </strong>
+                      </div>
+                    )}
+                    {(tx.fromLabel || tx.from) && (
+                      <div className="text-slate-400">
+                        Origen cliente:{" "}
+                        {tx.fromLabel ? `${tx.fromLabel} (${tx.from ?? ""})` : tx.from}
+                      </div>
+                    )}
+                    <div className="text-[11px] font-mono text-slate-400 break-all">
+                      TX / Ref: {tx.transactionId}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-400">
+                {order.creditAppliedCents >= order.subtotalCents
+                  ? "Esta orden se pagó 100% con créditos internos de la tienda (sin movimiento externo en Binance)."
+                  : "ZenoBank validó el checkout sin adjuntar un sub-objeto de hash/wallet en el evento."}
+              </p>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3 text-xs">
+            <div className="p-4 rounded-2xl bg-sky-500/10 border border-sky-500/25 space-y-1">
+              <div className="text-[11px] uppercase font-bold text-sky-300">
+                Cuenta Bancaria Receptora (Pago Móvil)
+              </div>
+              {activeBank ? (
+                <div className="font-bold text-white">
+                  {activeBank.bankName} ({activeBank.bankCode}) • {activeBank.phone} •{" "}
+                  {activeBank.dni} • {activeBank.holderName}
+                </div>
+              ) : (
+                <div className="text-amber-200">Sin cuenta receptora activa registrada.</div>
+              )}
+            </div>
+
+            {pmNotification ? (
+              <div className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 space-y-1">
+                <div className="font-bold text-emerald-300">
+                  Notificación bancaria emparejada ({pmNotification.sourceType})
+                </div>
+                <div className="text-white">
+                  Referencia: <strong>#{pmNotification.referenceFull ?? "N/A"}</strong> •
+                  Monto:{" "}
+                  <strong>
+                    {pmNotification.amountBsCents
+                      ? formatBsCents(pmNotification.amountBsCents)
+                      : "N/A"}
+                  </strong>
+                </div>
+                <div className="text-slate-300 text-[11px]">
+                  Emisor: {pmNotification.senderBankCode ?? "?"} • Tel:{" "}
+                  {pmNotification.senderPhone ?? "?"} • CI:{" "}
+                  {pmNotification.senderDni ?? "?"}
+                </div>
+              </div>
+            ) : pmReport?.reportedReference ? (
+              <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-1">
+                <div className="font-bold text-slate-200">
+                  Referencia reportada por el cliente: #{pmReport.reportedReference}
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Banco origen: {pmReport.reportedSenderBank ?? "?"} • Tel:{" "}
+                  {pmReport.reportedSenderPhone ?? "?"}
+                </div>
+              </div>
+            ) : (
+              <p className="text-[11px] text-slate-400">
+                Sin reporte o notificación bancaria automática adjunta.
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       <OrderDetailActions

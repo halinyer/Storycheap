@@ -33,6 +33,8 @@ import {
 } from "./sandbox-db";
 import { canTransitionOrder } from "./state-machine";
 import { getSupabaseAdmin } from "./supabase-admin";
+import type { ZenoCheckoutTransaction } from "./payments/types";
+import { extractZenoTransactionsFromPayload } from "./payments/zenobank";
 import {
   computeCentralOneUnitCapacity,
   getCachedCentralOneBalanceCents,
@@ -1467,6 +1469,70 @@ export async function saveMonthlyCapitalSnapshot(
   return next;
 }
 
+export interface ZenoBinanceReceiverDTO {
+  label: string;
+  binanceAccount: string;
+  network: string;
+  storeReference: string;
+  notes: string;
+  updatedAt: string;
+}
+
+let sandboxZenoReceiver: ZenoBinanceReceiverDTO | null = null;
+
+export async function getZenoBinanceReceiver(): Promise<ZenoBinanceReceiverDTO | null> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    return sandboxZenoReceiver ? { ...sandboxZenoReceiver } : null;
+  }
+  const { data, error } = await ctx.admin
+    .from("store_settings")
+    .select("value")
+    .eq("key", "zenobank_binance_receiver")
+    .maybeSingle();
+  if (error || !data || !data.value || typeof data.value !== "object") {
+    return null;
+  }
+  const v = data.value as Partial<ZenoBinanceReceiverDTO>;
+  if (!v.binanceAccount && !v.label) return null;
+  return {
+    label: typeof v.label === "string" ? v.label : "Binance / ZenoBank",
+    binanceAccount: typeof v.binanceAccount === "string" ? v.binanceAccount : "",
+    network: typeof v.network === "string" ? v.network : "USDT",
+    storeReference: typeof v.storeReference === "string" ? v.storeReference : "",
+    notes: typeof v.notes === "string" ? v.notes : "",
+    updatedAt: typeof v.updatedAt === "string" ? v.updatedAt : "",
+  };
+}
+
+export async function saveZenoBinanceReceiver(
+  input: Omit<ZenoBinanceReceiverDTO, "updatedAt">,
+  updatedBy?: string | null
+): Promise<ZenoBinanceReceiverDTO> {
+  const next: ZenoBinanceReceiverDTO = {
+    label: input.label.trim() || "Binance / ZenoBank",
+    binanceAccount: input.binanceAccount.trim(),
+    network: input.network.trim() || "USDT",
+    storeReference: input.storeReference.trim(),
+    notes: input.notes.trim(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    sandboxZenoReceiver = next;
+    return { ...next };
+  }
+
+  const { error } = await ctx.admin.from("store_settings").upsert({
+    key: "zenobank_binance_receiver",
+    value: next,
+    updated_by: updatedBy ?? null,
+  });
+  if (error) throw error;
+  return next;
+}
+
 export interface VariantPricingMeta {
   exactCostUsd?: string | null;
   centraloneProductName?: string | null;
@@ -2495,6 +2561,105 @@ export async function listWebhookEventsAdmin(): Promise<WebhookEventDTO[]> {
     errorMessage: r.error_message,
     processedAt: r.processed_at,
   }));
+}
+
+export interface ZenoPaymentProofDTO {
+  orderId: string;
+  gatewayCheckoutId: string;
+  eventType: string;
+  processedAt: string;
+  transactions: ZenoCheckoutTransaction[];
+}
+
+export async function listZenoPaymentProofsAdmin(): Promise<
+  Record<string, ZenoPaymentProofDTO>
+> {
+  const ctx = assertDbOrSandbox();
+  const byOrder: Record<string, ZenoPaymentProofDTO> = {};
+
+  if (ctx.mode === "sandbox") {
+    for (const w of getSandboxState().webhookEvents) {
+      if (w.gateway !== "zenobank" || !w.orderId) continue;
+      const txs = extractZenoTransactionsFromPayload(w.payload);
+      const prev = byOrder[w.orderId];
+      if (!prev || (prev.transactions.length === 0 && txs.length > 0)) {
+        byOrder[w.orderId] = {
+          orderId: w.orderId,
+          gatewayCheckoutId: w.gatewayCheckoutId ?? "",
+          eventType: w.eventType,
+          processedAt: w.processedAt,
+          transactions: txs,
+        };
+      }
+    }
+    return byOrder;
+  }
+
+  const { data, error } = await ctx.admin
+    .from("webhook_events")
+    .select("order_id, gateway_checkout_id, event_type, processed_at, payload")
+    .eq("gateway", "zenobank")
+    .not("order_id", "is", null)
+    .order("processed_at", { ascending: false })
+    .limit(250);
+  if (error || !data) return byOrder;
+
+  for (const r of data) {
+    const orderId = r.order_id as string | null;
+    if (!orderId) continue;
+    const txs = extractZenoTransactionsFromPayload(r.payload);
+    const prev = byOrder[orderId];
+    if (!prev || (prev.transactions.length === 0 && txs.length > 0)) {
+      byOrder[orderId] = {
+        orderId,
+        gatewayCheckoutId: (r.gateway_checkout_id as string | null) ?? "",
+        eventType: (r.event_type as string) ?? "",
+        processedAt: (r.processed_at as string) ?? "",
+        transactions: txs,
+      };
+    }
+  }
+  return byOrder;
+}
+
+export async function getZenoPaymentProofForOrder(
+  orderId: string
+): Promise<ZenoPaymentProofDTO | null> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const all = await listZenoPaymentProofsAdmin();
+    return all[orderId] ?? null;
+  }
+
+  const { data, error } = await ctx.admin
+    .from("webhook_events")
+    .select("order_id, gateway_checkout_id, event_type, processed_at, payload")
+    .eq("gateway", "zenobank")
+    .eq("order_id", orderId)
+    .order("processed_at", { ascending: false })
+    .limit(10);
+  if (error || !data || data.length === 0) return null;
+
+  for (const r of data) {
+    const txs = extractZenoTransactionsFromPayload(r.payload);
+    if (txs.length > 0) {
+      return {
+        orderId,
+        gatewayCheckoutId: (r.gateway_checkout_id as string | null) ?? "",
+        eventType: (r.event_type as string) ?? "",
+        processedAt: (r.processed_at as string) ?? "",
+        transactions: txs,
+      };
+    }
+  }
+  const latest = data[0];
+  return {
+    orderId,
+    gatewayCheckoutId: (latest.gateway_checkout_id as string | null) ?? "",
+    eventType: (latest.event_type as string) ?? "",
+    processedAt: (latest.processed_at as string) ?? "",
+    transactions: [],
+  };
 }
 
 export async function appendAuditLog(params: {

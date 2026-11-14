@@ -4,22 +4,33 @@ import React, { useMemo, useState } from "react";
 import Link from "next/link";
 import { captureMonthlyCapitalSnapshotAction } from "@/app/admin/actions";
 import { BsRateCard } from "@/components/admin/bs-rate-card";
+import {
+  ReceiverLedgersSection,
+  type MatchedPagoMovilSummary,
+} from "@/components/admin/receiver-ledgers-section";
 import { formatCents } from "@/lib/catalog-seed";
-import type { CapitalSnapshotRecord } from "@/lib/server/repository";
+import type {
+  CapitalSnapshotRecord,
+  ZenoBinanceReceiverDTO,
+  ZenoPaymentProofDTO,
+} from "@/lib/server/repository";
 import {
   formatBsCents,
-  formatBsRate,
   getOrderSnapshot,
 } from "@/lib/server/sales-metrics";
-import type { OrderDTO } from "@/types";
+import type { OrderDTO, ReceiverBankAccountDTO } from "@/types";
 import {
   AlertTriangle,
+  ArrowUpRight,
   Camera,
+  Clock3,
+  Landmark,
   Package,
   Receipt,
   Search,
   TrendingDown,
   TrendingUp,
+  Wallet,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -42,8 +53,16 @@ export interface LowStockVariantAlert {
   threshold: number;
 }
 
+export interface CreditHolderSummary {
+  id: string;
+  email: string;
+  creditBalanceCents: number;
+  ordersCount: number;
+}
+
 type PeriodKey = "today" | "7d" | "month" | "all";
-type ProviderFilterKey = "all" | "centralone" | "manual" | "reloadly";
+type ProviderFilterKey = "all" | "fazercards" | "centralone" | "manual" | "reloadly";
+type StatusFilterKey = "all" | "settled" | "pending" | "attention";
 
 const ORDER_STATUS_META: Record<
   OrderDTO["status"],
@@ -102,6 +121,12 @@ export function OverviewConsole({
   providerStatuses,
   initialSnapshots,
   bsRateCents,
+  creditHolders = [],
+  zenoConfigured = false,
+  initialZenoReceiver = null,
+  zenoProofs = {},
+  activePagoMovilAccount = null,
+  matchedPagoMovilByOrder = {},
 }: {
   orders: OrderDTO[];
   attentionCount: number;
@@ -109,9 +134,16 @@ export function OverviewConsole({
   providerStatuses: ProviderCapitalCardData[];
   initialSnapshots: CapitalSnapshotRecord[];
   bsRateCents: number | null;
+  creditHolders?: CreditHolderSummary[];
+  zenoConfigured?: boolean;
+  initialZenoReceiver?: ZenoBinanceReceiverDTO | null;
+  zenoProofs?: Record<string, ZenoPaymentProofDTO>;
+  activePagoMovilAccount?: ReceiverBankAccountDTO | null;
+  matchedPagoMovilByOrder?: Record<string, MatchedPagoMovilSummary>;
 }) {
   const [period, setPeriod] = useState<PeriodKey>("month");
   const [providerFilter, setProviderFilter] = useState<ProviderFilterKey>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilterKey>("all");
   const [search, setSearch] = useState("");
   const [snapshots, setSnapshots] = useState<CapitalSnapshotRecord[]>(initialSnapshots);
   const [capturing, setCapturing] = useState(false);
@@ -149,6 +181,13 @@ export function OverviewConsole({
       if (providerFilter !== "all") {
         if (!getOrderSources(order).has(providerFilter)) return false;
       }
+      if (statusFilter === "settled") {
+        if (!getOrderSnapshot(order).isSettledSale) return false;
+      } else if (statusFilter === "pending") {
+        if (order.status !== "PENDING_PAYMENT" && order.status !== "CREATED") return false;
+      } else if (statusFilter === "attention") {
+        if (!order.needsAttention) return false;
+      }
       if (q) {
         const itemsText = order.items
           .map((i) => `${i.productName} ${i.denominationLabel}`)
@@ -158,7 +197,7 @@ export function OverviewConsole({
       }
       return true;
     });
-  }, [orders, periodSinceMs, providerFilter, search]);
+  }, [orders, periodSinceMs, providerFilter, statusFilter, search]);
 
   const metrics = useMemo(() => {
     let ordersCount = 0;
@@ -166,6 +205,15 @@ export function OverviewConsole({
     let costCents = 0;
     let totalBsCents = 0;
     let bsCovered = 0;
+    let zenobankCents = 0;
+    let zenobankCount = 0;
+    let pagomovilCents = 0;
+    let pagomovilBsCents = 0;
+    let pagomovilCount = 0;
+    let creditAppliedCents = 0;
+    let creditAppliedCount = 0;
+    let pendingCents = 0;
+    let pendingCount = 0;
 
     const byProvider: Record<
       "centralone" | "fazercards" | "manual" | "reloadly",
@@ -178,6 +226,11 @@ export function OverviewConsole({
     };
 
     for (const order of filteredOrders) {
+      if (order.status === "PENDING_PAYMENT" || order.status === "CREATED") {
+        pendingCount += 1;
+        pendingCents += order.amountDueCents;
+      }
+
       const snap = getOrderSnapshot(order);
       if (!snap.isSettledSale) continue;
 
@@ -187,6 +240,27 @@ export function OverviewConsole({
       if (snap.totalBsCents !== null) {
         totalBsCents += snap.totalBsCents;
         bsCovered += 1;
+      }
+
+      if (order.creditAppliedCents > 0) {
+        creditAppliedCents += order.creditAppliedCents;
+        creditAppliedCount += 1;
+      }
+
+      const cashPaidCents =
+        order.paidCents > 0
+          ? order.paidCents
+          : Math.max(0, snap.revenueCents - order.creditAppliedCents);
+
+      if (cashPaidCents > 0) {
+        if (order.paymentGateway === "pagomovil") {
+          pagomovilCount += 1;
+          pagomovilCents += cashPaidCents;
+          if (snap.totalBsCents !== null) pagomovilBsCents += snap.totalBsCents;
+        } else {
+          zenobankCount += 1;
+          zenobankCents += cashPaidCents;
+        }
       }
 
       const itemById = new Map(order.items.map((it) => [it.id, it]));
@@ -214,9 +288,23 @@ export function OverviewConsole({
       marginPct,
       totalBsCents,
       bsCovered,
+      zenobankCents,
+      zenobankCount,
+      pagomovilCents,
+      pagomovilBsCents,
+      pagomovilCount,
+      creditAppliedCents,
+      creditAppliedCount,
+      pendingCents,
+      pendingCount,
       byProvider,
     };
   }, [filteredOrders]);
+
+  const totalCreditLiabilityCents = useMemo(
+    () => creditHolders.reduce((sum, h) => sum + h.creditBalanceCents, 0),
+    [creditHolders]
+  );
 
   // Only show providers that are active or configured (hides unused noise like unconfigured Reloadly)
   const visibleProviders = useMemo(
@@ -330,9 +418,21 @@ export function OverviewConsole({
             className="rounded-xl bg-slate-900/90 border border-white/10 px-3 py-2 text-xs font-medium text-slate-200 focus:outline-none"
           >
             <option value="all">Todos los distribuidores</option>
+            <option value="fazercards">FazerCards</option>
             <option value="centralone">Central One</option>
             <option value="manual">Stock CSV</option>
             <option value="reloadly">Reloadly</option>
+          </select>
+
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as StatusFilterKey)}
+            className="rounded-xl bg-slate-900/90 border border-white/10 px-3 py-2 text-xs font-medium text-slate-200 focus:outline-none"
+          >
+            <option value="all">Todos los estados</option>
+            <option value="settled">Solo cobradas</option>
+            <option value="pending">Abiertas / Esperando pago</option>
+            <option value="attention">Requieren atención</option>
           </select>
         </div>
 
@@ -352,7 +452,7 @@ export function OverviewConsole({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-1">
           <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Ingresos</span>
+            <span>Ventas cobradas</span>
             <span className="text-slate-300 font-medium">{metrics.ordersCount} ventas</span>
           </div>
           <div className="text-2xl font-bold tracking-tight text-white">
@@ -389,7 +489,7 @@ export function OverviewConsole({
 
         <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-1">
           <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Capital total</span>
+            <span>Capital neto operativo</span>
             {capitalGrowthPct !== null && capitalDiffCents !== null && (
               <span
                 className={`inline-flex items-center gap-1 font-semibold ${
@@ -407,15 +507,145 @@ export function OverviewConsole({
             )}
           </div>
           <div className="text-2xl font-bold tracking-tight text-white">
-            {formatCents(totalLiveCapitalCents)}
+            {formatCents(totalLiveCapitalCents - totalCreditLiabilityCents)}
           </div>
           <div className="text-xs text-slate-500">
-            {previousSnapshot
-              ? `Cierre ${previousSnapshot.month}: ${formatCents(previousSnapshot.totalCents)}`
-              : "Guarda una foto para comparar meses"}
+            {totalCreditLiabilityCents > 0
+              ? `Stock/APIs ${formatCents(totalLiveCapitalCents)} − Créditos ${formatCents(totalCreditLiabilityCents)}`
+              : previousSnapshot
+                ? `Cierre ${previousSnapshot.month}: ${formatCents(previousSnapshot.totalCents)}`
+                : "Guarda una foto para comparar meses"}
           </div>
         </div>
       </div>
+
+      {/* Where Money Entered + Who Holds Store Credits */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Desglose por canal de entrada */}
+        <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+              <Landmark className="w-4 h-4 text-sky-400" />
+              <span>¿Dónde entró el dinero?</span>
+            </h2>
+            <span className="text-[11px] text-slate-400">Según filtro actual</span>
+          </div>
+
+          <div className="divide-y divide-white/[0.06] text-xs">
+            <div className="py-2.5 flex items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold text-white">ZenoBank (USD / Crypto)</div>
+                <div className="text-slate-400">{metrics.zenobankCount} órdenes cobradas</div>
+              </div>
+              <div className="text-right font-bold text-white">
+                {formatCents(metrics.zenobankCents)}
+              </div>
+            </div>
+
+            <div className="py-2.5 flex items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold text-white">Bancamiga / Pago Móvil (Bs)</div>
+                <div className="text-slate-400">
+                  {metrics.pagomovilCount} órdenes ·{" "}
+                  {metrics.pagomovilBsCents > 0
+                    ? formatBsCents(metrics.pagomovilBsCents)
+                    : "Bs 0,00"}
+                </div>
+              </div>
+              <div className="text-right font-bold text-white">
+                {formatCents(metrics.pagomovilCents)}
+              </div>
+            </div>
+
+            <div className="py-2.5 flex items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold text-violet-300">Créditos de tienda usados</div>
+                <div className="text-slate-400">
+                  {metrics.creditAppliedCount} órdenes pagadas con saldo interno
+                </div>
+              </div>
+              <div className="text-right font-bold text-violet-300">
+                {formatCents(metrics.creditAppliedCents)}
+              </div>
+            </div>
+
+            <div className="pt-2.5 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Clock3 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <div>
+                  <div className="font-medium text-amber-200">
+                    Por cobrar / Abiertas ({metrics.pendingCount})
+                  </div>
+                  <div className="text-slate-500">En espera en ZenoBank o Pago Móvil</div>
+                </div>
+              </div>
+              <div className="text-right font-semibold text-amber-300">
+                {formatCents(metrics.pendingCents)}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Quién tiene qué en créditos */}
+        <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                <Wallet className="w-4 h-4 text-emerald-400" />
+                <span>¿Quién tiene créditos a favor?</span>
+              </h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Total en créditos activos:{" "}
+                <span className="font-bold text-emerald-400">
+                  {formatCents(totalCreditLiabilityCents)}
+                </span>{" "}
+                en {creditHolders.length} cliente(s)
+              </p>
+            </div>
+            <Link
+              href="/admin/customers"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-white/10 text-[11px] font-semibold text-slate-200 hover:text-white hover:bg-white/[0.06]"
+            >
+              <span>Ver todos</span>
+              <ArrowUpRight className="w-3 h-3" />
+            </Link>
+          </div>
+
+          {creditHolders.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-400">
+              Ningún cliente tiene saldo a favor pendiente ($0.00).
+            </div>
+          ) : (
+            <div className="divide-y divide-white/[0.06] max-h-48 overflow-y-auto pr-1 text-xs">
+              {creditHolders.map((holder) => (
+                <div
+                  key={holder.id}
+                  className="py-2 flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0">
+                    <div className="font-medium text-white truncate">{holder.email}</div>
+                    <div className="text-slate-500">{holder.ordersCount} órdenes</div>
+                  </div>
+                  <div className="font-bold text-emerald-400 shrink-0">
+                    {formatCents(holder.creditBalanceCents)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Receiver Ledgers: Binance (ZenoBank USDT) vs Bancamiga (Pago Movil Bs) */}
+      <ReceiverLedgersSection
+        allOrders={orders}
+        filteredOrders={filteredOrders}
+        zenoConfigured={zenoConfigured}
+        initialZenoReceiver={initialZenoReceiver}
+        zenoProofs={zenoProofs}
+        activePagoMovilAccount={activePagoMovilAccount}
+        matchedPagoMovilByOrder={matchedPagoMovilByOrder}
+      />
 
       {/* Clean Compact Provider Balances Strip */}
       <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-4">
@@ -589,11 +819,13 @@ export function OverviewConsole({
                               key={src}
                               className="inline-block mr-1 px-2 py-0.5 rounded-md bg-white/[0.06] text-slate-200 font-medium"
                             >
-                              {src === "centralone"
-                                ? "Central One"
-                                : src === "reloadly"
-                                  ? "Reloadly"
-                                  : "Stock CSV"}
+                              {src === "fazercards"
+                                ? "FazerCards"
+                                : src === "centralone"
+                                  ? "Central One"
+                                  : src === "reloadly"
+                                    ? "Reloadly"
+                                    : "Stock CSV"}
                             </span>
                           ))
                         )}
@@ -603,11 +835,18 @@ export function OverviewConsole({
                         <div className="font-semibold text-white">
                           {formatCents(snap.revenueCents)}
                         </div>
-                        {snap.totalBsCents !== null && snap.bsRateCents !== null && (
-                          <div className="text-slate-500 mt-0.5">
-                            {formatBsCents(snap.totalBsCents)}
-                          </div>
-                        )}
+                        <div className="text-[11px] text-slate-400 mt-0.5">
+                          {order.creditAppliedCents > 0 && order.amountDueCents === 0
+                            ? "Créditos"
+                            : order.paymentGateway === "pagomovil"
+                              ? snap.totalBsCents !== null
+                                ? `Pago Móvil · ${formatBsCents(snap.totalBsCents)}`
+                                : "Pago Móvil"
+                              : "ZenoBank"}
+                          {order.creditAppliedCents > 0 && order.amountDueCents > 0
+                            ? ` + ${formatCents(order.creditAppliedCents)} créd.`
+                            : ""}
+                        </div>
                       </td>
 
                       <td className="px-5 py-3.5 text-right font-semibold">

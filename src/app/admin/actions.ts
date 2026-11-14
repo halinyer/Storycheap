@@ -36,6 +36,7 @@ import {
   releaseExpiredReservations,
   saveMonthlyCapitalSnapshot,
   saveVariantPricingMeta,
+  saveZenoBinanceReceiver,
   setBsRateCents,
   toggleProductActiveAdmin,
   toggleVariantActiveAdmin,
@@ -965,4 +966,51 @@ export async function fetchLiveVenezuelaRatesAction(): Promise<{
         : "No se pudo consultar tasa en vivo."
     );
   }
+}
+
+export async function saveZenoBinanceReceiverAction(input: {
+  label: string;
+  binanceAccount: string;
+  network: string;
+  storeReference?: string;
+  notes?: string;
+}) {
+  const adminUser = await requireAdminUser();
+  const label = input.label.trim();
+  const binanceAccount = input.binanceAccount.trim();
+  if (label.length < 2) {
+    throw new Error("Ingresa un nombre para identificar la receptora Binance.");
+  }
+  if (binanceAccount.length < 3) {
+    throw new Error("Ingresa el correo, Binance Pay ID, UID o wallet de Binance receptora.");
+  }
+
+  const saved = await saveZenoBinanceReceiver(
+    {
+      label,
+      binanceAccount,
+      network: input.network.trim() || "USDT",
+      storeReference: (input.storeReference ?? "").trim(),
+      notes: (input.notes ?? "").trim(),
+    },
+    adminUser.id
+  );
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "zeno_receiver.save",
+    targetType: "store_settings",
+    targetId: "zenobank_binance_receiver",
+    metadata: {
+      label: saved.label,
+      binanceAccount: saved.binanceAccount,
+      network: saved.network,
+    },
+  });
+
+  revalidatePath("/admin");
+  revalidatePath("/admin/providers");
+  revalidatePath("/admin/orders");
+  return saved;
 }

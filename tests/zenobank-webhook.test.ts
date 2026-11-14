@@ -1,7 +1,14 @@
 import crypto from "crypto";
 import { describe, expect, it } from "vitest";
 import { Webhook } from "svix";
-import { verifyZenoBankWebhookWithSecret } from "@/lib/server/payments/zenobank";
+import {
+  extractZenoTransactionsFromPayload,
+  verifyZenoBankWebhookWithSecret,
+} from "@/lib/server/payments/zenobank";
+import {
+  getZenoBinanceReceiver,
+  saveZenoBinanceReceiver,
+} from "@/lib/server/repository";
 
 const TEST_SECRET = `whsec_${crypto.randomBytes(24).toString("base64")}`;
 
@@ -78,5 +85,73 @@ describe("ZenoBank Svix Webhook Cryptographic Verification", () => {
         headers: {},
       })
     ).toThrow(/missing/i);
+  });
+
+  it("extracts receiver/TX details from ZenoBank webhook and poll payloads", () => {
+    const webhookTxPayload = {
+      type: "checkout.completed",
+      data: {
+        id: "chk_abc",
+        transactions: [
+          {
+            uid: "tx_1",
+            transactionId: "0xabc123",
+            networkId: "BSC_MAINNET",
+            tokenId: "USDT_BSC",
+            tokenAmount: "25.00",
+            from: "0xfrom",
+            fromLabel: "Buyer Wallet",
+            to: "0xbinance_dest",
+            toLabel: "Binance Principal",
+            createdAt: "2026-11-14T20:00:00Z",
+          },
+        ],
+      },
+    };
+    const fromWebhook = extractZenoTransactionsFromPayload(webhookTxPayload);
+    expect(fromWebhook).toHaveLength(1);
+    expect(fromWebhook[0]?.toLabel).toBe("Binance Principal");
+    expect(fromWebhook[0]?.to).toBe("0xbinance_dest");
+    expect(fromWebhook[0]?.transactionId).toBe("0xabc123");
+
+    const pollTxPayload = {
+      source: "order_poll_reconcile",
+      liveSession: {
+        id: "chk_abc",
+        transactions: [
+          {
+            uid: "tx_2",
+            transactionId: "bp_987654",
+            networkId: "BINANCE_PAY",
+            tokenId: "USDT",
+            tokenAmount: "10.00",
+            from: null,
+            fromLabel: "Binance User",
+            to: "UID-555111",
+            toLabel: "Mi Binance Store",
+            createdAt: "2026-11-14T20:05:00Z",
+          },
+        ],
+      },
+    };
+    const fromPoll = extractZenoTransactionsFromPayload(pollTxPayload);
+    expect(fromPoll).toHaveLength(1);
+    expect(fromPoll[0]?.to).toBe("UID-555111");
+    expect(fromPoll[0]?.networkId).toBe("BINANCE_PAY");
+  });
+
+  it("stores and reads ZenoBank -> Binance receiver configuration", async () => {
+    process.env.DEMO_SANDBOX = "true";
+    const saved = await saveZenoBinanceReceiver({
+      label: "Binance Principal",
+      binanceAccount: "pagos@storycheap.com",
+      network: "USDT TRC20",
+      storeReference: "store_main",
+      notes: "Cuenta vinculada a ZenoBank",
+    });
+    expect(saved.binanceAccount).toBe("pagos@storycheap.com");
+    const loaded = await getZenoBinanceReceiver();
+    expect(loaded?.label).toBe("Binance Principal");
+    expect(loaded?.binanceAccount).toBe("pagos@storycheap.com");
   });
 });
