@@ -21,8 +21,10 @@ export function GiftCardGrid({ initialProducts }: GiftCardGridProps) {
     setSelectedRegion,
   } = useStore();
 
-  const [products, setProducts] = useState<ProductDTO[]>(initialProducts);
+  const [fetchedProducts, setFetchedProducts] = useState<ProductDTO[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+
+  const products = fetchedProducts ?? initialProducts;
 
   // Sync live stock availability cleanly on client mount
   useEffect(() => {
@@ -31,7 +33,7 @@ export function GiftCardGrid({ initialProducts }: GiftCardGridProps) {
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { products?: ProductDTO[] } | null) => {
         if (active && data?.products) {
-          setProducts(data.products);
+          setFetchedProducts(data.products);
         }
       })
       .catch(() => {})
@@ -44,6 +46,9 @@ export function GiftCardGrid({ initialProducts }: GiftCardGridProps) {
   }, []);
 
   const filteredProducts = products.filter((prod) => {
+    if (!prod.active || !prod.variants.some((v) => v.active)) {
+      return false;
+    }
     if (selectedCategory !== "ALL" && prod.category !== selectedCategory) {
       return false;
     }

@@ -67,13 +67,15 @@ export function generateOrderNumber(): string {
 export async function listCatalog(includeInactive = false): Promise<ProductDTO[]> {
   if (isStorePreviewMode()) {
     // Read-only preview: browsable catalog, nothing purchasable until the DB is connected.
-    return CATALOG_SEED.filter((p) => includeInactive || p.active).map((p) => ({
-      ...p,
-      redemptionSteps: [...p.redemptionSteps],
-      variants: p.variants
-        .filter((v) => includeInactive || v.active)
-        .map((v) => ({ ...v, availableStock: 0, inStock: false })),
-    }));
+    return CATALOG_SEED.filter((p) => includeInactive || p.active)
+      .map((p) => ({
+        ...p,
+        redemptionSteps: [...p.redemptionSteps],
+        variants: p.variants
+          .filter((v) => includeInactive || v.active)
+          .map((v) => ({ ...v, availableStock: 0, inStock: false })),
+      }))
+      .filter((p) => includeInactive || p.variants.length > 0);
   }
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") {
@@ -226,24 +228,26 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
     variantsByProduct.set(v.product_id, arr);
   }
 
-  return (products ?? []).map((p) => ({
-    id: p.id,
-    slug: p.slug,
-    name: p.name,
-    brand: p.brand,
-    category: p.category,
-    region: p.region,
-    regionWarning: p.region_warning ?? null,
-    description: p.description,
-    redemptionSteps: Array.isArray(p.redemption_steps) ? p.redemption_steps : [],
-    terms: p.terms ?? "",
-    imageUrl: p.image_url,
-    accentColor: p.accent_color,
-    gradient: p.gradient,
-    active: Boolean(p.active),
-    isPopular: Boolean(p.is_popular),
-    variants: variantsByProduct.get(p.id) ?? [],
-  }));
+  return (products ?? [])
+    .map((p) => ({
+      id: p.id,
+      slug: p.slug,
+      name: p.name,
+      brand: p.brand,
+      category: p.category,
+      region: p.region,
+      regionWarning: p.region_warning ?? null,
+      description: p.description,
+      redemptionSteps: Array.isArray(p.redemption_steps) ? p.redemption_steps : [],
+      terms: p.terms ?? "",
+      imageUrl: p.image_url,
+      accentColor: p.accent_color,
+      gradient: p.gradient,
+      active: Boolean(p.active),
+      isPopular: Boolean(p.is_popular),
+      variants: variantsByProduct.get(p.id) ?? [],
+    }))
+    .filter((p) => includeInactive || p.variants.length > 0);
 }
 
 export async function getProductBySlug(slug: string): Promise<ProductDTO | null> {
@@ -367,6 +371,134 @@ export async function toggleProductActiveAdmin(
     .update({ active })
     .eq("id", productId);
   if (error) throw error;
+}
+
+export async function toggleVariantActiveAdmin(
+  variantId: string,
+  active: boolean
+): Promise<void> {
+  await updateVariantAdmin(variantId, { active });
+}
+
+/** Deletes a variant cleanly, or deactivates it if referenced by historical orders. */
+export async function deleteVariantAdmin(
+  variantId: string,
+  updatedBy?: string | null
+): Promise<{ deleted: boolean; archived: boolean }> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const state = getSandboxState();
+    const hasOrders = state.orders.some((o) =>
+      o.items.some((item) => item.variantId === variantId)
+    );
+    for (const prod of state.products) {
+      const idx = prod.variants.findIndex((v) => v.id === variantId);
+      if (idx === -1) continue;
+      if (hasOrders) {
+        prod.variants[idx].active = false;
+        return { deleted: false, archived: true };
+      }
+      prod.variants.splice(idx, 1);
+      state.inventory = state.inventory.filter(
+        (inv) => !(inv.variantId === variantId && inv.status === "AVAILABLE")
+      );
+      await removeVariantPricingMeta([variantId], updatedBy);
+      return { deleted: true, archived: false };
+    }
+    throw new Error(`Variant not found: ${variantId}`);
+  }
+
+  const { count, error: countErr } = await ctx.admin
+    .from("order_items")
+    .select("id", { count: "exact", head: true })
+    .eq("variant_id", variantId);
+  if (countErr) throw countErr;
+
+  if ((count ?? 0) > 0) {
+    const { error: archErr } = await ctx.admin
+      .from("product_variants")
+      .update({ active: false })
+      .eq("id", variantId);
+    if (archErr) throw archErr;
+    return { deleted: false, archived: true };
+  }
+
+  const { error: delErr } = await ctx.admin
+    .from("product_variants")
+    .delete()
+    .eq("id", variantId);
+  if (delErr) throw delErr;
+
+  await removeVariantPricingMeta([variantId], updatedBy);
+  return { deleted: true, archived: false };
+}
+
+/** Deletes a product and all its variants, or deactivates them if any variant has historical orders. */
+export async function deleteProductAdmin(
+  productId: string,
+  updatedBy?: string | null
+): Promise<{ deleted: boolean; archived: boolean }> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const state = getSandboxState();
+    const idx = state.products.findIndex((p) => p.id === productId);
+    if (idx === -1) throw new Error(`Product not found: ${productId}`);
+    const prod = state.products[idx];
+    const variantIds = prod.variants.map((v) => v.id);
+    const hasOrders = state.orders.some((o) =>
+      o.items.some((item) => variantIds.includes(item.variantId))
+    );
+    if (hasOrders) {
+      prod.active = false;
+      for (const v of prod.variants) {
+        v.active = false;
+      }
+      return { deleted: false, archived: true };
+    }
+    state.products.splice(idx, 1);
+    const varSet = new Set(variantIds);
+    state.inventory = state.inventory.filter((inv) => !varSet.has(inv.variantId));
+    await removeVariantPricingMeta(variantIds, updatedBy);
+    return { deleted: true, archived: false };
+  }
+
+  const { data: varRows, error: varErr } = await ctx.admin
+    .from("product_variants")
+    .select("id")
+    .eq("product_id", productId);
+  if (varErr) throw varErr;
+
+  const variantIds = (varRows ?? []).map((r) => String(r.id));
+  if (variantIds.length > 0) {
+    const { count, error: countErr } = await ctx.admin
+      .from("order_items")
+      .select("id", { count: "exact", head: true })
+      .in("variant_id", variantIds);
+    if (countErr) throw countErr;
+
+    if ((count ?? 0) > 0) {
+      await ctx.admin
+        .from("products")
+        .update({ active: false })
+        .eq("id", productId);
+      await ctx.admin
+        .from("product_variants")
+        .update({ active: false })
+        .eq("product_id", productId);
+      return { deleted: false, archived: true };
+    }
+  }
+
+  const { error: delErr } = await ctx.admin
+    .from("products")
+    .delete()
+    .eq("id", productId);
+  if (delErr) throw delErr;
+
+  if (variantIds.length > 0) {
+    await removeVariantPricingMeta(variantIds, updatedBy);
+  }
+  return { deleted: true, archived: false };
 }
 
 export async function createVariantAdmin(input: {
@@ -1346,6 +1478,39 @@ export async function saveVariantPricingMeta(
     Object.assign(sandboxVariantPricingMeta, next);
     return;
   }
+
+  const { error } = await ctx.admin.from("store_settings").upsert({
+    key: "variant_pricing_meta",
+    value: { variants: next },
+    updated_by: updatedBy ?? null,
+  });
+  if (error) throw error;
+}
+
+/** Removes pricing metadata entries for deleted variants from store_settings. */
+export async function removeVariantPricingMeta(
+  variantIds: string[],
+  updatedBy?: string | null
+): Promise<void> {
+  if (variantIds.length === 0) return;
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    for (const id of variantIds) {
+      delete sandboxVariantPricingMeta[id];
+    }
+    return;
+  }
+
+  const existing = await getVariantPricingMetaMap();
+  let changed = false;
+  const next = { ...existing };
+  for (const id of variantIds) {
+    if (id in next) {
+      delete next[id];
+      changed = true;
+    }
+  }
+  if (!changed) return;
 
   const { error } = await ctx.admin.from("store_settings").upsert({
     key: "variant_pricing_meta",

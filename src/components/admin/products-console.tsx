@@ -5,9 +5,12 @@ import { useRouter } from "next/navigation";
 import {
   createProductAction,
   createVariantAction,
+  deleteProductAdminAction,
+  deleteVariantAdminAction,
   fetchCentralOneCatalogAdminAction,
   fetchFazerCardsCatalogAdminAction,
   toggleProductActiveAction,
+  toggleVariantActiveAction,
   updateProductMetaAction,
   updateVariantAdminAction,
 } from "@/app/admin/actions";
@@ -34,6 +37,7 @@ import {
   RefreshCw,
   Search,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -118,9 +122,20 @@ function VariantRow({
   const [c1Region, setC1Region] = useState(
     pricingMeta?.centraloneRegion ?? liveC1Item?.region ?? ""
   );
-  const [active, setActive] = useState(variant.active);
+  const [optimisticActive, setOptimisticActive] = useState<{
+    expected: boolean;
+    prevServer: boolean;
+  } | null>(null);
+  const [togglingActive, setTogglingActive] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [confirmMismatch, setConfirmMismatch] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  const active =
+    optimisticActive && optimisticActive.prevServer === variant.active
+      ? optimisticActive.expected
+      : variant.active;
 
   const effectiveC1Name = c1Name || liveC1Item?.name || "";
   const effectiveC1Sku = c1Sku || liveC1Item?.sku || "";
@@ -168,26 +183,14 @@ function VariantRow({
     sourcePriority === "reloadly_only" ||
     sourcePriority === "manual_then_reloadly";
 
-  const alignment = useMemo(
-    () =>
-      evaluateSkuAlignment({
-        denominationLabel: label,
-        productName,
-        supplierName: usesCentralOne ? effectiveC1Name : null,
-        supplierSku: usesCentralOne ? effectiveC1Sku : null,
-        costUsd: Number.isFinite(parsedCostFloat ?? NaN) ? parsedCostFloat : null,
-        saleUsd: Number.isFinite(parsedPriceFloat) ? parsedPriceFloat : null,
-      }),
-    [
-      label,
-      productName,
-      usesCentralOne,
-      effectiveC1Name,
-      effectiveC1Sku,
-      parsedCostFloat,
-      parsedPriceFloat,
-    ]
-  );
+  const alignment = evaluateSkuAlignment({
+    denominationLabel: label,
+    productName,
+    supplierName: usesCentralOne ? effectiveC1Name : null,
+    supplierSku: usesCentralOne ? effectiveC1Sku : null,
+    costUsd: Number.isFinite(parsedCostFloat ?? NaN) ? parsedCostFloat : null,
+    saleUsd: Number.isFinite(parsedPriceFloat) ? parsedPriceFloat : null,
+  });
 
   const isDirty =
     label.trim() !== variant.denominationLabel ||
@@ -196,7 +199,6 @@ function VariantRow({
     sourcePriority !== variant.sourcePriority ||
     centraloneId !== (variant.centraloneProductId ?? "") ||
     effectiveC1Name !== (pricingMeta?.centraloneProductName ?? "") ||
-    active !== variant.active ||
     reloadlyId !== (variant.reloadlyProductId ? String(variant.reloadlyProductId) : "");
 
   const handleSave = async () => {
@@ -265,19 +267,67 @@ function VariantRow({
     }
   };
 
+  const handleToggleActive = async (nextActive: boolean) => {
+    setOptimisticActive({ expected: nextActive, prevServer: variant.active });
+    setTogglingActive(true);
+    try {
+      await toggleVariantActiveAction({
+        variantId: variant.id,
+        active: nextActive,
+      });
+      toast.success(
+        nextActive
+          ? `${label.trim() || productName}: visible en tienda`
+          : `${label.trim() || productName}: oculta de la tienda`
+      );
+      onSaved();
+    } catch (err) {
+      setOptimisticActive(null);
+      toast.error(err instanceof Error ? err.message : "Error al cambiar estado");
+    } finally {
+      setTogglingActive(false);
+    }
+  };
+
+  const handleDeleteVariant = async () => {
+    setDeleting(true);
+    try {
+      const res = await deleteVariantAdminAction({ variantId: variant.id });
+      if (res.archived) {
+        setOptimisticActive({ expected: false, prevServer: variant.active });
+        toast.warning(
+          `${label.trim() || productName}: tiene órdenes históricas y se ocultó de la tienda.`
+        );
+      } else {
+        toast.success(`Denominación eliminada: ${label.trim() || productName}`);
+      }
+      setConfirmDelete(false);
+      onSaved();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudo eliminar");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const suggestedSearch = productName.split(/[(:·]/)[0]?.trim() || "";
 
   return (
-    <div className={`px-5 py-4 space-y-3 text-xs transition-opacity ${!active ? "opacity-55" : ""}`}>
-      {/* Tier 1: Active + Editable Storefront Label + Source Selector + Save */}
+    <div className={`px-5 py-4 space-y-3 text-xs transition-opacity ${!active ? "opacity-60" : ""}`}>
+      {/* Tier 1: Active + Editable Storefront Label + Source Selector + Save + Delete */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 min-w-0 flex-1 basis-[260px]">
           <input
             type="checkbox"
+            disabled={togglingActive || deleting}
             checked={active}
-            onChange={(e) => setActive(e.target.checked)}
-            className="h-4 w-4 accent-emerald-500 cursor-pointer shrink-0"
-            title="Activar/desactivar denominación"
+            onChange={(e) => void handleToggleActive(e.target.checked)}
+            className="h-4 w-4 accent-emerald-500 cursor-pointer shrink-0 disabled:opacity-50"
+            title={
+              active
+                ? "Ocultar denominación de la tienda"
+                : "Mostrar denominación en la tienda"
+            }
           />
           <div className="min-w-0 flex-1 max-w-xs">
             <input
@@ -292,6 +342,11 @@ function VariantRow({
               className="w-full rounded-lg bg-slate-950/90 border border-white/10 focus:border-sky-400 focus:outline-none px-2.5 py-1.5 text-sm font-bold text-white"
             />
           </div>
+          {!active && (
+            <span className="shrink-0 px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-300 text-[10px] font-semibold whitespace-nowrap">
+              Oculta en tienda
+            </span>
+          )}
           <span className="shrink-0 px-2 py-1 rounded-md bg-white/[0.05] text-[11px] text-slate-400 whitespace-nowrap">
             CSV: {variant.availableStock}
           </span>
@@ -361,6 +416,38 @@ function VariantRow({
           >
             {saving ? "…" : isDirty ? "Guardar" : "Al día"}
           </button>
+
+          {confirmDelete ? (
+            <div className="inline-flex items-center gap-1 rounded-xl bg-rose-500/15 border border-rose-500/40 px-2 py-1 shrink-0">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => void handleDeleteVariant()}
+                className="px-2 py-1 rounded-lg bg-rose-500 hover:bg-rose-400 text-white font-semibold"
+              >
+                {deleting ? "…" : "Eliminar"}
+              </button>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => setConfirmDelete(false)}
+                className="p-1 text-slate-300 hover:text-white"
+                title="Cancelar"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              disabled={saving || deleting || togglingActive}
+              onClick={() => setConfirmDelete(true)}
+              title="Eliminar denominación"
+              className="p-2 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-rose-500/20 hover:border-rose-500/40 text-slate-400 hover:text-rose-300 transition-colors shrink-0"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -578,6 +665,8 @@ export function ProductsConsole({
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [togglingProductId, setTogglingProductId] = useState<string | null>(null);
+  const [confirmDeleteProduct, setConfirmDeleteProduct] = useState<ProductDTO | null>(null);
+  const [deletingProductId, setDeletingProductId] = useState<string | null>(null);
 
   // Supplier catalog modal state (Central One + FazerCards API v2)
   const [c1ModalOpen, setC1ModalOpen] = useState(false);
@@ -806,6 +895,26 @@ export function ProductsConsole({
       toast.error(err instanceof Error ? err.message : "Error al actualizar estado");
     } finally {
       setTogglingProductId(null);
+    }
+  };
+
+  const handleDeleteProduct = async (product: ProductDTO) => {
+    setDeletingProductId(product.id);
+    try {
+      const res = await deleteProductAdminAction({ productId: product.id });
+      if (res.archived) {
+        toast.warning(
+          `${product.name}: tiene órdenes históricas y se ocultó de la tienda.`
+        );
+      } else {
+        toast.success(`Gift Card eliminada: ${product.name}`);
+      }
+      setConfirmDeleteProduct(null);
+      router.refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudo eliminar la Gift Card");
+    } finally {
+      setDeletingProductId(null);
     }
   };
 
@@ -1070,6 +1179,17 @@ export function ProductsConsole({
                 >
                   <Power className="w-3.5 h-3.5" />
                   <span>{product.active ? "Activa" : "Desactivada"}</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={deletingProductId === product.id}
+                  onClick={() => setConfirmDeleteProduct(product)}
+                  title="Eliminar Gift Card completa"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/25 border border-rose-500/20 text-rose-300 text-xs font-medium transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Eliminar</span>
                 </button>
               </div>
             </div>
@@ -1640,6 +1760,60 @@ export function ProductsConsole({
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Confirmar eliminación de Gift Card */}
+      {confirmDeleteProduct && (
+        <div className="fixed inset-0 z-[70] bg-black/75 flex items-center justify-center p-4">
+          <div className="rounded-2xl bg-slate-900 border border-rose-500/30 max-w-md w-full p-6 space-y-4 text-xs shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5 text-rose-300">
+                <Trash2 className="w-5 h-5 shrink-0" />
+                <h3 className="text-base font-bold text-white">
+                  Eliminar {confirmDeleteProduct.name}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteProduct(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-slate-300 leading-relaxed">
+              Esta acción eliminará la Gift Card y sus{" "}
+              <strong className="text-white">
+                {confirmDeleteProduct.variants.length} denominaciones
+              </strong>{" "}
+              (junto con su stock CSV no vendido). Si algún cliente ya compró
+              alguna denominación anteriormente, la Gift Card se desactivará para
+              ocultarla de la tienda sin perder el historial de órdenes.
+            </p>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={deletingProductId === confirmDeleteProduct.id}
+                onClick={() => setConfirmDeleteProduct(null)}
+                className="px-4 py-2 rounded-xl border border-white/10 text-slate-300 font-medium"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deletingProductId === confirmDeleteProduct.id}
+                onClick={() => void handleDeleteProduct(confirmDeleteProduct)}
+                className="px-4 py-2 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-semibold"
+              >
+                {deletingProductId === confirmDeleteProduct.id
+                  ? "Eliminando…"
+                  : "Sí, eliminar"}
+              </button>
+            </div>
           </div>
         </div>
       )}

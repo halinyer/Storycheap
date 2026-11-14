@@ -12,6 +12,8 @@ import {
   appendCreditLedgerEntry,
   createProductWithVariantAdmin,
   createVariantAdmin,
+  deleteProductAdmin,
+  deleteVariantAdmin,
   insertInventoryBatch,
   listCatalog,
   markOrderAttentionFlag,
@@ -21,6 +23,7 @@ import {
   saveVariantPricingMeta,
   setBsRateCents,
   toggleProductActiveAdmin,
+  toggleVariantActiveAdmin,
   updateProductAdmin,
   updateProviderConfig,
   updateVariantAdmin,
@@ -249,7 +252,8 @@ export async function updateVariantAdminAction(input: {
     metadata: input,
   });
 
-  revalidatePath("/");
+  revalidatePath("/", "layout");
+  revalidatePath("/card/[slug]", "page");
   revalidatePath("/admin/products");
   revalidatePath("/admin");
 }
@@ -381,9 +385,90 @@ export async function toggleProductActiveAction(input: {
     metadata: { active: input.active },
   });
 
-  revalidatePath("/");
+  revalidatePath("/", "layout");
+  revalidatePath("/card/[slug]", "page");
   revalidatePath("/admin/products");
   revalidatePath("/admin");
+}
+
+const toggleVariantActiveSchema = z.object({
+  variantId: z.string().uuid(),
+  active: z.boolean(),
+});
+
+export async function toggleVariantActiveAction(input: {
+  variantId: string;
+  active: boolean;
+}) {
+  const adminUser = await requireAdminUser();
+  const parsed = toggleVariantActiveSchema.parse(input);
+  await toggleVariantActiveAdmin(parsed.variantId, parsed.active);
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "catalog.toggle_variant_active",
+    targetType: "product_variant",
+    targetId: parsed.variantId,
+    metadata: { active: parsed.active },
+  });
+
+  revalidatePath("/", "layout");
+  revalidatePath("/card/[slug]", "page");
+  revalidatePath("/admin/products");
+  revalidatePath("/admin");
+}
+
+const deleteVariantSchema = z.object({
+  variantId: z.string().uuid(),
+});
+
+export async function deleteVariantAdminAction(input: { variantId: string }) {
+  const adminUser = await requireAdminUser();
+  const parsed = deleteVariantSchema.parse(input);
+  const res = await deleteVariantAdmin(parsed.variantId, adminUser.id);
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: res.archived ? "catalog.archive_variant" : "catalog.delete_variant",
+    targetType: "product_variant",
+    targetId: parsed.variantId,
+    metadata: res,
+  });
+
+  revalidatePath("/", "layout");
+  revalidatePath("/card/[slug]", "page");
+  revalidatePath("/admin/products");
+  revalidatePath("/admin/inventory");
+  revalidatePath("/admin");
+  return res;
+}
+
+const deleteProductSchema = z.object({
+  productId: z.string().uuid(),
+});
+
+export async function deleteProductAdminAction(input: { productId: string }) {
+  const adminUser = await requireAdminUser();
+  const parsed = deleteProductSchema.parse(input);
+  const res = await deleteProductAdmin(parsed.productId, adminUser.id);
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: res.archived ? "catalog.archive_product" : "catalog.delete_product",
+    targetType: "product",
+    targetId: parsed.productId,
+    metadata: res,
+  });
+
+  revalidatePath("/", "layout");
+  revalidatePath("/card/[slug]", "page");
+  revalidatePath("/admin/products");
+  revalidatePath("/admin/inventory");
+  revalidatePath("/admin");
+  return res;
 }
 
 const updateProductMetaSchema = z.object({
@@ -414,7 +499,8 @@ export async function updateProductMetaAction(
     metadata: parsed,
   });
 
-  revalidatePath("/");
+  revalidatePath("/", "layout");
+  revalidatePath("/card/[slug]", "page");
   revalidatePath("/admin/products");
   revalidatePath("/admin");
 }

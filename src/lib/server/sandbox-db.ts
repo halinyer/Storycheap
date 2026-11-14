@@ -252,7 +252,8 @@ export function buildSandboxCatalogSnapshot(includeInactive = false): ProductDTO
             inStock: manualCount > 0 || reloadlyAvailable,
           };
         }),
-    }));
+    }))
+    .filter((p) => includeInactive || p.variants.length > 0);
 }
 
 export function computeSandboxCustomerSummaries(): CustomerSummaryDTO[] {
