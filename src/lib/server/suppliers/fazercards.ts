@@ -262,6 +262,7 @@ export async function getFazerCardsCatalog(query?: string): Promise<CentralOneCa
   const q = (query || "").trim().toLowerCase();
   const priorityKeywords = [
     "netflix",
+    "disney",
     "playstation",
     "psn",
     "nintendo",

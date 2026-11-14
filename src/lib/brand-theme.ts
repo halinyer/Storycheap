@@ -160,11 +160,34 @@ export function resolveBrandTheme(
       redeemHost: "netflix.com/redeem",
       redeemLabel: "Canjear en Netflix.com",
       importantNote:
-        "Compatible con cuentas de Netflix facturadas en USD.",
+        "Compatible con cuentas de Netflix según la moneda indicada en la tarjeta (USD o COP).",
       steps: [
         "Entra a netflix.com/redeem desde cualquier navegador web.",
         "Pega el código PIN digital de arriba y haz clic en 'Canjear'.",
         "Inicia sesión en tu cuenta de Netflix para aplicar el saldo directamente a tu membresía.",
+      ],
+    };
+  }
+
+  if (haystack.includes("disney")) {
+    return {
+      brandName: "Disney / Disney+",
+      imageUrl: "/cards/disney.png",
+      accentHex: "#0063e5",
+      bannerGradient: "from-[#0063e5]/35 via-blue-950/25 to-[#0e1017]",
+      borderGlow: "border-sky-500/35 shadow-[0_20px_60px_-15px_rgba(0,99,229,0.3)]",
+      pillClass: "bg-sky-500/20 border-sky-400/35 text-sky-200",
+      redeemUrl: "https://www.disneyplus.com/redeem",
+      redeemHost: "disneyplus.com/redeem / disneygiftcard.com",
+      redeemLabel: "Canjear en Disney+",
+      secondaryRedeemUrl: "https://www.disneygiftcard.com",
+      secondaryRedeemLabel: "Consultar saldo en DisneyGiftCard.com",
+      importantNote:
+        "Válida en Estados Unidos (USD) para pagar suscripciones de Disney+, compras en DisneyStore.com y parques o experiencias oficiales de Disney.",
+      steps: [
+        "Copia el código PIN digital de tu tarjeta Disney desde arriba.",
+        "Para pagar Disney+, entra a disneyplus.com/redeem o úsala como método de pago (Disney Gift Card) en tu cuenta Disney+ USA.",
+        "Para compras en tienda o administrar tu saldo, ingresa el código en disneygiftcard.com o disneystore.com.",
       ],
     };
   }
