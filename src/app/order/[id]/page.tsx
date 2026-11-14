@@ -885,7 +885,7 @@ function OrderDetailInner() {
 
                           {/* Primary Action Buttons */}
                           {revealed && (
-                            <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 shrink-0">
+                            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                               <button
                                 type="button"
                                 onClick={() =>
@@ -915,12 +915,25 @@ function OrderDetailInner() {
                                   href={theme.redeemUrl}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-white/[0.07] hover:bg-white/[0.14] border border-white/15 text-white font-bold text-xs transition-all"
+                                  className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 font-black text-xs transition-all"
                                 >
                                   <span>{theme.redeemLabel}</span>
-                                  <ExternalLink className="w-3.5 h-3.5 text-slate-300" />
+                                  <ExternalLink className="w-3.5 h-3.5 text-emerald-300" />
                                 </a>
                               )}
+
+                              {theme.secondaryRedeemUrl &&
+                                theme.secondaryRedeemLabel && (
+                                  <a
+                                    href={theme.secondaryRedeemUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-white/[0.07] hover:bg-white/[0.14] border border-white/15 text-white font-bold text-xs transition-all"
+                                  >
+                                    <span>{theme.secondaryRedeemLabel}</span>
+                                    <ExternalLink className="w-3.5 h-3.5 text-slate-300" />
+                                  </a>
+                                )}
                             </div>
                           )}
                         </div>
@@ -928,31 +941,48 @@ function OrderDetailInner() {
                     </div>
 
                     {/* Built-in Step-by-Step Redemption Instructions */}
-                    <div className="rounded-2xl bg-white/[0.025] border border-white/[0.07] p-4 sm:p-5 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-black uppercase tracking-wider text-slate-300">
-                          ¿Cómo canjear en {theme.brandName}?
+                    <div className="rounded-2xl bg-white/[0.03] border border-white/[0.09] p-4 sm:p-5 space-y-3.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-black uppercase tracking-wider text-white">
+                          ¿Dónde y cómo canjear en {theme.brandName}?
                         </span>
-                        <span className="text-[11px] text-slate-400">
-                          Entrega inmediata • Región {fulfillment.region}
-                        </span>
+                        {theme.redeemUrl && (
+                          <a
+                            href={theme.redeemUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 text-xs font-bold text-sky-300 hover:text-sky-200 underline underline-offset-4"
+                          >
+                            <span>Web oficial: {theme.redeemHost ?? theme.redeemUrl}</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        )}
                       </div>
 
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         {theme.steps.map((stepText, stepIdx) => (
                           <div
                             key={stepIdx}
-                            className="rounded-xl bg-slate-950/60 border border-white/[0.06] p-3 space-y-1.5"
+                            className="rounded-xl bg-slate-950/75 border border-white/[0.07] p-3.5 space-y-1.5"
                           >
-                            <div className="w-5 h-5 rounded-full bg-white/10 text-white font-black text-[10px] flex items-center justify-center">
-                              {stepIdx + 1}
+                            <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/10 text-white font-black text-[10px] uppercase">
+                              Paso {stepIdx + 1}
                             </div>
-                            <p className="text-[11px] text-slate-300 leading-relaxed">
+                            <p className="text-xs text-slate-200 leading-relaxed">
                               {stepText}
                             </p>
                           </div>
                         ))}
                       </div>
+
+                      {theme.importantNote && (
+                        <div className="rounded-xl bg-amber-500/10 border border-amber-400/25 px-3.5 py-2.5 text-[11px] text-amber-100/95 leading-relaxed">
+                          <strong className="text-amber-300 font-bold">
+                            Nota importante:{" "}
+                          </strong>
+                          {theme.importantNote}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>

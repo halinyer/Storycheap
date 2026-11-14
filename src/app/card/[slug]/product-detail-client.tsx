@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { PayYourWay } from "@/components/storefront/pay-your-way";
 import { Card3DInteractive } from "@/components/ui/card-3d-interactive";
 import { useStore } from "@/context/store-context";
+import { resolveBrandTheme } from "@/lib/brand-theme";
 import { formatCents } from "@/lib/catalog-seed";
 import type { ProductDTO } from "@/types";
 import {
@@ -15,6 +16,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Clock,
+  ExternalLink,
   Globe,
   Lock,
   Mail,
@@ -51,6 +53,7 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
 
   const canBuy = Boolean(selectedVariant && selectedVariant.inStock);
   const accent = product.accentColor || "#0070d1";
+  const brandTheme = resolveBrandTheme(product.name, product.slug);
 
   const maxQuantity = selectedVariant
     ? typeof selectedVariant.deliverableStock === "number" &&
@@ -185,26 +188,85 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
             )}
           </div>
 
-          {/* Hairline Accordions */}
-          <div className="space-y-2.5 pt-1">
-            <details className="group rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-3.5">
-              <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium text-white">
-                <span>¿Cómo canjear tu código?</span>
-                <ChevronDown className="w-4 h-4 text-slate-400 group-open:rotate-180 transition-transform" />
-              </summary>
-              <ol className="mt-3 space-y-2 text-xs text-slate-300 list-decimal list-inside leading-relaxed">
-                {product.redemptionSteps.map((step, i) => (
-                  <li key={i}>{step}</li>
-                ))}
-              </ol>
-            </details>
+          {/* Always-Open Official Redemption Guide Card */}
+          <div className="rounded-2xl border border-white/[0.1] bg-[#11131c] p-5 sm:p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-sky-400 block">
+                  Guía paso a paso
+                </span>
+                <h2 className="text-base sm:text-lg font-black text-white mt-0.5">
+                  ¿Dónde y cómo canjear tu código de {brandTheme.brandName}?
+                </h2>
+              </div>
 
-            <details className="group rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-3.5">
-              <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium text-white">
-                <span>Términos y compatibilidad</span>
+              <div className="flex flex-wrap items-center gap-2">
+                {brandTheme.redeemUrl && (
+                  <a
+                    href={brandTheme.redeemUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] border border-white/15 text-xs font-bold text-white transition-colors"
+                  >
+                    <span>{brandTheme.redeemLabel}</span>
+                    <ExternalLink className="w-3.5 h-3.5 text-sky-400" />
+                  </a>
+                )}
+                {brandTheme.secondaryRedeemUrl &&
+                  brandTheme.secondaryRedeemLabel && (
+                    <a
+                      href={brandTheme.secondaryRedeemUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.1] border border-white/10 text-xs font-bold text-slate-300 transition-colors"
+                    >
+                      <span>{brandTheme.secondaryRedeemLabel}</span>
+                      <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
+                    </a>
+                  )}
+              </div>
+            </div>
+
+            {brandTheme.redeemHost && (
+              <div className="text-xs text-slate-400">
+                Sitio web oficial de canje:{" "}
+                <span className="font-mono font-bold text-sky-300">
+                  {brandTheme.redeemHost}
+                </span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {brandTheme.steps.map((step, i) => (
+                <div
+                  key={i}
+                  className="rounded-xl bg-slate-950/75 border border-white/[0.07] p-3.5 space-y-1.5"
+                >
+                  <div className="inline-flex items-center px-2 py-0.5 rounded-full bg-white/10 text-white font-black text-[10px] uppercase">
+                    Paso {i + 1}
+                  </div>
+                  <p className="text-xs text-slate-200 leading-relaxed">
+                    {step}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {brandTheme.importantNote && (
+              <div className="rounded-xl bg-amber-500/10 border border-amber-400/25 px-3.5 py-2.5 text-xs text-amber-100/95 leading-relaxed">
+                <strong className="text-amber-300 font-bold">
+                  Importante:{" "}
+                </strong>
+                {brandTheme.importantNote}
+              </div>
+            )}
+
+            <details className="group rounded-xl border border-white/[0.07] bg-white/[0.02] px-4 py-3">
+              <summary className="flex items-center justify-between cursor-pointer list-none text-xs font-bold text-slate-300">
+                <span>Términos y compatibilidad regional</span>
                 <ChevronDown className="w-4 h-4 text-slate-400 group-open:rotate-180 transition-transform" />
               </summary>
-              <p className="mt-3 text-xs text-slate-300 leading-relaxed">
+              <p className="mt-2.5 text-xs text-slate-400 leading-relaxed">
                 {product.terms || "Válido únicamente para la región indicada."}
               </p>
             </details>

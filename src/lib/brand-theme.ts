@@ -6,7 +6,11 @@ export interface BrandRedemptionTheme {
   borderGlow: string;
   pillClass: string;
   redeemUrl: string | null;
+  redeemHost: string | null;
   redeemLabel: string;
+  secondaryRedeemUrl?: string | null;
+  secondaryRedeemLabel?: string | null;
+  importantNote: string;
   steps: string[];
 }
 
@@ -25,11 +29,14 @@ export function resolveBrandTheme(
       borderGlow: "border-rose-500/35 shadow-[0_20px_60px_-15px_rgba(230,0,18,0.28)]",
       pillClass: "bg-rose-500/20 border-rose-400/35 text-rose-200",
       redeemUrl: "https://ec.nintendo.com/redeem",
+      redeemHost: "ec.nintendo.com/redeem",
       redeemLabel: "Canjear en Nintendo eShop",
+      importantNote:
+        "Tu cuenta Nintendo debe estar configurada en Estados Unidos (USA). Puedes canjearlo desde navegador web o directamente en tu consola Nintendo Switch.",
       steps: [
-        "Abre Nintendo eShop en tu consola Switch o entra a ec.nintendo.com/redeem.",
-        "Inicia sesión en tu cuenta Nintendo (verifica que coincida con la región del código).",
-        "Selecciona 'Canjear código', pega los 16 dígitos y confirma la recarga.",
+        "Entra a ec.nintendo.com/redeem desde tu navegador o abre Nintendo eShop en tu consola Switch.",
+        "Inicia sesión con tu cuenta Nintendo (región Estados Unidos).",
+        "Selecciona 'Canjear código', pega los 16 caracteres del PIN y confirma para acreditar tus fondos.",
       ],
     };
   }
@@ -43,11 +50,14 @@ export function resolveBrandTheme(
       borderGlow: "border-blue-500/35 shadow-[0_20px_60px_-15px_rgba(0,112,209,0.28)]",
       pillClass: "bg-blue-500/20 border-blue-400/35 text-blue-200",
       redeemUrl: "https://store.playstation.com",
+      redeemHost: "store.playstation.com",
       redeemLabel: "Canjear en PlayStation Store",
+      importantNote:
+        "Válido únicamente para cuentas PlayStation Network (PSN) registradas con país Estados Unidos (USA).",
       steps: [
-        "Inicia sesión en PlayStation Store desde tu consola PS4/PS5 o en store.playstation.com.",
-        "Haz clic en tu avatar arriba a la derecha y selecciona 'Canjear código'.",
-        "Pega el código de 12 caracteres y confirma para acreditar tu billetera PSN.",
+        "Entra a store.playstation.com o abre PlayStation Store desde tu consola PS4 o PS5.",
+        "Haz clic en tu avatar arriba a la derecha y elige la opción 'Canjear código' (Redeem Code).",
+        "Pega el código de 12 dígitos sin guiones y confirma para sumar el saldo a tu monedero PSN.",
       ],
     };
   }
@@ -60,12 +70,17 @@ export function resolveBrandTheme(
       bannerGradient: "from-amber-500/30 via-orange-600/15 to-[#0e1017]",
       borderGlow: "border-amber-500/35 shadow-[0_20px_60px_-15px_rgba(245,158,11,0.25)]",
       pillClass: "bg-amber-500/20 border-amber-400/35 text-amber-200",
-      redeemUrl: "https://pagostore.garena.com",
-      redeemLabel: "Canjear en PagoStore Oficial",
+      redeemUrl: "https://redeem.hype.games",
+      redeemHost: "redeem.hype.games / pagostore.garena.com",
+      redeemLabel: "Canjear PIN en Hype Redeem",
+      secondaryRedeemUrl: "https://pagostore.garena.com",
+      secondaryRedeemLabel: "Ir a PagoStore Garena",
+      importantNote:
+        "Si tu código tiene 36 caracteres con guiones (ej. CE4B2616-4D48-...), se canjea en redeem.hype.games ingresando tu código + tu ID de jugador de Free Fire. Si es un PIN numérico de Garena, se canjea en pagostore.garena.com. (No uses reward.ff.garena.com, esa página es solo para códigos de eventos de 12 letras).",
       steps: [
-        "Entra a pagostore.garena.com y selecciona el icono de Free Fire.",
-        "Inicia sesión con tu ID de jugador (solo numérico, sin requerir contraseña).",
-        "Elige el método 'Garena PPC / PIN', pega tu código de arriba y confirma tus diamantes.",
+        "Copia tu código PIN arriba y haz clic en 'Canjear PIN en Hype Redeem' (redeem.hype.games) o entra a pagostore.garena.com.",
+        "Pega el código PIN completo (incluyendo los guiones) y escribe tu ID numérico de jugador de Free Fire (lo encuentras en tu perfil dentro del juego).",
+        "Verifica que aparezca tu apodo de jugador correcto y confirma el canje: los diamantes + el 10% de bono llegan al instante a tu cuenta.",
       ],
     };
   }
@@ -79,11 +94,14 @@ export function resolveBrandTheme(
       borderGlow: "border-emerald-500/35 shadow-[0_20px_60px_-15px_rgba(16,124,16,0.28)]",
       pillClass: "bg-emerald-500/20 border-emerald-400/35 text-emerald-200",
       redeemUrl: "https://redeem.microsoft.com",
+      redeemHost: "redeem.microsoft.com",
       redeemLabel: "Canjear en Microsoft Store",
+      importantNote:
+        "Tu cuenta Microsoft / Xbox debe tener región Estados Unidos (USA) al momento de canjear el código de 25 caracteres.",
       steps: [
-        "Abre redeem.microsoft.com o entra a la tienda desde tu consola Xbox.",
-        "Inicia sesión con tu cuenta Microsoft configurada en la región indicada.",
-        "Pega el código de 25 caracteres y haz clic en Siguiente para activar tu saldo.",
+        "Haz clic en 'Canjear en Microsoft Store' (redeem.microsoft.com) o abre la tienda en tu consola Xbox.",
+        "Inicia sesión con tu cuenta Microsoft donde quieres recibir el saldo.",
+        "Pega el código de 25 caracteres, haz clic en Siguiente y confirma la recarga.",
       ],
     };
   }
@@ -97,11 +115,14 @@ export function resolveBrandTheme(
       borderGlow: "border-sky-500/35 shadow-[0_20px_60px_-15px_rgba(56,189,248,0.25)]",
       pillClass: "bg-sky-500/20 border-sky-400/35 text-sky-200",
       redeemUrl: "https://store.steampowered.com/account/redeemwalletcode",
+      redeemHost: "store.steampowered.com/account/redeemwalletcode",
       redeemLabel: "Canjear en Steam Wallet",
+      importantNote:
+        "Válido para cuentas de Steam cuya cartera esté configurada en dólares estadounidenses (USD).",
       steps: [
-        "Abre Steam o entra directo a store.steampowered.com/account/redeemwalletcode.",
-        "Inicia sesión en tu cuenta de Steam.",
-        "Pega el código en el campo 'Código de la Cartera de Steam' y presiona Continuar.",
+        "Entra directo a store.steampowered.com/account/redeemwalletcode o abre la app de Steam en tu PC.",
+        "Ve a 'Juegos' -> 'Canjear un código de la Cartera de Steam'.",
+        "Pega tu código en el recuadro y presiona Continuar para sumar el saldo a tu cartera.",
       ],
     };
   }
@@ -115,11 +136,14 @@ export function resolveBrandTheme(
       borderGlow: "border-purple-500/35 shadow-[0_20px_60px_-15px_rgba(168,85,247,0.25)]",
       pillClass: "bg-purple-500/20 border-purple-400/35 text-purple-200",
       redeemUrl: "https://www.roblox.com/redeem",
+      redeemHost: "roblox.com/redeem",
       redeemLabel: "Canjear en Roblox.com",
+      importantNote:
+        "Los códigos de Roblox no se canjean dentro de la app móvil; debes entrar siempre desde el navegador web a roblox.com/redeem.",
       steps: [
-        "Ingresa a roblox.com/redeem desde tu navegador web.",
-        "Inicia sesión en la cuenta de Roblox donde deseas acreditar tus Robux o saldo.",
-        "Pega el código PIN y presiona 'Canjear'.",
+        "Abre roblox.com/redeem desde el navegador de tu celular o PC.",
+        "Inicia sesión en la cuenta de Roblox donde quieres acreditar tus Robux.",
+        "Pega el código PIN en la casilla, pulsa 'Canjear' y luego convierte tu crédito a Robux.",
       ],
     };
   }
@@ -133,11 +157,14 @@ export function resolveBrandTheme(
       borderGlow: "border-red-500/35 shadow-[0_20px_60px_-15px_rgba(229,9,20,0.28)]",
       pillClass: "bg-red-500/20 border-red-400/35 text-red-200",
       redeemUrl: "https://www.netflix.com/redeem",
+      redeemHost: "netflix.com/redeem",
       redeemLabel: "Canjear en Netflix.com",
+      importantNote:
+        "Compatible con cuentas de Netflix facturadas en USD.",
       steps: [
-        "Visita netflix.com/redeem desde cualquier navegador.",
-        "Pega el código digital de arriba y haz clic en 'Canjear'.",
-        "Confirma la cuenta de Netflix donde deseas aplicar el saldo.",
+        "Entra a netflix.com/redeem desde cualquier navegador web.",
+        "Pega el código PIN digital de arriba y haz clic en 'Canjear'.",
+        "Inicia sesión en tu cuenta de Netflix para aplicar el saldo directamente a tu membresía.",
       ],
     };
   }
@@ -151,11 +178,14 @@ export function resolveBrandTheme(
       borderGlow: "border-emerald-500/35 shadow-[0_20px_60px_-15px_rgba(29,185,84,0.28)]",
       pillClass: "bg-emerald-500/20 border-emerald-400/35 text-emerald-200",
       redeemUrl: "https://www.spotify.com/redeem",
+      redeemHost: "spotify.com/redeem",
       redeemLabel: "Canjear en Spotify.com",
+      importantNote:
+        "Tu cuenta de Spotify debe estar configurada en región USA. Aplica para planes Spotify Premium Individual.",
       steps: [
         "Entra a spotify.com/redeem e inicia sesión en tu cuenta.",
-        "Pega el PIN digital exactamente como aparece arriba.",
-        "Presiona Continuar para activar tus meses de Spotify Premium.",
+        "Pega el código PIN recibido y completa la verificación.",
+        "Haz clic en 'Canjear' para activar tus meses de Spotify Premium.",
       ],
     };
   }
@@ -169,11 +199,14 @@ export function resolveBrandTheme(
       borderGlow: "border-indigo-400/35 shadow-[0_20px_60px_-15px_rgba(99,102,241,0.25)]",
       pillClass: "bg-indigo-500/20 border-indigo-400/35 text-indigo-200",
       redeemUrl: "https://apps.apple.com/redeem",
+      redeemHost: "apps.apple.com/redeem",
       redeemLabel: "Canjear en App Store",
+      importantNote:
+        "Requiere un Apple ID cuya región de App Store sea Estados Unidos (USA).",
       steps: [
-        "Abre la App Store en tu iPhone, iPad o Mac (o haz clic en el botón de canje).",
-        "Toca el icono de tu perfil arriba a la derecha y elige 'Canjear tarjeta o código'.",
-        "Selecciona 'Introducir el código manualmente' y pega tus 16 caracteres.",
+        "Abre la App Store en tu iPhone, iPad o Mac (o haz clic en 'Canjear en App Store').",
+        "Toca tu foto de perfil arriba a la derecha y elige 'Canjear tarjeta regalo o código'.",
+        "Pulsa 'Introducir el código manualmente' y pega el código de 16 caracteres.",
       ],
     };
   }
@@ -187,11 +220,14 @@ export function resolveBrandTheme(
       borderGlow: "border-lime-500/35 shadow-[0_20px_60px_-15px_rgba(68,214,44,0.28)]",
       pillClass: "bg-lime-500/20 border-lime-400/35 text-lime-200",
       redeemUrl: "https://gold.razer.com",
+      redeemHost: "gold.razer.com",
       redeemLabel: "Canjear en Razer Gold",
+      importantNote:
+        "Válido para billeteras Razer Gold configuradas en USD Global.",
       steps: [
         "Inicia sesión en gold.razer.com con tu cuenta Razer ID.",
-        "Haz clic en 'Recargar ahora' y elige Razer Gold PIN como método.",
-        "Pega el código PIN y confirma tu saldo USD.",
+        "Haz clic en 'Reload Now' (Recargar) y selecciona 'Razer Gold PIN'.",
+        "Pega tu código PIN y confirma la recarga en tu billetera.",
       ],
     };
   }
@@ -205,11 +241,14 @@ export function resolveBrandTheme(
       borderGlow: "border-yellow-500/35 shadow-[0_20px_60px_-15px_rgba(240,185,11,0.28)]",
       pillClass: "bg-yellow-500/20 border-yellow-400/35 text-yellow-200",
       redeemUrl: "https://www.binance.com/es/gift-card",
+      redeemHost: "binance.com/es/gift-card",
       redeemLabel: "Canjear en Binance",
+      importantNote:
+        "Se acredita de inmediato sin comisiones en la Billetera de Fondos de tu cuenta Binance.",
       steps: [
-        "Abre la app de Binance o entra a binance.com/es/gift-card.",
-        "Selecciona 'Canjear' -> 'Canjear a cripto'.",
-        "Pega el código de tu tarjeta de regalo para recibir el saldo al instante.",
+        "Abre la app de Binance (Perfil -> Tarjeta de Regalo) o entra a binance.com/es/gift-card.",
+        "Toca en 'Canjear' y elige 'Canjear a cripto'.",
+        "Pega el código de 16 caracteres para recibir los USDT al instante.",
       ],
     };
   }
@@ -222,7 +261,9 @@ export function resolveBrandTheme(
     borderGlow: "border-indigo-500/35 shadow-[0_20px_60px_-15px_rgba(99,102,241,0.25)]",
     pillClass: "bg-indigo-500/20 border-indigo-400/35 text-indigo-200",
     redeemUrl: null,
+    redeemHost: null,
     redeemLabel: "Canjear en plataforma oficial",
+    importantNote: "Verifica que la región de tu cuenta coincida con la región indicada en tu orden.",
     steps: [
       "Copia tu código digital usando el botón 'Copiar código'.",
       "Inicia sesión en la plataforma oficial correspondiente a tu tarjeta.",
