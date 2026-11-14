@@ -847,96 +847,96 @@ function OrderDetailInner() {
                         )}
                       </div>
 
-                      {/* Interactive Code Box (Ticket Style) */}
-                      <div className="rounded-2xl bg-[#090b10] border-2 border-dashed border-white/15 hover:border-white/30 p-4 sm:p-5 transition-all space-y-4">
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                          <div className="space-y-1 min-w-0">
-                            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500 block">
-                              Código PIN de canje
+                      {/* Interactive Code Box (Single-Line Bar + Separate Portal Buttons) */}
+                      <div className="rounded-2xl bg-[#090b10] border border-white/15 p-4 sm:p-5 space-y-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                            Código PIN de canje (haz clic para copiar)
+                          </span>
+                          {revealed?.pin && (
+                            <span className="text-[11px] font-mono text-sky-300">
+                              Serie: <strong className="select-all">{revealed.pin}</strong>
                             </span>
-                            {revealed ? (
-                              <div
-                                onClick={() =>
-                                  void copyCode(revealed.code, fulfillment.id)
-                                }
-                                title="Haz clic para copiar"
-                                className="font-mono text-lg sm:text-2xl font-black text-white tracking-wider break-all select-all cursor-pointer hover:text-emerald-300 transition-colors"
-                              >
-                                {displayCode}
-                              </div>
-                            ) : (
-                              <div className="flex items-center gap-2.5 py-1">
-                                <Loader2 className="w-4 h-4 text-sky-400 animate-spin" />
-                                <span className="font-mono text-base font-bold text-slate-400">
-                                  Descifrando tu código...
-                                </span>
-                              </div>
-                            )}
-
-                            {revealed?.pin && (
-                              <div className="pt-1 flex items-center gap-2 text-xs font-mono text-sky-300">
-                                <span>PIN / Serie adicional:</span>
-                                <span className="font-black select-all bg-sky-500/15 px-2 py-0.5 rounded-md border border-sky-400/30">
-                                  {revealed.pin}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Primary Action Buttons */}
-                          {revealed && (
-                            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void copyCode(revealed.code, fulfillment.id)
-                                }
-                                className={`inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-black text-xs transition-all shadow-lg cursor-pointer ${
-                                  isCopied
-                                    ? "bg-emerald-400 text-slate-950 scale-[1.02]"
-                                    : "bg-white hover:bg-slate-200 text-slate-950"
-                                }`}
-                              >
-                                {isCopied ? (
-                                  <>
-                                    <Check className="w-4 h-4 stroke-[3]" />
-                                    <span>¡Copiado!</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Copy className="w-4 h-4" />
-                                    <span>Copiar código</span>
-                                  </>
-                                )}
-                              </button>
-
-                              {theme.redeemUrl && (
-                                <a
-                                  href={theme.redeemUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 font-black text-xs transition-all"
-                                >
-                                  <span>{theme.redeemLabel}</span>
-                                  <ExternalLink className="w-3.5 h-3.5 text-emerald-300" />
-                                </a>
-                              )}
-
-                              {theme.secondaryRedeemUrl &&
-                                theme.secondaryRedeemLabel && (
-                                  <a
-                                    href={theme.secondaryRedeemUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-white/[0.07] hover:bg-white/[0.14] border border-white/15 text-white font-bold text-xs transition-all"
-                                  >
-                                    <span>{theme.secondaryRedeemLabel}</span>
-                                    <ExternalLink className="w-3.5 h-3.5 text-slate-300" />
-                                  </a>
-                                )}
-                            </div>
                           )}
                         </div>
+
+                        {/* Single-Line Full-Width Code Bar */}
+                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 rounded-xl bg-slate-950 border border-white/10 px-4 py-3">
+                          {revealed ? (
+                            <div
+                              onClick={() =>
+                                void copyCode(revealed.code, fulfillment.id)
+                              }
+                              title="Haz clic para copiar"
+                              className="font-mono text-sm sm:text-base md:text-lg font-black text-emerald-300 tracking-wide whitespace-nowrap overflow-x-auto select-all cursor-pointer py-0.5"
+                            >
+                              {displayCode}
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2.5 py-1">
+                              <Loader2 className="w-4 h-4 text-sky-400 animate-spin" />
+                              <span className="font-mono text-sm font-bold text-slate-400">
+                                Descifrando tu código...
+                              </span>
+                            </div>
+                          )}
+
+                          {revealed && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void copyCode(revealed.code, fulfillment.id)
+                              }
+                              className={`inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-black text-xs transition-all shrink-0 cursor-pointer ${
+                                isCopied
+                                  ? "bg-emerald-400 text-slate-950"
+                                  : "bg-white hover:bg-slate-200 text-slate-950"
+                              }`}
+                            >
+                              {isCopied ? (
+                                <>
+                                  <Check className="w-4 h-4 stroke-[3]" />
+                                  <span>¡Copiado!</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3.5 h-3.5" />
+                                  <span>Copiar código</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Separate Row for Official Redemption Links */}
+                        {revealed && (theme.redeemUrl || theme.secondaryRedeemUrl) && (
+                          <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                            {theme.redeemUrl && (
+                              <a
+                                href={theme.redeemUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/35 text-emerald-200 font-black text-xs transition-all"
+                              >
+                                <span>{theme.redeemLabel}</span>
+                                <ExternalLink className="w-3.5 h-3.5 text-emerald-300" />
+                              </a>
+                            )}
+
+                            {theme.secondaryRedeemUrl &&
+                              theme.secondaryRedeemLabel && (
+                                <a
+                                  href={theme.secondaryRedeemUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 text-slate-200 font-bold text-xs transition-all"
+                                >
+                                  <span>{theme.secondaryRedeemLabel}</span>
+                                  <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
+                                </a>
+                              )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
