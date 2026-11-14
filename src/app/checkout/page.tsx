@@ -11,6 +11,8 @@ import {
   CheckCircle2,
   Coins,
   CreditCard,
+  ExternalLink,
+  Loader2,
   Lock,
   Mail,
   ShieldCheck,
@@ -33,6 +35,11 @@ export default function CheckoutPage() {
   const [applyCredit, setApplyCredit] = useState(true);
   const [acceptedRegionPolicy, setAcceptedRegionPolicy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [redirecting, setRedirecting] = useState<{
+    mode: "zenobank" | "vault";
+    orderId: string;
+    checkoutUrl?: string;
+  } | null>(null);
 
   const usableCreditCents =
     sessionUser && applyCredit
@@ -87,28 +94,82 @@ export default function CheckoutPage() {
         );
       }
 
-      clearCart();
-      await refreshSession();
+      const targetMode =
+        data.paidInFullByCredit || !data.checkoutUrl ? "vault" : "zenobank";
+      setRedirecting({
+        mode: targetMode,
+        orderId: data.orderId,
+        checkoutUrl: data.checkoutUrl,
+      });
 
-      if (data.paidInFullByCredit || !data.checkoutUrl) {
+      clearCart();
+      void refreshSession();
+
+      if (targetMode === "vault" || !data.checkoutUrl) {
         router.push(`/order/${data.orderId}`);
         return;
       }
 
-      // If sandbox local URL, navigate via Next router; if external ZenoBank URL, redirect browser
+      // If sandbox local URL, navigate via Next router; if external ZenoBank URL, redirect browser immediately
       if (data.checkoutUrl.startsWith(window.location.origin)) {
         const rel = data.checkoutUrl.slice(window.location.origin.length);
         router.push(rel);
       } else {
-        window.location.href = data.checkoutUrl;
+        window.location.assign(data.checkoutUrl);
       }
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Error inesperado en el checkout"
       );
+      setRedirecting(null);
       setSubmitting(false);
     }
   };
+
+  if (redirecting) {
+    const isZeno = redirecting.mode === "zenobank";
+    return (
+      <div className="max-w-xl mx-auto px-4 sm:px-6 py-20">
+        <div className="rounded-3xl apple-glass p-8 sm:p-10 text-center space-y-5 border border-sky-500/25">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center text-sky-400">
+            <Loader2 className="w-7 h-7 animate-spin" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-2xl font-black text-white">
+              {isZeno
+                ? "Conectando con ZenoBank..."
+                : "Pago confirmado · Abriendo tu bóveda..."}
+            </h1>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              {isZeno
+                ? "Tu orden ya fue creada de forma segura. En un instante se abrirá la pasarela crypto de ZenoBank para completar tu pago."
+                : "Tu saldo cubrió el total de la orden. Te estamos llevando a tus códigos."}
+            </p>
+          </div>
+          <div className="text-[11px] font-mono text-slate-400 bg-slate-950/70 border border-white/10 rounded-xl px-3 py-2 inline-block">
+            Orden: {redirecting.orderId}
+          </div>
+          <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+            {isZeno && redirecting.checkoutUrl && (
+              <a
+                href={redirecting.checkoutUrl}
+                className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs transition-colors"
+              >
+                <span>Abrir ZenoBank ahora</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            )}
+            <Link
+              href={`/order/${redirecting.orderId}`}
+              className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 text-slate-200 font-bold text-xs transition-colors"
+            >
+              <span>Ver estado de mi orden</span>
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (cartItems.length === 0) {
     return (
