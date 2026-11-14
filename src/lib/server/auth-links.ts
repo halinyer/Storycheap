@@ -18,7 +18,7 @@ export function resolveSafeNextPath(rawNext?: string | null): string {
 
 export function buildAuthCallbackUrl(params: {
   tokenHash: string;
-  type: "signup" | "magiclink";
+  type: "signup" | "magiclink" | "recovery";
   next: string;
 }): string {
   const qs = new URLSearchParams({

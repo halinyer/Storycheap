@@ -6,11 +6,12 @@ import { useStore } from "@/context/store-context";
 import { KeyRound, Lock, Mail, Shield, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
-type AuthMode = "password" | "register" | "magic-link";
+type AuthMode = "password" | "register" | "magic-link" | "forgot";
 
 function resolveInitialAuthMode(rawMode: string | null): AuthMode {
   if (rawMode === "register") return "register";
   if (rawMode === "magic-link") return "magic-link";
+  if (rawMode === "forgot") return "forgot";
   return "password";
 }
 
@@ -18,6 +19,7 @@ function LoginFormInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const nextPath = searchParams.get("next") || "/account";
+  const authErrorParam = searchParams.get("error");
   const safeNext =
     nextPath.startsWith("/") && !nextPath.startsWith("//")
       ? nextPath
@@ -82,6 +84,33 @@ function LoginFormInner() {
               "Te enviamos un correo para confirmar tu cuenta y continuar."
           );
         }
+      } else if (authMode === "forgot") {
+        try {
+          window.sessionStorage.setItem(
+            "storycheap_pending_recovery",
+            String(Date.now())
+          );
+        } catch {
+          // Ignore storage unavailability
+        }
+        const res = await fetch("/api/auth/forgot-password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        });
+        const data = (await res.json()) as {
+          error?: string;
+          message?: string;
+        };
+        if (!res.ok) {
+          throw new Error(
+            data.error ?? "No se pudo enviar el correo de recuperación."
+          );
+        }
+        setSentMessage(
+          data.message ??
+            "Revisa tu correo electrónico para abrir el enlace de recuperación."
+        );
       } else {
         const res = await fetch("/api/auth/magic-link", {
           method: "POST",
@@ -123,16 +152,28 @@ function LoginFormInner() {
             <Lock className="w-5 h-5" />
           </div>
           <h1 className="text-2xl font-black text-white">
-            {authMode === "register" ? "Crea tu cuenta" : "Accede a StoryCheap"}
+            {authMode === "register"
+              ? "Crea tu cuenta"
+              : authMode === "forgot"
+                ? "Recupera tu contraseña"
+                : "Accede a StoryCheap"}
           </h1>
           <p className="text-xs text-slate-400 leading-relaxed">
             {authMode === "password"
               ? "Ingresa con tu correo y contraseña para ver tu bóveda."
               : authMode === "register"
                 ? "Registra tu cuenta para guardar tus códigos y saldo a favor."
-                : "Te enviamos un enlace mágico a tu correo para entrar sin contraseña."}
+                : authMode === "forgot"
+                  ? "Ingresa tu correo y te enviaremos un enlace para crear una nueva contraseña."
+                  : "Te enviamos un enlace mágico a tu correo para entrar sin contraseña."}
           </p>
         </div>
+
+        {authErrorParam === "auth_callback_failed" && (
+          <div className="rounded-2xl bg-rose-500/10 border border-rose-500/30 p-3.5 text-xs text-rose-200 text-center">
+            El enlace de acceso expiró o ya fue utilizado. Solicita uno nuevo.
+          </div>
+        )}
 
         {/* Tab Selector */}
         <div className="grid grid-cols-3 p-1 rounded-2xl bg-slate-950/60 border border-white/10 text-xs font-bold">
@@ -211,12 +252,26 @@ function LoginFormInner() {
 
             {(authMode === "password" || authMode === "register") && (
               <div>
-                <label
-                  htmlFor="login-password"
-                  className="block text-xs font-bold text-slate-300 mb-2"
-                >
-                  Contraseña
-                </label>
+                <div className="flex items-center justify-between mb-2">
+                  <label
+                    htmlFor="login-password"
+                    className="block text-xs font-bold text-slate-300"
+                  >
+                    Contraseña
+                  </label>
+                  {authMode === "password" && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthMode("forgot");
+                        setSentMessage(null);
+                      }}
+                      className="text-[11px] font-bold text-sky-400 hover:text-sky-300 transition-colors"
+                    >
+                      ¿Olvidaste tu contraseña?
+                    </button>
+                  )}
+                </div>
                 <div className="relative">
                   <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
                   <input
@@ -270,8 +325,23 @@ function LoginFormInner() {
                   ? "Iniciar sesión"
                   : authMode === "register"
                     ? "Crear cuenta"
-                    : "Enviar enlace de acceso"}
+                    : authMode === "forgot"
+                      ? "Enviar enlace de recuperación"
+                      : "Enviar enlace de acceso"}
             </button>
+
+            {authMode === "forgot" && (
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode("password");
+                  setSentMessage(null);
+                }}
+                className="w-full py-2 text-xs font-bold text-slate-400 hover:text-white transition-colors"
+              >
+                Volver a iniciar sesión con contraseña
+              </button>
+            )}
           </form>
         )}
 

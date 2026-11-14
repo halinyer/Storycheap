@@ -3,6 +3,7 @@
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
+import { UpdatePasswordForm } from "@/components/auth/update-password-form";
 import { useStore } from "@/context/store-context";
 import { formatCents } from "@/lib/catalog-seed";
 import { resolveBrandTheme } from "@/lib/brand-theme";
@@ -13,11 +14,12 @@ import {
   KeyRound,
   Lock,
   Receipt,
+  Shield,
   ShoppingBag,
   Wallet,
 } from "lucide-react";
 
-type AccountTab = "orders" | "codes" | "credit";
+type AccountTab = "orders" | "codes" | "credit" | "security";
 
 const REASON_LABELS: Record<CreditLedgerEntryDTO["reason"], string> = {
   overpayment: "Excedente de pago",
@@ -162,7 +164,7 @@ export default function AccountPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-2 p-1.5 rounded-2xl bg-white/[0.04] border border-white/[0.08] w-fit">
+      <div className="flex flex-wrap items-center gap-2 p-1.5 rounded-2xl bg-white/[0.04] border border-white/[0.08] w-fit">
         <button
           type="button"
           onClick={() => setTab("orders")}
@@ -200,6 +202,19 @@ export default function AccountPage() {
         >
           <Wallet className="w-4 h-4" />
           <span>Saldo a favor ({ledger.length})</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setTab("security")}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+            tab === "security"
+              ? "bg-white text-slate-950 shadow-md"
+              : "text-slate-300 hover:text-white"
+          }`}
+        >
+          <Shield className="w-4 h-4" />
+          <span>Seguridad</span>
         </button>
       </div>
 
@@ -342,6 +357,26 @@ export default function AccountPage() {
                 </div>
               );
             })
+          )}
+        </div>
+      ) : tab === "security" ? (
+        <div className="max-w-lg rounded-3xl apple-glass p-6 sm:p-8 space-y-5">
+          <div className="space-y-1">
+            <h2 className="text-lg font-black text-white flex items-center gap-2">
+              <KeyRound className="w-4 h-4 text-sky-400" />
+              <span>Cambiar contraseña</span>
+            </h2>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Define o actualiza la contraseña asociada a{" "}
+              <span className="text-white font-semibold">{sessionUser?.email}</span>.
+            </p>
+          </div>
+          {sessionUser?.isSandbox ? (
+            <div className="rounded-2xl bg-amber-500/10 border border-amber-500/25 p-4 text-xs text-amber-200">
+              En modo Sandbox local no se utilizan contraseñas reales.
+            </div>
+          ) : (
+            <UpdatePasswordForm submitLabel="Actualizar contraseña" />
           )}
         </div>
       ) : (

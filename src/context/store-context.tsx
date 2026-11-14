@@ -9,6 +9,8 @@ import React, {
   useState,
   useSyncExternalStore,
 } from "react";
+import { useRouter } from "next/navigation";
+import { createSupabaseBrowserClient } from "@/lib/supabase";
 import type { CartItem, Category, Region, SessionUser } from "@/types";
 
 const CART_STORAGE_KEY = "storycheap_cart_v2";
@@ -93,22 +95,17 @@ interface StoreContextValue {
 const StoreContext = createContext<StoreContextValue | undefined>(undefined);
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<Category | "ALL">("ALL");
   const [selectedRegion, setSelectedRegion] = useState<Region | "ALL">("ALL");
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
 
-  const [hasHydrated, setHasHydrated] = useState(false);
-  useEffect(() => {
-    setHasHydrated(true);
-  }, []);
-
-  const rawCartItems = useSyncExternalStore(
+  const cartItems = useSyncExternalStore(
     subscribeCart,
     getCartSnapshot,
     () => EMPTY_CART
   );
-  const cartItems = hasHydrated ? rawCartItems : EMPTY_CART;
 
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null);
   const [creditBalanceCents, setCreditBalanceCents] = useState(0);
@@ -136,30 +133,156 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let active = true;
-    fetch("/api/auth/session", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then(
-        (
-          data: {
-            user: SessionUser | null;
-            creditBalanceCents: number;
-            sandboxEnabled: boolean;
-          } | null
-        ) => {
-          if (!active || !data) return;
-          setSessionUser(data.user ?? null);
-          setCreditBalanceCents(Number(data.creditBalanceCents ?? 0));
-          setSandboxEnabled(Boolean(data.sandboxEnabled));
+    const supabase = createSupabaseBrowserClient();
+
+    async function bootstrapSession() {
+      let pendingRedirect: string | null = null;
+
+      try {
+        if (typeof window !== "undefined") {
+          const rawHash = window.location.hash.startsWith("#")
+            ? window.location.hash.slice(1)
+            : window.location.hash;
+          const hashParams = new URLSearchParams(rawHash);
+          const queryParams = new URLSearchParams(window.location.search);
+
+          const hashType = hashParams.get("type");
+          const accessToken = hashParams.get("access_token");
+          const refreshToken = hashParams.get("refresh_token");
+          const authError =
+            hashParams.get("error_code") ||
+            hashParams.get("error") ||
+            queryParams.get("error_code");
+
+          const queryTokenHash = queryParams.get("token_hash");
+          const queryType = queryParams.get("type");
+          const queryCode = queryParams.get("code");
+
+          // Forward token_hash/PKCE callbacks that landed on "/" or "/reset-password" without /api/auth/callback
+          if (queryTokenHash && queryType === "recovery") {
+            window.location.replace(
+              `/api/auth/callback?token_hash=${encodeURIComponent(
+                queryTokenHash
+              )}&type=recovery&next=${encodeURIComponent("/reset-password")}`
+            );
+            return;
+          }
+
+          if (
+            queryCode &&
+            (window.location.pathname === "/" ||
+              window.location.pathname === "/reset-password")
+          ) {
+            let pendingRecovery = false;
+            try {
+              const rawTs = window.sessionStorage.getItem(
+                "storycheap_pending_recovery"
+              );
+              if (rawTs && Date.now() - Number(rawTs) < 15 * 60_000) {
+                pendingRecovery = true;
+              }
+              window.sessionStorage.removeItem("storycheap_pending_recovery");
+            } catch {
+              pendingRecovery = false;
+            }
+            const nextDest =
+              window.location.pathname === "/reset-password" || pendingRecovery
+                ? "/reset-password"
+                : "/account";
+            window.location.replace(
+              `/api/auth/callback?code=${encodeURIComponent(
+                queryCode
+              )}&next=${encodeURIComponent(nextDest)}`
+            );
+            return;
+          }
+
+          if (accessToken && refreshToken && supabase) {
+            const { error: setSessionErr } = await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken,
+            });
+            window.history.replaceState(
+              window.history.state,
+              "",
+              window.location.pathname + window.location.search
+            );
+            if (!setSessionErr && hashType === "recovery") {
+              try {
+                window.sessionStorage.removeItem("storycheap_pending_recovery");
+              } catch {
+                // Ignore storage access failures
+              }
+              if (window.location.pathname !== "/reset-password") {
+                pendingRedirect = "/reset-password";
+              }
+            } else if (setSessionErr && hashType === "recovery") {
+              pendingRedirect = "/reset-password?error=expired";
+            }
+          } else if (authError) {
+            if (rawHash) {
+              window.history.replaceState(
+                window.history.state,
+                "",
+                window.location.pathname + window.location.search
+              );
+            }
+            if (
+              hashType === "recovery" ||
+              window.location.pathname === "/reset-password" ||
+              authError === "otp_expired"
+            ) {
+              pendingRedirect = "/reset-password?error=expired";
+            } else if (window.location.pathname === "/") {
+              pendingRedirect = "/login?error=auth_callback_failed";
+            }
+          }
         }
-      )
-      .catch(() => {})
-      .finally(() => {
-        if (active) setIsSessionLoading(false);
-      });
+
+        const res = await fetch("/api/auth/session", { cache: "no-store" });
+        const data = res.ok
+          ? ((await res.json()) as {
+              user: SessionUser | null;
+              creditBalanceCents: number;
+              sandboxEnabled: boolean;
+            })
+          : null;
+        if (!active || !data) return;
+        setSessionUser(data.user ?? null);
+        setCreditBalanceCents(Number(data.creditBalanceCents ?? 0));
+        setSandboxEnabled(Boolean(data.sandboxEnabled));
+      } catch {
+        // Ignore transient bootstrap errors
+      } finally {
+        if (active) {
+          setIsSessionLoading(false);
+          if (pendingRedirect) {
+            router.replace(pendingRedirect);
+          }
+        }
+      }
+    }
+
+    void bootstrapSession();
+
+    const subscription = supabase?.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") {
+        void refreshSession().then(() => {
+          if (
+            typeof window !== "undefined" &&
+            window.location.pathname !== "/reset-password"
+          ) {
+            router.replace("/reset-password");
+          }
+        });
+      }
+    }).data.subscription;
+
     return () => {
       active = false;
+      subscription?.unsubscribe();
     };
-  }, []);
+  }, [refreshSession, router]);
 
   const addToCart = useCallback(
     (item: Omit<CartItem, "quantity">, qty = 1) => {

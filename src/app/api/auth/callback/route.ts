@@ -23,7 +23,12 @@ export async function GET(request: NextRequest) {
   const code = searchParams.get("code");
   const tokenHash = searchParams.get("token_hash");
   const rawType = searchParams.get("type");
-  const safeNext = resolveSafeNext(searchParams.get("next"));
+  const rawNext = searchParams.get("next");
+  const safeNext = rawNext
+    ? resolveSafeNext(rawNext)
+    : rawType === "recovery"
+      ? "/reset-password"
+      : "/account";
 
   const supabase = await createSupabaseServerClient();
   if (supabase) {
@@ -43,6 +48,10 @@ export async function GET(request: NextRequest) {
         return NextResponse.redirect(`${origin}${safeNext}`);
       }
     }
+  }
+
+  if (rawType === "recovery" || safeNext === "/reset-password") {
+    return NextResponse.redirect(`${origin}/reset-password?error=expired`);
   }
 
   return NextResponse.redirect(`${origin}/login?error=auth_callback_failed`);

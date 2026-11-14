@@ -262,33 +262,69 @@ export async function sendCreditAdjustmentEmail(params: {
   });
 }
 
+type AuthEmailKind = "signup" | "magiclink" | "recovery";
+
+const AUTH_EMAIL_COPY: Record<
+  AuthEmailKind,
+  {
+    subject: string;
+    preheader: string;
+    headerRight: string;
+    title: string;
+    intro: string;
+    actionValue: string;
+    ctaLabel: string;
+  }
+> = {
+  signup: {
+    subject: "Confirma tu cuenta en StoryCheap",
+    preheader: "Confirma tu correo electrónico para activar tu cuenta de StoryCheap.",
+    headerRight: "Registro de cuenta",
+    title: "Confirma tu correo",
+    intro:
+      "Gracias por registrarte en StoryCheap. Haz clic en el botón de abajo para confirmar tu correo y continuar.",
+    actionValue: "Confirmar registro",
+    ctaLabel: "Confirmar cuenta",
+  },
+  magiclink: {
+    subject: "Tu enlace de acceso a StoryCheap",
+    preheader: "Usa este enlace personal para iniciar sesión en StoryCheap.",
+    headerRight: "Acceso seguro",
+    title: "Inicia sesión en StoryCheap",
+    intro:
+      "Solicitaste un enlace de acceso rápido para entrar a tu cuenta y ver tus códigos.",
+    actionValue: "Acceso único",
+    ctaLabel: "Iniciar sesión",
+  },
+  recovery: {
+    subject: "Restablece tu contraseña en StoryCheap",
+    preheader: "Usa este enlace personal para crear una nueva contraseña en StoryCheap.",
+    headerRight: "Recuperación de clave",
+    title: "Restablece tu contraseña",
+    intro:
+      "Recibimos una solicitud para cambiar la contraseña de tu cuenta en StoryCheap. Haz clic en el botón de abajo para definir una nueva clave.",
+    actionValue: "Restablecer contraseña",
+    ctaLabel: "Crear nueva contraseña",
+  },
+};
+
 export async function sendAuthVerificationEmail(params: {
   to: string;
   actionUrl: string;
-  kind: "signup" | "magiclink";
+  kind: AuthEmailKind;
 }) {
-  const isSignup = params.kind === "signup";
-  const subject = isSignup
-    ? "Confirma tu cuenta en StoryCheap"
-    : "Tu enlace de acceso a StoryCheap";
+  const copy = AUTH_EMAIL_COPY[params.kind];
 
   const html = renderEmailShell({
-    preheader: isSignup
-      ? "Confirma tu correo electrónico para activar tu cuenta de StoryCheap."
-      : "Usa este enlace personal para iniciar sesión en StoryCheap.",
-    headerRight: isSignup ? "Registro de cuenta" : "Acceso seguro",
-    title: isSignup ? "Confirma tu correo" : "Inicia sesión en StoryCheap",
-    intro: isSignup
-      ? "Gracias por registrarte en StoryCheap. Haz clic en el botón de abajo para confirmar tu correo y continuar."
-      : "Solicitaste un enlace de acceso rápido para entrar a tu cuenta y ver tus códigos.",
+    preheader: copy.preheader,
+    headerRight: copy.headerRight,
+    title: copy.title,
+    intro: copy.intro,
     rows: [
       { label: "Cuenta", value: params.to },
-      {
-        label: "Acción",
-        value: isSignup ? "Confirmar registro" : "Acceso único",
-      },
+      { label: "Acción", value: copy.actionValue },
     ],
-    ctaLabel: isSignup ? "Confirmar cuenta" : "Iniciar sesión",
+    ctaLabel: copy.ctaLabel,
     ctaUrl: params.actionUrl,
     securityNote:
       "Si no solicitaste este correo, puedes ignorarlo de forma segura. El enlace es personal y expira automáticamente.",
@@ -296,7 +332,7 @@ export async function sendAuthVerificationEmail(params: {
 
   return dispatchEmail({
     to: params.to,
-    subject,
+    subject: copy.subject,
     html,
     sandboxLink: params.actionUrl,
   });
