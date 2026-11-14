@@ -2,6 +2,10 @@ import "server-only";
 import type { OrderDTO, SessionUser } from "@/types";
 import { encryptCode, extractLast4 } from "./crypto";
 import { sendCreditAdjustmentEmail, sendOrderReadyEmail } from "./email";
+import {
+  getMatchedNotificationForOrder,
+  getOrderPagoMovilReport,
+} from "./pagomovil-store";
 import { getPaymentGateway } from "./payments";
 import type { NormalizedPaymentWebhookEvent } from "./payments/types";
 import {
@@ -1071,5 +1075,169 @@ export async function resolveOrderUnderpayment(params: {
     outcome: "fulfilled",
     order: fulfilledOrder,
     creditDeltaCents: -missingCents,
+  };
+}
+
+export class CancelOrderError extends Error {
+  status: number;
+  code: string;
+
+  constructor(code: string, message: string, status = 409) {
+    super(message);
+    this.name = "CancelOrderError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
+export interface CancelOrderResult {
+  outcome: "cancelled" | "already_cancelled";
+  order: OrderDTO;
+  releasedCodesCount: number;
+  refundedCreditCents: number;
+}
+
+/**
+ * Cancels an unpaid PENDING_PAYMENT / CREATED order on behalf of its owner (or admin),
+ * atomically releasing any reserved manual codes and refunding applied store credit.
+ */
+export async function cancelOrderByCustomer(params: {
+  orderId: string;
+  actorUser: SessionUser | null;
+  forceAfterReport?: boolean;
+}): Promise<CancelOrderResult> {
+  if (!params.actorUser) {
+    throw new CancelOrderError(
+      "UNAUTHORIZED",
+      "Debes iniciar sesión para cancelar esta orden.",
+      401
+    );
+  }
+
+  const order = await getOrderById(params.orderId);
+  if (!order) {
+    throw new CancelOrderError("ORDER_NOT_FOUND", "Orden no encontrada.", 404);
+  }
+
+  const isAuthorized =
+    order.userId === params.actorUser.id || params.actorUser.role === "admin";
+  if (!isAuthorized) {
+    throw new CancelOrderError(
+      "FORBIDDEN",
+      "No tienes permiso para cancelar esta orden.",
+      403
+    );
+  }
+
+  if (order.status === "CANCELLED") {
+    return {
+      outcome: "already_cancelled",
+      order,
+      releasedCodesCount: 0,
+      refundedCreditCents: 0,
+    };
+  }
+
+  if (order.paidCents > 0) {
+    throw new CancelOrderError(
+      "PARTIAL_PAYMENT_ACTIVE",
+      "Esta orden ya tiene un abono parcial registrado. Resuelve la diferencia o solicítalo como saldo a favor.",
+      409
+    );
+  }
+
+  if (order.status !== "PENDING_PAYMENT" && order.status !== "CREATED") {
+    throw new CancelOrderError(
+      "ORDER_NOT_CANCELLABLE",
+      "Solo se pueden cancelar órdenes que aún están pendientes de pago.",
+      409
+    );
+  }
+
+  if (order.paymentGateway === "pagomovil" || order.paymentGateway === "pablito") {
+    const matchedNotif = await getMatchedNotificationForOrder(order.id);
+    if (matchedNotif) {
+      throw new CancelOrderError(
+        "PAYMENT_ALREADY_MATCHED",
+        "Ya detectamos tu pago bancario para esta orden. Procesando confirmación...",
+        409
+      );
+    }
+
+    const report = await getOrderPagoMovilReport(order.id);
+    if (
+      report?.reportedReference &&
+      !report.lastErrorCode &&
+      !params.forceAfterReport
+    ) {
+      throw new CancelOrderError(
+        "REPORTED_REFERENCE_PENDING",
+        `Ya reportaste la referencia ${report.reportedReference} y el sistema está verificándola. Confirma si deseas cancelar la orden igualmente.`,
+        409
+      );
+    }
+  }
+
+  const transitioned = await transitionOrderStatus({
+    orderId: order.id,
+    expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
+    nextStatus: "CANCELLED",
+  });
+
+  if (!transitioned) {
+    const latest = await getOrderById(order.id);
+    if (latest?.status === "CANCELLED") {
+      return {
+        outcome: "already_cancelled",
+        order: latest,
+        releasedCodesCount: 0,
+        refundedCreditCents: 0,
+      };
+    }
+    throw new CancelOrderError(
+      "ORDER_STATE_CONFLICT",
+      "La orden cambió de estado mientras intentabas cancelarla. Actualiza la página.",
+      409
+    );
+  }
+
+  const releasedCodesCount = await releaseReservedCodesForOrder(order.id);
+
+  let refundedCreditCents = 0;
+  if (order.creditAppliedCents > 0 && order.userId) {
+    await appendCreditLedgerEntry({
+      userId: order.userId,
+      orderId: order.id,
+      deltaCents: order.creditAppliedCents,
+      reason: "fulfillment_refund",
+      note: `Reembolso de saldo por cancelación de orden ${order.orderNumber}`,
+      createdBy: params.actorUser.id,
+    });
+    refundedCreditCents = order.creditAppliedCents;
+  }
+
+  await appendAuditLog({
+    actorId: params.actorUser.id,
+    actorRole: params.actorUser.role,
+    action: "order.cancelled_by_customer",
+    targetType: "order",
+    targetId: order.id,
+    metadata: {
+      previousStatus: order.status,
+      paymentGateway: order.paymentGateway,
+      releasedCodesCount,
+      refundedCreditCents,
+      forcedAfterReport: Boolean(params.forceAfterReport),
+    },
+  });
+
+  const updatedOrder =
+    (await getOrderById(order.id)) ?? { ...order, status: "CANCELLED" };
+
+  return {
+    outcome: "cancelled",
+    order: updatedOrder,
+    releasedCodesCount,
+    refundedCreditCents,
   };
 }

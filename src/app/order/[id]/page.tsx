@@ -1,9 +1,9 @@
 /* eslint-disable @next/next/no-img-element */
 "use client";
 
-import React, { Suspense, useCallback, useEffect, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { formatCents } from "@/lib/catalog-seed";
 import { resolveBrandTheme } from "@/lib/brand-theme";
 import type { OrderDTO, OrderStatus, RevealedCodeDTO } from "@/types";
@@ -26,6 +26,18 @@ import {
   Wallet,
 } from "lucide-react";
 import { toast } from "sonner";
+import { ArrowRight, ShoppingCart, XCircle } from "lucide-react";
+import { CancelOrderControl } from "@/components/payments/cancel-order-control";
+import {
+  CardNetworksBadge,
+  PagoMovilBrandMark,
+  ZenoBankBrandMark,
+} from "@/components/payments/payment-brand-marks";
+import {
+  buildCartEntriesFromOrderItems,
+  formatBsNumber,
+} from "@/components/payments/payment-helpers";
+import { useStore } from "@/context/store-context";
 
 const POLLABLE_STATUSES: OrderStatus[] = [
   "CREATED",
@@ -33,6 +45,8 @@ const POLLABLE_STATUSES: OrderStatus[] = [
   "PAID",
   "FULFILLING",
 ];
+
+const ACTIVE_PROCESSING_STATUSES: OrderStatus[] = ["PAID", "FULFILLING"];
 
 function getStepperStep(status: OrderStatus): number {
   switch (status) {
@@ -54,6 +68,8 @@ function getStepperStep(status: OrderStatus): number {
 }
 
 function OrderDetailInner() {
+  const router = useRouter();
+  const { cartItems, addToCart } = useStore();
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const orderId = params.id;
@@ -72,10 +88,12 @@ function OrderDetailInner() {
   const [revealedCodes, setRevealedCodes] = useState<RevealedCodeDTO[] | null>(
     null
   );
+  const autoRevealAttemptedRef = useRef(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [maskedIds, setMaskedIds] = useState<Record<string, boolean>>({});
   const [simulating, setSimulating] = useState(false);
   const [resolvingUnderpayment, setResolvingUnderpayment] = useState(false);
+  const [manualRefreshing, setManualRefreshing] = useState(false);
   const [userCreditBalanceCents, setUserCreditBalanceCents] = useState(0);
 
   const fetchOrder = useCallback(async () => {
@@ -189,15 +207,35 @@ function OrderDetailInner() {
   // Auto-reveal codes once as soon as the order is DELIVERED or PARTIAL
   useEffect(() => {
     if (
-      order &&
-      (order.status === "DELIVERED" || order.status === "PARTIAL") &&
-      order.fulfillments.length > 0 &&
-      !revealedCodes &&
-      !revealing
+      !order ||
+      (order.status !== "DELIVERED" && order.status !== "PARTIAL") ||
+      order.fulfillments.length === 0 ||
+      revealedCodes !== null ||
+      autoRevealAttemptedRef.current
     ) {
-      void handleRevealCodes(true);
+      return;
     }
-  }, [order, revealedCodes, revealing, handleRevealCodes]);
+
+    autoRevealAttemptedRef.current = true;
+    let active = true;
+    fetch(`/api/orders/${orderId}/reveal`, { method: "POST" })
+      .then(async (res) => {
+        if (!res.ok) return null;
+        return (await res.json()) as { codes?: RevealedCodeDTO[] };
+      })
+      .then((data) => {
+        if (active && data?.codes) {
+          setRevealedCodes(data.codes);
+        }
+      })
+      .catch(() => {
+        // Silent auto-reveal fallback; user can still click reveal manually
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [order, orderId, revealedCodes]);
 
   const handleSimulateSandboxPayment = async (
     outcome: "completed" | "underpaid" | "overpaid" | "expired"
@@ -375,20 +413,27 @@ function OrderDetailInner() {
           </Link>
           <button
             type="button"
-            onClick={() => void fetchOrder()}
+            onClick={() => {
+              setManualRefreshing(true);
+              void fetchOrder().finally(() => setManualRefreshing(false));
+            }}
+            disabled={manualRefreshing}
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-xs font-bold text-slate-200 transition-colors"
           >
             <RefreshCw
               className={`w-3.5 h-3.5 ${
-                POLLABLE_STATUSES.includes(order.status)
+                ACTIVE_PROCESSING_STATUSES.includes(order.status) ||
+                manualRefreshing
                   ? "animate-spin text-sky-400"
                   : ""
               }`}
             />
             <span>
-              {POLLABLE_STATUSES.includes(order.status)
-                ? "Sincronizando..."
-                : "Actualizar"}
+              {ACTIVE_PROCESSING_STATUSES.includes(order.status)
+                ? "Entregando..."
+                : manualRefreshing
+                  ? "Actualizando..."
+                  : "Actualizar"}
             </span>
           </button>
         </div>
@@ -433,8 +478,14 @@ function OrderDetailInner() {
                           : "bg-amber-500/15 border-amber-400/35 text-amber-300"
                     }`}
                   >
-                    {POLLABLE_STATUSES.includes(order.status) ? (
+                    {ACTIVE_PROCESSING_STATUSES.includes(order.status) ? (
                       <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : order.status === "PENDING_PAYMENT" ||
+                      order.status === "CREATED" ? (
+                      <Clock className="w-3 h-3" />
+                    ) : order.status === "CANCELLED" ||
+                      order.status === "EXPIRED" ? (
+                      <XCircle className="w-3 h-3" />
                     ) : (
                       <CheckCircle2 className="w-3 h-3" />
                     )}
@@ -449,7 +500,12 @@ function OrderDetailInner() {
                 </h1>
 
                 <p className="text-xs sm:text-sm text-slate-400 max-w-2xl leading-relaxed">
-                  {statusMeta?.description}
+                  {order.status === "PENDING_PAYMENT" || order.status === "CREATED"
+                    ? order.paymentGateway === "pagomovil" ||
+                      order.paymentGateway === "pablito"
+                      ? "Tu orden reserva temporalmente las gift cards mientras realizas el Pago Móvil. Puedes completarlo ahora o cancelar esta orden si prefieres otro método."
+                      : "Tu orden reserva temporalmente las gift cards mientras completas el pago en ZenoBank. Puedes retomarlo aquí o cancelar la orden si cambiaste de opinión."
+                    : statusMeta?.description}
                 </p>
               </div>
             </div>
@@ -472,12 +528,15 @@ function OrderDetailInner() {
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 {steps.map((s) => {
                   const reached = stepIndex >= s.num;
-                  const isCurrentWaitStep =
-                    POLLABLE_STATUSES.includes(order.status) &&
+                  const isWaitingPaymentStep =
                     (order.status === "CREATED" ||
-                    order.status === "PENDING_PAYMENT"
-                      ? s.num === 1
-                      : s.num === 3);
+                      order.status === "PENDING_PAYMENT") &&
+                    s.num === 1;
+                  const isActivelyProcessingStep =
+                    ACTIVE_PROCESSING_STATUSES.includes(order.status) &&
+                    s.num === 3;
+                  const isCurrentWaitStep =
+                    isWaitingPaymentStep || isActivelyProcessingStep;
 
                   return (
                     <div
@@ -499,8 +558,10 @@ function OrderDetailInner() {
                               : "bg-white/[0.05] text-slate-500 border border-white/10"
                         }`}
                       >
-                        {isCurrentWaitStep ? (
+                        {isActivelyProcessingStep ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : isWaitingPaymentStep ? (
+                          <Clock className="w-3.5 h-3.5" />
                         ) : reached ? (
                           <Check className="w-4 h-4 stroke-[3]" />
                         ) : (
@@ -613,70 +674,91 @@ function OrderDetailInner() {
               </div>
             )}
 
-          {/* Payment Link if still PENDING_PAYMENT with 0 paid */}
-          {order.status === "PENDING_PAYMENT" &&
-            order.paidCents === 0 &&
-            (order.gatewayCheckoutUrl ||
-              order.paymentGateway === "pagomovil" ||
-              order.paymentGateway === "pablito") &&
-            !isSandboxCheckout &&
-            !order.gatewayCheckoutId?.startsWith("zbk_sbx_") && (
-              <div
-                className={`rounded-2xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4 border ${
-                  order.paymentGateway === "pagomovil" ||
-                  order.paymentGateway === "pablito"
-                    ? "bg-emerald-500/10 border-emerald-400/30"
-                    : "bg-indigo-500/10 border-indigo-400/30"
-                }`}
-              >
-                <div className="flex items-center gap-3.5">
-                  <div
-                    className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
-                      order.paymentGateway === "pagomovil" ||
-                      order.paymentGateway === "pablito"
-                        ? "bg-emerald-500/20 border-emerald-400/35"
-                        : "bg-indigo-500/20 border-indigo-400/35"
-                    }`}
-                  >
-                    <Clock
-                      className={`w-5 h-5 ${
-                        order.paymentGateway === "pagomovil" ||
+          {/* Stripe-style Pending Payment Card (Resume or Cancel) */}
+          {(order.status === "PENDING_PAYMENT" || order.status === "CREATED") &&
+            order.paidCents === 0 && (
+              <div className="rounded-2xl bg-[#0c0e16] border border-white/[0.1] p-5 sm:p-6 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-start gap-3.5 min-w-0">
+                    {order.paymentGateway === "pagomovil" ||
+                    order.paymentGateway === "pablito" ? (
+                      <PagoMovilBrandMark className="w-10 h-10" />
+                    ) : (
+                      <ZenoBankBrandMark className="w-10 h-10" />
+                    )}
+
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-extrabold text-white">
+                          {order.paymentGateway === "pagomovil" ||
+                          order.paymentGateway === "pablito"
+                            ? "Pago Móvil pendiente"
+                            : "Pago en ZenoBank pendiente"}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-white/[0.06] border border-white/10 text-[11px] font-mono font-bold text-slate-200 tabular-nums">
+                          {formatCents(order.amountDueCents)} USD
+                        </span>
+                        {(order.paymentGateway === "pagomovil" ||
+                          order.paymentGateway === "pablito") &&
+                          order.totalBsCents &&
+                          order.totalBsCents > 0 && (
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-400/25 text-[11px] font-mono font-bold text-emerald-300 tabular-nums">
+                              Bs. {formatBsNumber(order.totalBsCents)}
+                            </span>
+                          )}
+                      </div>
+
+                      <p className="text-xs text-slate-400 leading-relaxed">
+                        {order.paymentGateway === "pagomovil" ||
                         order.paymentGateway === "pablito"
-                          ? "text-emerald-300"
-                          : "text-indigo-300"
-                      }`}
+                          ? "Abre la ventana de Pago Móvil para copiar los datos Bancamiga y enviar los dígitos de tu referencia."
+                          : "Continúa en la pasarela encriptada de ZenoBank para pagar con USDT, USDC, Bitcoin o tarjeta."}
+                      </p>
+
+                      {order.paymentGateway === "zenobank" && (
+                        <div className="pt-1">
+                          <CardNetworksBadge />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                    {(order.paymentGateway === "pagomovil" ||
+                      order.paymentGateway === "pablito" ||
+                      (order.gatewayCheckoutUrl &&
+                        !isSandboxCheckout &&
+                        !order.gatewayCheckoutId?.startsWith("zbk_sbx_"))) && (
+                      <Link
+                        href={
+                          order.paymentGateway === "pagomovil" ||
+                          order.paymentGateway === "pablito"
+                            ? `/pay/pagomovil/${order.id}`
+                            : order.gatewayCheckoutUrl ?? "#"
+                        }
+                        className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-black text-xs transition-colors ${
+                          order.paymentGateway === "pagomovil" ||
+                          order.paymentGateway === "pablito"
+                            ? "bg-emerald-400 hover:bg-emerald-300 text-slate-950"
+                            : "bg-white hover:bg-sky-200 text-slate-950"
+                        }`}
+                      >
+                        <span>
+                          {order.paymentGateway === "pagomovil" ||
+                          order.paymentGateway === "pablito"
+                            ? "Ir a ventana Pago Móvil"
+                            : "Continuar en ZenoBank"}
+                        </span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </Link>
+                    )}
+
+                    <CancelOrderControl
+                      order={order}
+                      onCancelled={({ order: nextOrder }) => setOrder(nextOrder)}
                     />
                   </div>
-                  <div className="text-xs text-slate-200">
-                    <span className="font-bold text-white block text-sm">
-                      {order.paymentGateway === "pagomovil" ||
-                      order.paymentGateway === "pablito"
-                        ? `Esperando verificación de Pago Móvil (${formatCents(order.amountDueCents)} USD)`
-                        : `Esperando confirmación de pago (${formatCents(order.amountDueCents)} USD)`}
-                    </span>
-                    {order.paymentGateway === "pagomovil" ||
-                    order.paymentGateway === "pablito"
-                      ? "Abre la ventana de Pago Móvil para copiar los datos bancarios y reportar tu referencia."
-                      : "Si cerraste la ventana de pago de ZenoBank, puedes volver a abrirla aquí."}
-                  </div>
                 </div>
-                <a
-                  href={
-                    order.paymentGateway === "pagomovil" ||
-                    order.paymentGateway === "pablito"
-                      ? `/pay/pagomovil/${order.id}`
-                      : order.gatewayCheckoutUrl ?? "#"
-                  }
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-white hover:bg-slate-200 text-slate-950 font-black text-xs transition-colors"
-                >
-                  <span>
-                    {order.paymentGateway === "pagomovil" ||
-                    order.paymentGateway === "pablito"
-                      ? "Abrir ventana de Pago Móvil (Bs)"
-                      : "Abrir pasarela de pago"}
-                  </span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
               </div>
             )}
 
@@ -735,6 +817,60 @@ function OrderDetailInner() {
                   Tu pago está seguro — no tienes que volver a pagar.
                 </span>
                 Nuestro sistema registró tu pago y está terminando de asignar el lote de códigos.
+              </div>
+            </div>
+          )}
+
+          {/* Cancelled Order Banner with Cart Recovery */}
+          {order.status === "CANCELLED" && (
+            <div className="rounded-2xl bg-[#0c0e16] border border-white/[0.1] p-5 flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-white/[0.05] border border-white/10 flex items-center justify-center shrink-0">
+                  <XCircle className="w-4 h-4 text-slate-300" />
+                </div>
+                <div className="text-xs text-slate-300 leading-relaxed space-y-0.5">
+                  <span className="font-bold text-white block text-sm">
+                    Orden cancelada sin cargos
+                  </span>
+                  <span>
+                    Liberamos los códigos reservados
+                    {order.creditAppliedCents > 0
+                      ? ` y devolvimos ${formatCents(order.creditAppliedCents)} USD a tu saldo StoryCheap.`
+                      : "."}
+                  </span>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {order.items.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const existingIds = new Set(
+                        cartItems.map((c) => c.variantId)
+                      );
+                      const entries = buildCartEntriesFromOrderItems(
+                        order.items
+                      );
+                      for (const entry of entries) {
+                        if (!existingIds.has(entry.item.variantId)) {
+                          addToCart(entry.item, entry.quantity);
+                        }
+                      }
+                      toast.success("Artículos devueltos al carrito.");
+                      router.push("/checkout");
+                    }}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-sky-200 text-slate-950 font-black text-xs transition-colors"
+                  >
+                    <ShoppingCart className="w-3.5 h-3.5" />
+                    <span>Volver a comprar / Cambiar método</span>
+                  </button>
+                )}
+                <Link
+                  href="/"
+                  className="px-4 py-2 rounded-xl border border-white/15 bg-white/[0.03] hover:bg-white/[0.08] text-white font-bold text-xs transition-colors"
+                >
+                  Catálogo
+                </Link>
               </div>
             </div>
           )}

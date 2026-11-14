@@ -49,7 +49,8 @@ export const ORDER_STATUS_META: Record<
   },
   PENDING_PAYMENT: {
     label: "Esperando pago",
-    description: "Completa el pago en la pasarela cripto dentro del tiempo límite.",
+    description:
+      "Orden pendiente de pago dentro del tiempo límite. Puedes completar el pago o cancelar esta orden antes de pagar.",
     tone: "info",
   },
   PAID: {

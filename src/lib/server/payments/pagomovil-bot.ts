@@ -746,6 +746,15 @@ export async function verifyOrderPagoMovilClaim(params: {
     };
   }
 
+  if (order.status === "CANCELLED") {
+    return {
+      ok: false,
+      code: "INVALID_INPUT",
+      message: "Esta orden fue cancelada. Genera una nueva orden desde el checkout.",
+      order,
+    };
+  }
+
   if (
     order.status === "EXPIRED" ||
     (order.expiresAt && Date.now() >= Date.parse(order.expiresAt))

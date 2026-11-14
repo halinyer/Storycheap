@@ -4,34 +4,30 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useStore } from "@/context/store-context";
-import { formatCents } from "@/lib/catalog-seed";
 import {
   ArrowLeft,
+  ArrowRight,
   CheckCircle2,
-  Coins,
-  ExternalLink,
+  Clock,
+  Globe,
   Loader2,
   Lock,
   Mail,
   ShieldCheck,
-  Smartphone,
+  ShoppingBag,
   Sparkles,
   Wallet,
 } from "lucide-react";
 import { toast } from "sonner";
-
-interface PagoMovilAvailability {
-  enabled: boolean;
-  configured: boolean;
-  available: boolean;
-  bsRateCents: number | null;
-  watchdogOnline: boolean;
-  watchdogRequired: boolean;
-  activeDevices: number;
-  receiverBankName: string | null;
-  receiverAccountType: "natural" | "juridical" | null;
-}
+import { StripeSecurityFooter } from "@/components/payments/payment-brand-marks";
+import { formatBsNumber } from "@/components/payments/payment-helpers";
+import {
+  StripePaymentMethodSelector,
+  type PagoMovilAvailabilityInfo,
+} from "@/components/payments/stripe-payment-method-selector";
+import { useStore } from "@/context/store-context";
+import { formatCents } from "@/lib/catalog-seed";
+import type { OrderDTO } from "@/types";
 
 export default function CheckoutPage() {
   const router = useRouter();
@@ -41,57 +37,104 @@ export default function CheckoutPage() {
     clearCart,
     sessionUser,
     creditBalanceCents,
+    isSessionLoading,
     refreshSession,
   } = useStore();
 
   const [applyCredit, setApplyCredit] = useState(true);
   const [acceptedRegionPolicy, setAcceptedRegionPolicy] = useState(false);
-  const [paymentGateway, setPaymentGateway] = useState<"zenobank" | "pagomovil">("zenobank");
-  const [pmAvailability, setPmAvailability] = useState<PagoMovilAvailability | null>(
-    null
+  const [paymentGateway, setPaymentGateway] = useState<"zenobank" | "pagomovil">(
+    "zenobank"
   );
+  const [pmAvailability, setPmAvailability] =
+    useState<PagoMovilAvailabilityInfo | null>(null);
+  const [loadingPm, setLoadingPm] = useState(true);
+  const [pendingOrders, setPendingOrders] = useState<OrderDTO[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [redirecting, setRedirecting] = useState<{
     mode: "zenobank" | "pagomovil" | "vault";
     orderId: string;
-    checkoutUrl?: string;
   } | null>(null);
 
   useEffect(() => {
     let active = true;
     fetch("/api/payments/pagomovil/availability", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: PagoMovilAvailability | null) => {
-        if (active && data) {
-          setPmAvailability(data);
-        }
+      .then((data: PagoMovilAvailabilityInfo | null) => {
+        if (!active || !data) return;
+        setPmAvailability(data);
       })
-      .catch(() => {});
+      .catch(() => {
+        // Ignore network errors while querying gateway availability
+      })
+      .finally(() => {
+        if (active) setLoadingPm(false);
+      });
+
     return () => {
       active = false;
     };
   }, []);
 
+  useEffect(() => {
+    if (!sessionUser) {
+      return;
+    }
+    let active = true;
+    fetch("/api/account/summary", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { orders?: OrderDTO[] } | null) => {
+        if (!active || !data?.orders) return;
+        const openPending = data.orders.filter(
+          (o) =>
+            (o.status === "PENDING_PAYMENT" || o.status === "CREATED") &&
+            (!o.expiresAt || Date.parse(o.expiresAt) > Date.now())
+        );
+        setPendingOrders(openPending);
+      })
+      .catch(() => {
+        // Silent best-effort check
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [sessionUser]);
+
+  const visiblePendingOrders = sessionUser ? pendingOrders : [];
+
   const usableCreditCents =
-    sessionUser && applyCredit
-      ? Math.min(Math.max(0, creditBalanceCents), cartSubtotalCents)
+    sessionUser && applyCredit && creditBalanceCents > 0
+      ? Math.min(creditBalanceCents, cartSubtotalCents)
       : 0;
   const amountDueCents = Math.max(0, cartSubtotalCents - usableCreditCents);
 
-  const handleCheckout = async (e: React.FormEvent) => {
+  const estimatedBsCents =
+    pmAvailability?.bsRateCents && amountDueCents > 0
+      ? Math.round((amountDueCents * pmAvailability.bsRateCents) / 100)
+      : 0;
+
+  const handleCheckoutSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!sessionUser) {
+      router.push("/login?redirect=/checkout");
+      return;
+    }
     if (cartItems.length === 0) {
       toast.error("Tu carrito está vacío.");
       return;
     }
-    if (!sessionUser) {
-      toast.error("Inicia sesión o crea tu cuenta antes de finalizar la compra.");
-      router.push("/login?mode=register&next=/checkout");
+    if (!acceptedRegionPolicy) {
+      toast.error("Confirma la verificación de región y términos digitales.");
       return;
     }
-    if (!acceptedRegionPolicy) {
+    if (
+      amountDueCents > 0 &&
+      paymentGateway === "pagomovil" &&
+      !pmAvailability?.available
+    ) {
       toast.error(
-        "Por favor confirma que verificaste la región compatible de tus tarjetas."
+        "Pago Móvil no está disponible en este momento. Selecciona ZenoBank."
       );
       return;
     }
@@ -103,111 +146,83 @@ export default function CheckoutPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: sessionUser.email,
-          items: cartItems.map((it) => ({
-            variantId: it.variantId,
-            quantity: it.quantity,
+          items: cartItems.map((c) => ({
+            variantId: c.variantId,
+            quantity: c.quantity,
           })),
-          applyStoreCredit: Boolean(sessionUser && applyCredit),
+          applyStoreCredit: usableCreditCents > 0,
           paymentGateway: amountDueCents === 0 ? "zenobank" : paymentGateway,
         }),
       });
 
-      const data = (await res.json()) as {
-        error?: string;
+      const body = (await res.json()) as {
         orderId?: string;
+        orderNumber?: string;
+        status?: string;
         checkoutUrl?: string;
         paidInFullByCredit?: boolean;
+        error?: string;
+        code?: string;
       };
 
-      if (!res.ok || !data.orderId) {
-        throw new Error(
-          data.error ?? "No se pudo iniciar tu orden. Intenta nuevamente."
-        );
-      }
-
-      const targetMode =
-        data.paidInFullByCredit || !data.checkoutUrl || amountDueCents === 0
-          ? "vault"
-          : paymentGateway;
-      setRedirecting({
-        mode: targetMode,
-        orderId: data.orderId,
-        checkoutUrl: data.checkoutUrl,
-      });
-
-      clearCart();
-      void refreshSession();
-
-      if (targetMode === "vault" || !data.checkoutUrl) {
-        router.push(`/order/${data.orderId}`);
+      if (!res.ok || !body.orderId) {
+        if (body.code === "AUTH_REQUIRED") {
+          toast.error("Inicia sesión para completar la compra.");
+          router.push("/login?redirect=/checkout");
+          return;
+        }
+        toast.error(body.error ?? "No se pudo crear la orden.");
         return;
       }
 
-      // If sandbox/local hosted URL (/pay/pagomovil/[id]), navigate via Next router; if external ZenoBank URL, redirect browser immediately
-      if (data.checkoutUrl.startsWith(window.location.origin)) {
-        const rel = data.checkoutUrl.slice(window.location.origin.length);
-        router.push(rel);
-      } else {
-        window.location.assign(data.checkoutUrl);
+      clearCart();
+      await refreshSession();
+
+      if (body.paidInFullByCredit) {
+        setRedirecting({ mode: "vault", orderId: body.orderId });
+        router.push(`/order/${body.orderId}`);
+        return;
       }
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Error inesperado en el checkout"
-      );
-      setRedirecting(null);
+
+      if (paymentGateway === "pagomovil") {
+        setRedirecting({ mode: "pagomovil", orderId: body.orderId });
+        router.push(`/pay/pagomovil/${body.orderId}`);
+        return;
+      }
+
+      setRedirecting({ mode: "zenobank", orderId: body.orderId });
+      if (body.checkoutUrl && body.checkoutUrl.startsWith("http")) {
+        window.location.assign(body.checkoutUrl);
+      } else if (body.checkoutUrl) {
+        router.push(body.checkoutUrl);
+      } else {
+        router.push(`/order/${body.orderId}`);
+      }
+    } catch {
+      toast.error("Error de red al procesar el checkout.");
+    } finally {
       setSubmitting(false);
     }
   };
 
   if (redirecting) {
-    const isZeno = redirecting.mode === "zenobank";
-    const isPagoMovil = redirecting.mode === "pagomovil";
     return (
-      <div className="max-w-xl mx-auto px-4 sm:px-6 py-20">
-        <div className="rounded-3xl apple-glass p-8 sm:p-10 text-center space-y-5 border border-sky-500/25">
-          <div className="w-14 h-14 mx-auto rounded-2xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center text-sky-400">
-            <Loader2 className="w-7 h-7 animate-spin" />
+      <div className="min-h-[75vh] flex items-center justify-center px-4">
+        <div className="max-w-md w-full rounded-2xl bg-[#0e1018] border border-white/[0.1] p-8 text-center space-y-4 shadow-2xl">
+          <div className="w-12 h-12 rounded-2xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center mx-auto">
+            <Loader2 className="w-6 h-6 text-sky-400 animate-spin" />
           </div>
-          <div className="space-y-2">
-            <h1 className="text-2xl font-black text-white">
-              {isZeno
+          <h1 className="text-lg font-extrabold text-white">
+            {redirecting.mode === "pagomovil"
+              ? "Abriendo ventana de Pago Móvil..."
+              : redirecting.mode === "zenobank"
                 ? "Conectando con ZenoBank..."
-                : isPagoMovil
-                  ? "Abriendo ventana de Pago Móvil (Bs)..."
-                  : "Pago confirmado · Abriendo tu bóveda..."}
-            </h1>
-            <p className="text-xs text-slate-300 leading-relaxed">
-              {isZeno
-                ? "Tu orden ya fue creada de forma segura. En un instante se abrirá la pasarela crypto de ZenoBank para completar tu pago."
-                : isPagoMovil
-                  ? "Tu orden ya fue creada con la tasa en Bolívares congelada. En un instante verás los datos bancarios y el verificador automático."
-                  : "Tu saldo cubrió el total de la orden. Te estamos llevando a tus códigos."}
-            </p>
-          </div>
-          <div className="text-[11px] font-mono text-slate-400 bg-slate-950/70 border border-white/10 rounded-xl px-3 py-2 inline-block">
-            Orden: {redirecting.orderId}
-          </div>
-          <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
-            {(isZeno || isPagoMovil) && redirecting.checkoutUrl && (
-              <a
-                href={redirecting.checkoutUrl}
-                className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs transition-colors"
-              >
-                <span>
-                  {isPagoMovil
-                    ? "Abrir ventana Pago Móvil"
-                    : "Abrir ZenoBank ahora"}
-                </span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            )}
-            <Link
-              href={`/order/${redirecting.orderId}`}
-              className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 text-slate-200 font-bold text-xs transition-colors"
-            >
-              <span>Ver estado de mi orden</span>
-            </Link>
-          </div>
+                : "Liberando códigos en tu bóveda..."}
+          </h1>
+          <p className="text-xs text-slate-400 leading-relaxed">
+            Reserva de inventario confirmada. Redirigiendo a tu sesión de pago
+            segura...
+          </p>
         </div>
       </div>
     );
@@ -215,394 +230,385 @@ export default function CheckoutPage() {
 
   if (cartItems.length === 0) {
     return (
-      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-16 text-center space-y-4">
-        <h1 className="text-2xl font-black text-white">No hay ítems para pagar</h1>
-        <p className="text-xs text-slate-400">
-          Agrega una gift card al carrito para continuar al checkout seguro.
-        </p>
-        <Link
-          href="/"
-          className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-white text-slate-950 font-black text-xs"
-        >
-          Volver al catálogo
-        </Link>
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 py-16">
+        <div className="rounded-3xl bg-[#0e1018] border border-white/[0.08] p-10 text-center space-y-5">
+          <div className="w-14 h-14 rounded-2xl bg-white/[0.04] border border-white/10 flex items-center justify-center mx-auto text-slate-400">
+            <ShoppingBag className="w-6 h-6" />
+          </div>
+          <div className="space-y-1.5">
+            <h1 className="text-2xl font-black text-white">
+              Tu carrito está vacío
+            </h1>
+            <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+              Agrega una tarjeta de regalo desde el catálogo oficial o revisa tus
+              órdenes abiertas si dejaste un pago pendiente.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+            <Link
+              href="/"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white text-slate-950 font-extrabold text-xs hover:bg-sky-300 transition-colors"
+            >
+              <span>Explorar catálogo</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+            {sessionUser && (
+              <Link
+                href="/account"
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-white/15 bg-white/[0.03] text-xs font-bold text-slate-200 hover:bg-white/[0.08] transition-colors"
+              >
+                <span>Ver mis órdenes</span>
+              </Link>
+            )}
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-10">
-      <Link
-        href="/cart"
-        className="inline-flex items-center gap-2 text-xs font-bold text-slate-400 hover:text-white mb-6"
-      >
-        <ArrowLeft className="w-4 h-4" />
-        <span>Volver al carrito</span>
-      </Link>
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
+      {/* Clean Stripe Top Bar */}
+      <div className="flex items-center justify-between gap-4 mb-8">
+        <Link
+          href="/cart"
+          className="inline-flex items-center gap-2 text-xs font-semibold text-slate-400 hover:text-white transition-colors"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span>Volver al carrito</span>
+        </Link>
 
-      <div className="mb-8">
-        <div className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-400 mb-2">
-          <Lock className="w-3.5 h-3.5" />
-          <span>Checkout Cifrado • StoryCheap</span>
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-[11px] font-semibold text-slate-300">
+          <Lock className="w-3 h-3 text-emerald-400" />
+          <span>StoryCheap Checkout</span>
         </div>
-        <h1 className="text-3xl font-black text-white">Finalizar Compra</h1>
       </div>
 
-      <form
-        onSubmit={handleCheckout}
-        className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start"
-      >
-        {/* Left Column: Customer Info, Credit Toggle, Payment Method */}
-        <div className="lg:col-span-7 space-y-6">
-          {/* Step 1: Account Verification Required */}
-          <div className="rounded-3xl apple-glass p-6 space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-base font-extrabold text-white flex items-center gap-2">
-                <Mail className="w-4 h-4 text-sky-400" />
-                <span>1. Cuenta para entrega y bóveda</span>
-              </h2>
-              {sessionUser ? (
-                <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-black uppercase text-emerald-300">
-                  Verificada
-                </span>
-              ) : (
-                <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-[10px] font-black uppercase text-amber-300">
-                  Requerida
-                </span>
-              )}
+      {/* Pending unpaid orders reminder banner (prevents duplicate confusion) */}
+      {visiblePendingOrders.length > 0 && (
+        <div className="mb-6 rounded-2xl bg-[#0f131f] border border-sky-500/25 px-4 py-3.5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-sky-500/15 border border-sky-400/25 flex items-center justify-center shrink-0">
+              <Clock className="w-4 h-4 text-sky-400" />
             </div>
-
-            {sessionUser ? (
-              <div>
-                <label
-                  htmlFor="checkout-email"
-                  className="block text-xs font-bold text-slate-300 mb-2"
-                >
-                  Correo de tu cuenta
-                </label>
-                <input
-                  id="checkout-email"
-                  type="email"
-                  readOnly
-                  value={sessionUser.email}
-                  className="w-full rounded-2xl bg-slate-950/80 border border-white/15 px-4 py-3 text-sm text-white focus:outline-none opacity-90"
-                />
-                <p className="text-[11px] text-slate-400 mt-2">
-                  Tus códigos quedarán guardados automáticamente en Mi Cuenta y te notificaremos a este correo cuando estén listos.
-                </p>
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-white">
+                Tienes {visiblePendingOrders.length}{" "}
+                {visiblePendingOrders.length === 1
+                  ? `orden pendiente (#${visiblePendingOrders[0].orderNumber})`
+                  : "órdenes pendientes de pago"}
               </div>
-            ) : (
-              <div className="rounded-2xl bg-slate-950/70 border border-white/10 p-5 space-y-4">
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  Para proteger tus códigos en tu bóveda cifrada y resguardar tu saldo a favor ante cualquier diferencia de pago, debes iniciar sesión o crear tu cuenta antes de pagar.
-                </p>
-                <div className="flex flex-wrap gap-2.5">
-                  <Link
-                    href="/login?mode=register&next=/checkout"
-                    className="px-4 py-2.5 rounded-xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs transition-colors"
-                  >
-                    Crear cuenta gratis
-                  </Link>
-                  <Link
-                    href="/login?next=/checkout"
-                    className="px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 text-white font-bold text-xs transition-colors"
-                  >
-                    Ya tengo cuenta · Entrar
-                  </Link>
-                </div>
+              <div className="text-[11px] text-slate-400 truncate">
+                Puedes retomarla o cancelarla para liberar inventario y saldo antes
+                de generar otra.
               </div>
-            )}
+            </div>
           </div>
-
-          {/* Internal Store Credit (Only if authenticated & balance > 0) */}
-          {sessionUser && creditBalanceCents > 0 && (
-            <div className="rounded-3xl apple-glass p-6 space-y-3 border border-emerald-500/25">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                    <Wallet className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-extrabold text-white">
-                      Saldo a favor disponible: {formatCents(creditBalanceCents)} USD
-                    </h3>
-                    <p className="text-xs text-slate-400">
-                      Descontar automáticamente de esta orden.
-                    </p>
-                  </div>
-                </div>
-
-                <label className="inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={applyCredit}
-                    onChange={(e) => setApplyCredit(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 relative after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-full" />
-                </label>
-              </div>
-            </div>
-          )}
-
-          {/* Step 2: Payment Method */}
-          <div className="rounded-3xl apple-glass p-6 space-y-4">
-            <h2 className="text-base font-extrabold text-white flex items-center gap-2">
-              <Coins className="w-4 h-4 text-sky-400" />
-              <span>2. Método de pago</span>
-            </h2>
-
-            {amountDueCents === 0 ? (
-              <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/30 p-4 flex items-center gap-3">
-                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-                <div className="text-xs text-emerald-100">
-                  <span className="font-bold block">
-                    Cubierto 100% con tu saldo a favor interno
-                  </span>
-                  No necesitas enviar pago externo. Al confirmar, procesaremos tu entrega al instante.
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <button
-                  type="button"
-                  onClick={() => setPaymentGateway("zenobank")}
-                  className={`w-full text-left rounded-2xl p-4 flex items-start justify-between gap-4 transition-all ${
-                    paymentGateway === "zenobank"
-                      ? "border-2 border-sky-500/70 bg-sky-500/10"
-                      : "border border-white/10 bg-white/[0.02] hover:bg-white/[0.04]"
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="w-9 h-9 rounded-xl bg-sky-500/20 flex items-center justify-center text-sky-300 shrink-0 mt-0.5">
-                      <Sparkles className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-black text-white">
-                        ZenoBank Crypto Checkout
-                      </div>
-                      <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
-                        Paga con USDT, USDC u otras criptos soportadas con verificación automática por firma criptográfica.
-                      </p>
-                    </div>
-                  </div>
-                  <span
-                    className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase shrink-0 ${
-                      paymentGateway === "zenobank"
-                        ? "bg-sky-400 text-slate-950"
-                        : "bg-white/10 text-slate-300"
-                    }`}
-                  >
-                    {paymentGateway === "zenobank" ? "Seleccionado" : "Disponible"}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={!pmAvailability?.available}
-                  onClick={() => {
-                    if (pmAvailability?.available) {
-                      setPaymentGateway("pagomovil");
-                    }
-                  }}
-                  className={`w-full text-left rounded-2xl p-4 flex items-start justify-between gap-4 transition-all ${
-                    !pmAvailability?.available
-                      ? "border border-white/[0.06] bg-white/[0.02] opacity-60 cursor-not-allowed"
-                      : paymentGateway === "pagomovil"
-                        ? "border-2 border-emerald-400/75 bg-emerald-500/10"
-                        : "border border-white/10 bg-white/[0.02] hover:bg-white/[0.04]"
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="w-9 h-9 rounded-xl bg-emerald-500/20 flex items-center justify-center text-emerald-300 shrink-0 mt-0.5">
-                      <Smartphone className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-black text-white">
-                        Pago Móvil Venezuela (Bs)
-                      </div>
-                      <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
-                        {pmAvailability?.available
-                          ? `Transferencia directa a ${pmAvailability.receiverBankName ?? "Bancamiga"} con verificación automática 24/7.${
-                              pmAvailability.bsRateCents
-                                ? ` Estimado: Bs ${(
-                                    Math.round(
-                                      (amountDueCents * pmAvailability.bsRateCents) / 100
-                                    ) / 100
-                                  ).toLocaleString("es-VE", {
-                                    minimumFractionDigits: 2,
-                                    maximumFractionDigits: 2,
-                                  })}.`
-                                : ""
-                            }`
-                          : !pmAvailability
-                            ? "Verificando disponibilidad..."
-                            : !pmAvailability.enabled
-                              ? "Desactivado temporalmente en Consola Admin."
-                              : !pmAvailability.configured
-                                ? "Requiere tasa Bs y cuenta bancaria configurada."
-                                : "Servicio de verificación bancaria temporalmente no disponible."}
-                      </p>
-                    </div>
-                  </div>
-                  <span
-                    className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase shrink-0 ${
-                      paymentGateway === "pagomovil" && pmAvailability?.available
-                        ? "bg-emerald-400 text-slate-950"
-                        : pmAvailability?.available
-                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/30"
-                          : "bg-white/5 text-slate-400"
-                    }`}
-                  >
-                    {paymentGateway === "pagomovil" && pmAvailability?.available
-                      ? "Seleccionado"
-                      : pmAvailability?.available
-                        ? "Bs Automático"
-                        : "Inactivo"}
-                  </span>
-                </button>
-              </div>
-            )}
-
-            {/* Policy & Region Confirmation Checkbox */}
-            <label className="flex items-start gap-3 pt-2 cursor-pointer text-xs text-slate-300">
-              <input
-                type="checkbox"
-                checked={acceptedRegionPolicy}
-                onChange={(e) => setAcceptedRegionPolicy(e.target.checked)}
-                className="mt-0.5 h-4 w-4 rounded border-white/20 bg-slate-950 text-sky-500 focus:ring-sky-500"
-              />
-              <span className="leading-relaxed">
-                Confirmo que verifiqué la región compatible de cada gift card y acepto la{" "}
-                <Link
-                  href="/ayuda"
-                  target="_blank"
-                  className="text-sky-400 underline hover:text-sky-300"
-                >
-                  política de entregas y saldo a favor
-                </Link>
-                .
-              </span>
-            </label>
+          <div className="flex items-center gap-2 shrink-0">
+            <Link
+              href={
+                visiblePendingOrders[0].paymentGateway === "pagomovil" ||
+                visiblePendingOrders[0].paymentGateway === "pablito"
+                  ? `/pay/pagomovil/${visiblePendingOrders[0].id}`
+                  : `/order/${visiblePendingOrders[0].id}`
+              }
+              className="px-3 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/30 text-[11px] font-bold text-sky-200 transition-colors"
+            >
+              Continuar orden
+            </Link>
+            <Link
+              href={`/order/${visiblePendingOrders[0].id}`}
+              className="px-3 py-1.5 rounded-lg border border-white/10 bg-white/[0.04] hover:bg-white/[0.08] text-[11px] font-semibold text-slate-300 transition-colors"
+            >
+              Gestionar / Cancelar
+            </Link>
           </div>
         </div>
+      )}
 
-        {/* Right Column: Sticky Order Summary */}
-        <div className="lg:col-span-5 rounded-3xl apple-glass p-6 space-y-5 lg:sticky lg:top-24">
-          <h2 className="text-base font-black text-white">Resumen de tu orden</h2>
-
-          <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
-            {cartItems.map((it) => (
-              <div
-                key={it.variantId}
-                className="flex items-center gap-3 py-2 border-b border-white/[0.06]"
-              >
-                <div className="w-12 h-14 rounded-lg bg-slate-950 border border-white/10 p-1 flex items-center justify-center shrink-0">
-                  <img
-                    src={it.imageUrl}
-                    alt={it.productName}
-                    className="max-h-full max-w-full object-contain"
-                  />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-extrabold text-white truncate">
-                    {it.productName}
-                  </div>
-                  <div className="text-[11px] text-slate-400">
-                    {it.denominationLabel} × {it.quantity} • {it.region}
-                  </div>
-                </div>
-                <div className="text-xs font-black text-white">
-                  {formatCents(it.unitPriceCents * it.quantity)}
-                </div>
+      {/* Two-Column Stripe Split Checkout Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-start">
+        {/* Left Column: Merchant Order Summary (5 cols) */}
+        <aside className="lg:col-span-5 space-y-6">
+          <div className="rounded-2xl bg-[#0c0e16] border border-white/[0.08] p-6 space-y-6">
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-400">
+                <span className="w-5 h-5 rounded-md bg-white text-slate-950 font-black text-[10px] inline-flex items-center justify-center">
+                  S
+                </span>
+                <span>Pagar a StoryCheap</span>
               </div>
-            ))}
-          </div>
 
-          <div className="space-y-2 text-xs pt-1">
-            <div className="flex justify-between text-slate-300">
-              <span>Subtotal</span>
-              <span>{formatCents(cartSubtotalCents)} USD</span>
-            </div>
-            {usableCreditCents > 0 && (
-              <div className="flex justify-between text-emerald-400 font-bold">
-                <span>Saldo a favor aplicado</span>
-                <span>-{formatCents(usableCreditCents)} USD</span>
+              <div className="flex items-baseline gap-2 flex-wrap">
+                <span className="text-3xl sm:text-4xl font-black text-white tabular-nums tracking-tight">
+                  {formatCents(amountDueCents)}
+                </span>
+                <span className="text-xs font-bold text-slate-400 uppercase">
+                  USD
+                </span>
               </div>
-            )}
-            <div className="flex justify-between items-baseline pt-3 border-t border-white/[0.08]">
-              <span className="text-sm font-bold text-white">Total a pagar</span>
-              <span className="text-2xl font-black text-white">
-                {formatCents(amountDueCents)} USD
-              </span>
+
+              {amountDueCents > 0 &&
+                paymentGateway === "pagomovil" &&
+                estimatedBsCents > 0 && (
+                  <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-xs font-mono font-bold text-emerald-300 tabular-nums">
+                    <span>≈ Bs. {formatBsNumber(estimatedBsCents)}</span>
+                  </div>
+                )}
             </div>
-            {paymentGateway === "pagomovil" &&
-              pmAvailability?.bsRateCents &&
-              amountDueCents > 0 && (
-                <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3.5 py-2.5 flex items-center justify-between">
-                  <div>
-                    <div className="text-[11px] font-bold text-emerald-300">
-                      Total estimado en Bolívares
+
+            {/* Line Items */}
+            <div className="divide-y divide-white/[0.06] border-t border-white/[0.07]">
+              {cartItems.map((item) => (
+                <div
+                  key={item.variantId}
+                  className="py-3.5 flex items-center justify-between gap-3"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-11 h-12 rounded-lg bg-slate-950 border border-white/10 p-1 flex items-center justify-center shrink-0">
+                      <img
+                        src={item.imageUrl}
+                        alt={item.productName}
+                        className="max-h-full max-w-full object-contain rounded"
+                      />
                     </div>
-                    <div className="text-[10px] text-slate-400">
-                      Tasa: Bs{" "}
-                      {(pmAvailability.bsRateCents / 100).toLocaleString("es-VE", {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}{" "}
-                      / USD
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white truncate">
+                        {item.productName}
+                      </div>
+                      <div className="text-[11px] text-slate-400 flex items-center gap-1.5 mt-0.5">
+                        <span>{item.denominationLabel}</span>
+                        <span>•</span>
+                        <span className="inline-flex items-center gap-0.5">
+                          <Globe className="w-2.5 h-2.5 text-sky-400" />
+                          {item.region}
+                        </span>
+                        <span>•</span>
+                        <span>Cant. {item.quantity}</span>
+                      </div>
                     </div>
                   </div>
-                  <div className="text-base font-black text-emerald-300 font-mono">
-                    Bs{" "}
-                    {(
-                      Math.round(
-                        (amountDueCents * pmAvailability.bsRateCents) / 100
-                      ) / 100
-                    ).toLocaleString("es-VE", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
-                  </div>
+                  <span className="text-xs font-mono font-semibold text-white tabular-nums shrink-0">
+                    {formatCents(item.unitPriceCents * item.quantity)}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Totals Breakdown */}
+            <div className="space-y-2.5 pt-3 border-t border-white/[0.07] text-xs">
+              <div className="flex justify-between text-slate-400">
+                <span>Subtotal</span>
+                <span className="font-mono text-slate-200 tabular-nums">
+                  {formatCents(cartSubtotalCents)} USD
+                </span>
+              </div>
+
+              {usableCreditCents > 0 && (
+                <div className="flex justify-between text-emerald-400 font-semibold">
+                  <span>Saldo a favor aplicado</span>
+                  <span className="font-mono tabular-nums">
+                    -{formatCents(usableCreditCents)} USD
+                  </span>
                 </div>
               )}
+
+              <div className="flex justify-between items-baseline pt-2.5 border-t border-white/[0.08]">
+                <span className="font-bold text-white">Total hoy</span>
+                <span className="text-base font-black font-mono text-white tabular-nums">
+                  {formatCents(amountDueCents)} USD
+                </span>
+              </div>
+            </div>
           </div>
 
-          {sessionUser ? (
-            <button
-              type="submit"
-              disabled={submitting}
-              className="w-full py-4 px-5 rounded-2xl bg-white hover:bg-sky-300 disabled:bg-slate-700 disabled:text-slate-300 text-slate-950 font-black text-sm flex items-center justify-center gap-2 transition-all shadow-xl"
-            >
-              <Lock className="w-4 h-4" />
-              <span>
-                {submitting
-                  ? "Creando orden segura..."
-                  : amountDueCents === 0
-                    ? "Confirmar con Saldo a favor"
-                    : paymentGateway === "pagomovil"
-                      ? "Continuar a Pago Móvil (Bs)"
-                      : "Continuar al pago en ZenoBank"}
-              </span>
-            </button>
-          ) : (
-            <Link
-              href="/login?mode=register&next=/checkout"
-              className="w-full py-4 px-5 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-sm flex items-center justify-center gap-2 transition-all shadow-xl"
-            >
-              <Lock className="w-4 h-4" />
-              <span>Crear cuenta o iniciar sesión para pagar</span>
-            </Link>
-          )}
-
-          <div className="rounded-2xl bg-white/[0.03] border border-white/[0.08] p-3.5 text-[11px] text-slate-400 flex items-start gap-2.5">
-            <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+          <div className="hidden lg:flex items-center gap-2.5 px-2 text-[11px] text-slate-500 leading-relaxed">
+            <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>
-              Si envías un monto menor o superior al exacto, tu dinero no se pierde: la diferencia se acredita a tu saldo a favor interno.
+              Tus códigos se reservan al generar la orden y se liberan en tu bóveda
+              apenas confirmamos el pago.
             </span>
           </div>
-        </div>
-      </form>
+        </aside>
+
+        {/* Right Column: Elevated Stripe Payment Form (7 cols) */}
+        <main className="lg:col-span-7">
+          {!isSessionLoading && !sessionUser ? (
+            <div className="rounded-2xl bg-[#0e1018] border border-white/[0.1] p-6 sm:p-8 space-y-5 shadow-[0_24px_60px_-15px_rgba(0,0,0,0.75)]">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-sky-500/15 border border-sky-400/30 flex items-center justify-center shrink-0">
+                  <Lock className="w-5 h-5 text-sky-400" />
+                </div>
+                <div className="space-y-1">
+                  <h1 className="text-lg font-extrabold text-white">
+                    Inicia sesión para completar tu compra
+                  </h1>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Tus gift cards se guardan en la bóveda cifrada de tu cuenta
+                    para que nunca pierdas acceso a tus PINes ni a tu saldo a
+                    favor.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-3 pt-1">
+                <Link
+                  href="/login?redirect=/checkout"
+                  className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-white hover:bg-sky-200 text-slate-950 font-black text-xs transition-colors"
+                >
+                  <span>Iniciar sesión o registrarme</span>
+                  <ArrowRight className="w-4 h-4" />
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <form
+              onSubmit={handleCheckoutSubmit}
+              className="rounded-2xl bg-[#0e1018] border border-white/[0.1] p-6 sm:p-8 space-y-6 shadow-[0_24px_60px_-15px_rgba(0,0,0,0.75)]"
+            >
+              {/* Contact / Account Section */}
+              <div className="space-y-2.5">
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  Cuenta de entrega
+                </label>
+                <div className="rounded-xl bg-[#090b10] border border-white/[0.08] px-4 py-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Mail className="w-4 h-4 text-slate-400 shrink-0" />
+                    <span className="text-xs font-semibold text-white truncate">
+                      {sessionUser?.email ?? "Cargando sesión..."}
+                    </span>
+                  </div>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-[10px] font-bold text-emerald-300 shrink-0">
+                    <CheckCircle2 className="w-3 h-3" />
+                    Verificada
+                  </span>
+                </div>
+              </div>
+
+              {/* Store Credit Toggle */}
+              {sessionUser && creditBalanceCents > 0 && (
+                <div className="rounded-xl bg-[#090d11] border border-emerald-500/20 px-4 py-3.5 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Wallet className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white">
+                        Saldo a favor disponible:{" "}
+                        <span className="text-emerald-300 font-mono tabular-nums">
+                          {formatCents(creditBalanceCents)} USD
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        {applyCredit
+                          ? `Aplicando ${formatCents(usableCreditCents)} USD en esta orden`
+                          : "Activa para descontar tu saldo en esta compra"}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={applyCredit}
+                    onClick={() => setApplyCredit((v) => !v)}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                      applyCredit ? "bg-emerald-500" : "bg-white/15"
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                        applyCredit ? "translate-x-5" : "translate-x-0"
+                      }`}
+                    />
+                  </button>
+                </div>
+              )}
+
+              {/* Stripe Payment Method Selector or Instant Credit Coverage */}
+              {amountDueCents > 0 ? (
+                <StripePaymentMethodSelector
+                  selectedGateway={paymentGateway}
+                  onSelectGateway={setPaymentGateway}
+                  amountDueCents={amountDueCents}
+                  pagoMovilInfo={pmAvailability}
+                  loadingPagoMovil={loadingPm}
+                />
+              ) : (
+                <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 p-4 flex items-center gap-3">
+                  <Sparkles className="w-5 h-5 text-emerald-300 shrink-0" />
+                  <div className="text-xs text-emerald-100 leading-relaxed">
+                    <strong className="block text-white font-bold">
+                      Total cubierto al 100% con tu saldo a favor
+                    </strong>
+                    Al confirmar se entregarán tus códigos de inmediato sin
+                    pasarela adicional.
+                  </div>
+                </div>
+              )}
+
+              {/* Digital Policy Consent */}
+              <label className="flex items-start gap-3 rounded-xl bg-white/[0.02] border border-white/[0.07] p-3.5 cursor-pointer hover:border-white/15 transition-colors">
+                <input
+                  type="checkbox"
+                  checked={acceptedRegionPolicy}
+                  onChange={(e) => setAcceptedRegionPolicy(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-white/25 bg-slate-950 text-sky-400 focus:ring-sky-400/40"
+                />
+                <span className="text-[11px] text-slate-300 leading-relaxed">
+                  Confirmo que verifiqué la región de cada tarjeta digital y
+                  acepto la entrega electrónica instantánea en mi bóveda StoryCheap.
+                </span>
+              </label>
+
+              {/* Stripe Primary Submit CTA */}
+              <button
+                type="submit"
+                disabled={
+                  submitting ||
+                  !acceptedRegionPolicy ||
+                  (amountDueCents > 0 &&
+                    paymentGateway === "pagomovil" &&
+                    !pmAvailability?.available)
+                }
+                className={`w-full py-3.5 px-5 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all shadow-lg disabled:opacity-45 disabled:cursor-not-allowed ${
+                  amountDueCents === 0 || paymentGateway === "pagomovil"
+                    ? "bg-emerald-400 hover:bg-emerald-300 text-slate-950 shadow-emerald-500/15"
+                    : "bg-white hover:bg-sky-200 text-slate-950 shadow-sky-500/10"
+                }`}
+              >
+                {submitting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Creando orden segura...</span>
+                  </>
+                ) : amountDueCents === 0 ? (
+                  <>
+                    <span>Confirmar compra con saldo</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                ) : paymentGateway === "pagomovil" ? (
+                  <>
+                    <span>
+                      Pagar con Pago Móvil{" "}
+                      {estimatedBsCents > 0
+                        ? `• Bs. ${formatBsNumber(estimatedBsCents)}`
+                        : ""}
+                    </span>
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                ) : (
+                  <>
+                    <span>
+                      Pagar {formatCents(amountDueCents)} USD con ZenoBank
+                    </span>
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+
+              <StripeSecurityFooter />
+            </form>
+          )}
+        </main>
+      </div>
     </div>
   );
 }

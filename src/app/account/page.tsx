@@ -4,6 +4,7 @@
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { UpdatePasswordForm } from "@/components/auth/update-password-form";
+import { CancelOrderControl } from "@/components/payments/cancel-order-control";
 import { useStore } from "@/context/store-context";
 import { formatCents } from "@/lib/catalog-seed";
 import { resolveBrandTheme } from "@/lib/brand-theme";
@@ -245,13 +246,22 @@ export default function AccountPage() {
                 firstItem?.productName ?? "Gift Card",
                 firstItem?.productSlug
               );
+              const isPendingPay =
+                (o.status === "PENDING_PAYMENT" || o.status === "CREATED") &&
+                o.paidCents === 0;
+              const isPm =
+                o.paymentGateway === "pagomovil" ||
+                o.paymentGateway === "pablito";
+
               return (
-                <Link
+                <div
                   key={o.id}
-                  href={`/order/${o.id}`}
-                  className="group block rounded-2xl bg-[#11131c] border border-white/10 hover:border-white/25 p-4 sm:p-5 transition-all shadow-lg"
+                  className="rounded-2xl bg-[#11131c] border border-white/10 hover:border-white/20 p-4 sm:p-5 transition-all shadow-lg space-y-3"
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-4">
+                  <Link
+                    href={`/order/${o.id}`}
+                    className="group flex flex-wrap items-center justify-between gap-4"
+                  >
                     <div className="flex items-center gap-4 min-w-0">
                       <div className="w-12 h-16 rounded-xl bg-slate-950 border border-white/10 p-1.5 flex items-center justify-center shrink-0">
                         <img
@@ -287,8 +297,54 @@ export default function AccountPage() {
                       </div>
                       <ArrowRight className="w-4 h-4 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
                     </div>
-                  </div>
-                </Link>
+                  </Link>
+
+                  {isPendingPay && (
+                    <div className="pt-3 border-t border-white/[0.07] flex flex-wrap items-center justify-between gap-3">
+                      <span className="text-[11px] text-slate-400">
+                        {isPm
+                          ? "Pago Móvil pendiente de confirmación o cancelación."
+                          : "Orden abierta esperando pago o cancelación."}
+                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {(isPm || o.gatewayCheckoutUrl) && (
+                          <Link
+                            href={
+                              isPm
+                                ? `/pay/pagomovil/${o.id}`
+                                : o.gatewayCheckoutUrl ?? `/order/${o.id}`
+                            }
+                            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-bold text-xs transition-colors ${
+                              isPm
+                                ? "bg-emerald-400 hover:bg-emerald-300 text-slate-950"
+                                : "bg-white hover:bg-sky-200 text-slate-950"
+                            }`}
+                          >
+                            <span>
+                              {isPm ? "Continuar Pago Móvil" : "Continuar pago"}
+                            </span>
+                            <ArrowRight className="w-3.5 h-3.5" />
+                          </Link>
+                        )}
+                        <CancelOrderControl
+                          order={o}
+                          onCancelled={({ order: nextOrder, refundedCreditCents }) => {
+                            setOrders((prev) =>
+                              prev.map((row) =>
+                                row.id === nextOrder.id ? nextOrder : row
+                              )
+                            );
+                            if (refundedCreditCents > 0) {
+                              setCreditBalanceCents(
+                                (prev) => prev + refundedCreditCents
+                              );
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               );
             })
           )}
