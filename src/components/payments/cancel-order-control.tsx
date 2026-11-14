@@ -22,6 +22,7 @@ interface CancelOrderControlProps {
     | "items"
   >;
   variant?: "inline" | "hosted-footer";
+  tone?: "dark" | "light";
   onCancelled?: (result: {
     order: OrderDTO;
     refundedCreditCents: number;
@@ -33,6 +34,7 @@ type ConfirmStage = "idle" | "confirm" | "reported_warning";
 export function CancelOrderControl({
   order,
   variant = "inline",
+  tone = "dark",
   onCancelled,
 }: CancelOrderControlProps) {
   const router = useRouter();
@@ -135,17 +137,31 @@ export function CancelOrderControl({
     }
   };
 
+  const isLight = tone === "light";
+
   if (stage === "idle") {
     if (variant === "hosted-footer") {
       return (
-        <div className="pt-4 border-t border-white/[0.08] flex flex-wrap items-center justify-between gap-2">
-          <span className="text-[11px] text-slate-400">
-            ¿Quieres cambiar método o cancelar?
+        <div
+          className={`pt-4 border-t flex flex-wrap items-center justify-between gap-2 ${
+            isLight ? "border-slate-200" : "border-white/[0.08]"
+          }`}
+        >
+          <span
+            className={`text-[11px] ${
+              isLight ? "text-slate-500" : "text-slate-400"
+            }`}
+          >
+            ¿Cambiaste de opinión?
           </span>
           <button
             type="button"
             onClick={() => setStage("confirm")}
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-rose-300 transition-colors"
+            className={`inline-flex items-center gap-1.5 text-xs font-semibold transition-colors ${
+              isLight
+                ? "text-slate-600 hover:text-rose-600"
+                : "text-slate-300 hover:text-rose-300"
+            }`}
           >
             <XCircle className="w-3.5 h-3.5" />
             <span>Cancelar orden</span>
@@ -158,7 +174,11 @@ export function CancelOrderControl({
       <button
         type="button"
         onClick={() => setStage("confirm")}
-        className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-rose-500/10 hover:border-rose-500/30 text-xs font-semibold text-slate-300 hover:text-rose-200 transition-colors"
+        className={`inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border text-xs font-semibold transition-colors ${
+          isLight
+            ? "border-slate-200 bg-white hover:bg-rose-50 hover:border-rose-200 text-slate-700 hover:text-rose-700"
+            : "border-white/10 bg-white/[0.03] hover:bg-rose-500/10 hover:border-rose-500/30 text-slate-300 hover:text-rose-200"
+        }`}
       >
         <XCircle className="w-3.5 h-3.5" />
         <span>Cancelar orden</span>
@@ -167,25 +187,51 @@ export function CancelOrderControl({
   }
 
   return (
-    <div className="rounded-xl bg-[#0a0c12] border border-white/15 p-4 space-y-3 text-left">
+    <div
+      className={`rounded-xl border p-4 space-y-3 text-left ${
+        isLight
+          ? "bg-white border-slate-200 shadow-sm"
+          : "bg-[#0a0c12] border-white/15"
+      }`}
+    >
       {stage === "reported_warning" ? (
         <div className="flex items-start gap-2.5">
-          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <AlertTriangle
+            className={`w-4 h-4 shrink-0 mt-0.5 ${
+              isLight ? "text-amber-600" : "text-amber-400"
+            }`}
+          />
           <div className="space-y-1">
-            <div className="text-xs font-bold text-amber-200">
+            <div
+              className={`text-xs font-bold ${
+                isLight ? "text-amber-900" : "text-amber-200"
+              }`}
+            >
               Referencia bancaria reportada
             </div>
-            <p className="text-[11px] text-amber-100/85 leading-relaxed">
+            <p
+              className={`text-[11px] leading-relaxed ${
+                isLight ? "text-amber-800" : "text-amber-100/85"
+              }`}
+            >
               {warningMsg}
             </p>
           </div>
         </div>
       ) : (
         <div className="space-y-1">
-          <div className="text-xs font-bold text-white">
+          <div
+            className={`text-xs font-bold ${
+              isLight ? "text-slate-900" : "text-white"
+            }`}
+          >
             ¿Cancelar la orden #{order.orderNumber}?
           </div>
-          <p className="text-[11px] text-slate-400 leading-relaxed">
+          <p
+            className={`text-[11px] leading-relaxed ${
+              isLight ? "text-slate-600" : "text-slate-400"
+            }`}
+          >
             Se liberarán las gift cards reservadas
             {order.creditAppliedCents > 0
               ? ` y se reembolsarán ${formatCents(order.creditAppliedCents)} USD a tu saldo StoryCheap.`
@@ -204,7 +250,11 @@ export function CancelOrderControl({
               restoreAndGoCheckout: false,
             })
           }
-          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 font-bold text-[11px] transition-colors disabled:opacity-50"
+          className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border font-bold text-[11px] transition-colors disabled:opacity-50 ${
+            isLight
+              ? "bg-rose-50 hover:bg-rose-100 border-rose-200 text-rose-700"
+              : "bg-rose-500/20 hover:bg-rose-500/30 border-rose-500/40 text-rose-200"
+          }`}
         >
           {busyMode === "cancel" ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -228,7 +278,11 @@ export function CancelOrderControl({
                 restoreAndGoCheckout: true,
               })
             }
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white text-slate-950 hover:bg-sky-200 font-bold text-[11px] transition-colors disabled:opacity-50"
+            className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg font-bold text-[11px] transition-colors disabled:opacity-50 ${
+              isLight
+                ? "bg-[#0a2540] hover:bg-[#163859] text-white"
+                : "bg-white text-slate-950 hover:bg-sky-200"
+            }`}
           >
             {busyMode === "restore" ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -246,7 +300,11 @@ export function CancelOrderControl({
             setStage("idle");
             setWarningMsg(null);
           }}
-          className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg text-[11px] font-semibold text-slate-400 hover:text-white transition-colors"
+          className={`inline-flex items-center gap-1 px-2.5 py-2 rounded-lg text-[11px] font-semibold transition-colors ${
+            isLight
+              ? "text-slate-500 hover:text-slate-900"
+              : "text-slate-400 hover:text-white"
+          }`}
         >
           <RotateCcw className="w-3 h-3" />
           <span>Mantener orden</span>

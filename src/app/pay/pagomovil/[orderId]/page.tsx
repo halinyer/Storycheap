@@ -7,23 +7,17 @@ import { useParams, useRouter } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
-  ArrowRight,
   Check,
   CheckCircle2,
   Clock,
   Copy,
   Loader2,
-  Radio,
+  Lock,
   RefreshCw,
-  ShieldCheck,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { CancelOrderControl } from "@/components/payments/cancel-order-control";
-import {
-  PagoMovilBrandMark,
-  StripeSecurityFooter,
-} from "@/components/payments/payment-brand-marks";
 import {
   formatBsNumber,
   formatCountdown,
@@ -120,7 +114,7 @@ function PagoMovilHostedCheckoutContent() {
     } else if (body.waitingBankConfirmation && body.reportedReference) {
       setVerifyFeedback({
         type: "waiting",
-        message: `Referencia ${body.reportedReference} registrada. Verificando recepción bancaria...`,
+        message: `Referencia ${body.reportedReference} registrada. Esperando confirmación automática del banco...`,
       });
     } else {
       setVerifyFeedback(null);
@@ -208,13 +202,12 @@ function PagoMovilHostedCheckoutContent() {
   );
   const isCancelled = data?.status === "CANCELLED";
 
-  // Live polling ONLY while order is open & unpaid
   useEffect(() => {
     if (!data) return;
     if (isConfirmed) {
       const timer = setTimeout(() => {
         router.push(`/order/${orderId}`);
-      }, 1500);
+      }, 1400);
       return () => clearTimeout(timer);
     }
 
@@ -349,36 +342,32 @@ function PagoMovilHostedCheckoutContent() {
 
   if (loading) {
     return (
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-24 text-center space-y-3">
-        <Loader2 className="w-6 h-6 animate-spin text-emerald-400 mx-auto" />
-        <p className="text-xs text-slate-400">
-          Cargando sesión segura de Pago Móvil...
-        </p>
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-24 text-center space-y-3">
+        <Loader2 className="w-6 h-6 animate-spin text-sky-400 mx-auto" />
+        <p className="text-xs text-slate-400">Cargando Pago Móvil...</p>
       </div>
     );
   }
 
   if (loadError || !data) {
     return (
-      <div className="max-w-lg mx-auto px-4 py-16">
-        <div className="rounded-2xl bg-[#0e1018] border border-white/[0.1] p-8 text-center space-y-4">
-          <AlertTriangle className="w-9 h-9 text-amber-400 mx-auto" />
-          <h1 className="text-lg font-extrabold text-white">
-            No pudimos abrir esta orden
-          </h1>
-          <p className="text-xs text-slate-400 leading-relaxed">
+      <div className="max-w-md mx-auto px-4 py-16">
+        <div className="rounded-2xl bg-white text-[#0a2540] p-8 text-center space-y-4 shadow-2xl">
+          <AlertTriangle className="w-8 h-8 text-amber-500 mx-auto" />
+          <h1 className="text-lg font-bold">No pudimos abrir esta orden</h1>
+          <p className="text-xs text-slate-600 leading-relaxed">
             {loadError ?? "Verifica que iniciaste sesión con la cuenta correcta."}
           </p>
-          <div className="flex justify-center gap-3 pt-2">
+          <div className="flex justify-center gap-3 pt-1">
             <Link
               href={`/order/${orderId}`}
-              className="px-4 py-2 rounded-xl bg-white text-slate-950 font-bold text-xs"
+              className="px-4 py-2 rounded-lg bg-[#0a2540] text-white font-semibold text-xs"
             >
               Ver detalle de orden
             </Link>
             <Link
               href="/account"
-              className="px-4 py-2 rounded-xl border border-white/15 text-slate-200 font-semibold text-xs"
+              className="px-4 py-2 rounded-lg border border-slate-200 text-slate-700 font-semibold text-xs"
             >
               Mis órdenes
             </Link>
@@ -411,95 +400,90 @@ function PagoMovilHostedCheckoutContent() {
   };
 
   return (
-    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 sm:py-12 space-y-6">
-      {/* Top Stripe Navigation Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12 space-y-4">
+      {/* Minimal Top Bar above Sheet */}
+      <div className="flex items-center justify-between gap-4 px-1">
         <Link
           href={`/order/${orderId}`}
-          className="inline-flex items-center gap-2 text-xs font-semibold text-slate-400 hover:text-white transition-colors"
+          className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white transition-colors"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
-          <span>Volver a mi orden</span>
+          <span>Volver a orden #{data.orderNumber}</span>
         </Link>
 
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] font-mono text-slate-500">
-            #{data.orderNumber}
-          </span>
-          {data.watchdog.online && !isCancelled && !isConfirmed && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/25 text-[10px] font-bold text-emerald-300">
-              <Radio className="w-3 h-3" />
-              <span>Verificación bancaria activa</span>
-            </span>
-          )}
-        </div>
+        {!isConfirmed && !isCancelled && !isOrderExpired && (
+          <div className="inline-flex items-center gap-1.5 text-xs text-slate-400 font-mono tabular-nums">
+            <Clock className="w-3.5 h-3.5 text-slate-400" />
+            <span>Expira en {formatCountdown(data.expiresAt, nowMs)}</span>
+          </div>
+        )}
       </div>
 
-      {/* Main Split Stripe Checkout Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-start">
-        {/* Left Column: Merchant Order Summary (5 cols) */}
-        <aside className="lg:col-span-5 space-y-5">
-          <div className="rounded-2xl bg-[#0c0e16] border border-white/[0.08] p-6 space-y-5">
-            {/* Merchant Identity + Hero Bs Amount */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-                  <PagoMovilBrandMark className="w-6 h-6" />
-                  <span>StoryCheap • Pago Móvil</span>
-                </div>
-                {!isConfirmed && !isCancelled && !isOrderExpired && (
-                  <span className="inline-flex items-center gap-1 text-[11px] font-mono font-semibold text-slate-400 tabular-nums">
-                    <Clock className="w-3 h-3 text-slate-400" />
-                    {formatCountdown(data.expiresAt, nowMs)}
-                  </span>
+      {/* Authentic Stripe Checkout Floating Sheet */}
+      <div className="rounded-2xl overflow-hidden bg-white text-[#0a2540] shadow-[0_28px_80px_-20px_rgba(0,0,0,0.65)] ring-1 ring-white/10 grid grid-cols-1 lg:grid-cols-12">
+        {/* Left: Soft Slate Order Summary Column */}
+        <aside className="lg:col-span-5 bg-[#f7f9fc] p-6 sm:p-8 border-b lg:border-b-0 lg:border-r border-slate-200/80 flex flex-col justify-between gap-8">
+          <div className="space-y-6">
+            {/* Merchant Header */}
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <span className="w-6 h-6 rounded-md bg-[#0a2540] text-white font-black text-xs inline-flex items-center justify-center shadow-xs">
+                  S
+                </span>
+                <span className="text-sm font-bold text-[#0a2540]">
+                  StoryCheap
+                </span>
+              </div>
+              <span className="px-2 py-0.5 rounded-full bg-slate-200/75 text-[10px] font-semibold text-slate-700">
+                Pago Móvil
+              </span>
+            </div>
+
+            {/* Hero Amount */}
+            <div className="space-y-1">
+              <div className="text-xs font-medium text-slate-500">
+                Total a transferir
+              </div>
+              <div className="text-3xl sm:text-4xl font-bold tracking-tight text-[#0a2540] font-mono tabular-nums">
+                Bs. {formatBsNumber(data.amountDueBsCents)}
+              </div>
+              <div className="text-xs text-slate-500 flex flex-wrap items-center gap-1.5 pt-0.5 tabular-nums">
+                <span className="font-medium text-slate-700">
+                  {formatCents(data.amountDueCents)} USD
+                </span>
+                {data.bsRateCents && (
+                  <>
+                    <span>·</span>
+                    <span>Tasa Bs. {formatBsNumber(data.bsRateCents)}</span>
+                  </>
                 )}
               </div>
 
-              <div className="space-y-1">
-                <div className="text-3xl sm:text-4xl font-black text-white font-mono tabular-nums tracking-tight">
-                  Bs. {formatBsNumber(data.amountDueBsCents)}
-                </div>
-                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-                  <span className="font-mono font-semibold text-slate-300 tabular-nums">
-                    {formatCents(data.amountDueCents)} USD
-                  </span>
-                  {data.bsRateCents && (
-                    <>
-                      <span className="text-slate-600">•</span>
-                      <span className="tabular-nums">
-                        Tasa congelada: Bs. {formatBsNumber(data.bsRateCents)}
-                      </span>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              {/* Rate Validity Strip */}
-              {!isConfirmed && !isCancelled && !isOrderExpired && data.rateExpiresAt && (
-                <div
-                  className={`rounded-xl px-3 py-2 border flex items-center justify-between text-[11px] ${
-                    isRateExpired
-                      ? "bg-amber-500/10 border-amber-500/30 text-amber-200"
-                      : "bg-white/[0.02] border-white/[0.06] text-slate-400"
-                  }`}
-                >
-                  <span>
-                    {isRateExpired
-                      ? "Tasa expirada"
-                      : "Vigencia de esta tasa Bs"}
-                  </span>
-                  <span className="font-mono font-bold tabular-nums text-white">
-                    {isRateExpired
-                      ? "00:00"
-                      : formatCountdown(data.rateExpiresAt, nowMs)}
-                  </span>
-                </div>
-              )}
+              {!isConfirmed &&
+                !isCancelled &&
+                !isOrderExpired &&
+                isRateExpired && (
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      disabled={refreshingRate}
+                      onClick={() => void handleRefreshRate()}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 hover:bg-amber-200 text-amber-900 font-semibold text-[11px] transition-colors"
+                    >
+                      <RefreshCw
+                        className={`w-3 h-3 ${
+                          refreshingRate ? "animate-spin" : ""
+                        }`}
+                      />
+                      <span>Tasa vencida · Actualizar</span>
+                    </button>
+                  </div>
+                )}
             </div>
 
-            {/* Order Line Items (when loaded) */}
+            {/* Clean Itemized Summary */}
             {orderDetails && orderDetails.items.length > 0 && (
-              <div className="divide-y divide-white/[0.06] border-t border-white/[0.07]">
+              <div className="space-y-3 pt-5 border-t border-slate-200/80">
                 {orderDetails.items.map((item) => {
                   const theme = resolveBrandTheme(
                     item.productName,
@@ -508,276 +492,206 @@ function PagoMovilHostedCheckoutContent() {
                   return (
                     <div
                       key={item.id}
-                      className="py-3 flex items-center justify-between gap-3"
+                      className="flex items-center justify-between gap-3 text-xs"
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-9 h-10 rounded-lg bg-slate-950 border border-white/10 p-1 flex items-center justify-center shrink-0">
+                        <div className="w-8 h-9 rounded-md bg-white border border-slate-200 p-1 flex items-center justify-center shrink-0">
                           <img
                             src={theme.imageUrl}
                             alt={item.productName}
-                            className="max-h-full max-w-full object-contain rounded"
+                            className="max-h-full max-w-full object-contain"
                           />
                         </div>
                         <div className="min-w-0">
-                          <div className="text-xs font-bold text-white truncate">
+                          <div className="font-semibold text-[#0a2540] truncate">
                             {item.productName}
                           </div>
-                          <div className="text-[11px] text-slate-400 truncate">
-                            {item.denominationLabel} × {item.quantity}
+                          <div className="text-[11px] text-slate-500">
+                            {item.denominationLabel} · Cant. {item.quantity}
                           </div>
                         </div>
                       </div>
-                      <span className="text-xs font-mono font-semibold text-slate-200 tabular-nums shrink-0">
+                      <span className="font-medium text-[#0a2540] tabular-nums shrink-0">
                         {formatCents(item.unitPriceCents * item.quantity)}
                       </span>
                     </div>
                   );
                 })}
-              </div>
-            )}
 
-            {/* Totals Breakdown */}
-            {orderDetails && (
-              <div className="space-y-2 pt-3 border-t border-white/[0.07] text-xs">
-                <div className="flex justify-between text-slate-400">
-                  <span>Subtotal USD</span>
-                  <span className="font-mono text-slate-200 tabular-nums">
-                    {formatCents(orderDetails.subtotalCents)} USD
-                  </span>
-                </div>
                 {orderDetails.creditAppliedCents > 0 && (
-                  <div className="flex justify-between text-emerald-400 font-semibold">
+                  <div className="flex justify-between text-xs text-emerald-700 font-medium pt-2 border-t border-slate-200/70">
                     <span>Saldo a favor</span>
-                    <span className="font-mono tabular-nums">
-                      -{formatCents(orderDetails.creditAppliedCents)} USD
+                    <span className="tabular-nums">
+                      -{formatCents(orderDetails.creditAppliedCents)}
                     </span>
                   </div>
                 )}
               </div>
             )}
-
-            {/* Inline Cancel / Switch Method Footer */}
-            {!isConfirmed && !isCancelled && !isOrderExpired && (
-              <CancelOrderControl
-                order={cancelableOrderSnapshot}
-                variant="hosted-footer"
-                onCancelled={({ order }) => {
-                  setOrderDetails(order);
-                  setData((prev) =>
-                    prev ? { ...prev, status: "CANCELLED" } : prev
-                  );
-                }}
-              />
-            )}
           </div>
+
+          {/* Cancel Order Inline Control */}
+          {!isConfirmed && !isCancelled && !isOrderExpired && (
+            <CancelOrderControl
+              order={cancelableOrderSnapshot}
+              tone="light"
+              variant="hosted-footer"
+              onCancelled={({ order }) => {
+                setOrderDetails(order);
+                setData((prev) =>
+                  prev ? { ...prev, status: "CANCELLED" } : prev
+                );
+              }}
+            />
+          )}
         </aside>
 
-        {/* Right Column: Stripe Hosted Interactive Payment Card (7 cols) */}
-        <main className="lg:col-span-7">
+        {/* Right: Crisp Pure White Payment Sheet */}
+        <main className="lg:col-span-7 bg-white p-6 sm:p-8 flex flex-col justify-center">
           {isCancelled ? (
-            <div className="rounded-2xl bg-[#0e1018] border border-white/[0.1] p-7 sm:p-9 space-y-5 shadow-[0_24px_60px_-15px_rgba(0,0,0,0.75)]">
-              <div className="flex items-start gap-3.5">
-                <div className="w-10 h-10 rounded-xl bg-white/[0.05] border border-white/15 flex items-center justify-center shrink-0">
-                  <XCircle className="w-5 h-5 text-slate-300" />
-                </div>
+            <div className="py-6 space-y-5">
+              <div className="flex items-start gap-3">
+                <XCircle className="w-6 h-6 text-slate-400 shrink-0 mt-0.5" />
                 <div className="space-y-1">
-                  <h1 className="text-lg font-extrabold text-white">
+                  <h1 className="text-lg font-bold text-[#0a2540]">
                     Orden #{data.orderNumber} cancelada
                   </h1>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    Liberamos tus tarjetas reservadas y reembolsamos cualquier saldo
-                    a favor aplicado. No se realizó ningún cargo.
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Liberamos las gift cards reservadas y reembolsamos cualquier
+                    saldo a favor aplicado. No se realizó ningún cargo.
                   </p>
                 </div>
               </div>
-
-              <div className="flex flex-wrap gap-3 pt-2">
+              <div className="flex flex-wrap gap-2.5">
                 <Link
                   href="/checkout"
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-sky-200 text-slate-950 font-black text-xs transition-colors"
+                  className="px-4 py-2.5 rounded-lg bg-[#0a2540] hover:bg-[#163859] text-white font-semibold text-xs transition-colors"
                 >
-                  <span>Ir al checkout</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
+                  Ir al checkout
                 </Link>
                 <Link
                   href={`/order/${orderId}`}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-white/15 bg-white/[0.03] hover:bg-white/[0.08] text-xs font-bold text-slate-200 transition-colors"
+                  className="px-4 py-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold text-xs transition-colors"
                 >
-                  <span>Ver resumen de orden</span>
+                  Ver resumen de orden
                 </Link>
               </div>
             </div>
           ) : isConfirmed ? (
-            <div className="rounded-2xl bg-[#0d1714] border border-emerald-500/35 p-7 sm:p-9 space-y-5 shadow-[0_24px_60px_-15px_rgba(0,0,0,0.75)]">
-              <div className="flex items-start gap-3.5">
-                <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center shrink-0">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-300" />
-                </div>
+            <div className="py-6 space-y-5">
+              <div className="flex items-start gap-3">
+                <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
                 <div className="space-y-1">
-                  <h1 className="text-lg font-extrabold text-white">
-                    Pago Móvil verificado
+                  <h1 className="text-lg font-bold text-[#0a2540]">
+                    Pago Móvil confirmado
                   </h1>
-                  <p className="text-xs text-emerald-100/85 leading-relaxed">
-                    Confirmamos tu transferencia. Te estamos llevando a tu bóveda
-                    para revelar tus códigos...
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Confirmamos tu transferencia. Llevándote a tu bóveda para
+                    revelar tus códigos...
                   </p>
                 </div>
               </div>
-
               <Link
                 href={`/order/${orderId}`}
-                className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-black text-xs transition-colors"
+                className="inline-flex items-center justify-center px-5 py-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition-colors"
               >
-                <span>Ver mis códigos ahora</span>
-                <ArrowRight className="w-4 h-4" />
+                Ver mis códigos ahora
               </Link>
             </div>
           ) : isOrderExpired ? (
-            <div className="rounded-2xl bg-[#0e1018] border border-amber-500/30 p-7 sm:p-9 space-y-5 shadow-[0_24px_60px_-15px_rgba(0,0,0,0.75)]">
-              <div className="flex items-start gap-3.5">
-                <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-400/30 flex items-center justify-center shrink-0">
-                  <Clock className="w-5 h-5 text-amber-300" />
-                </div>
+            <div className="py-6 space-y-5">
+              <div className="flex items-start gap-3">
+                <Clock className="w-6 h-6 text-amber-500 shrink-0 mt-0.5" />
                 <div className="space-y-1">
-                  <h1 className="text-lg font-extrabold text-white">
-                    Esta sesión de pago expiró
+                  <h1 className="text-lg font-bold text-[#0a2540]">
+                    Esta orden expiró
                   </h1>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    El tiempo límite para completar el Pago Móvil terminó y las
-                    tarjetas reservadas fueron liberadas automáticamente.
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    El tiempo límite cerró y el inventario reservado fue liberado.
+                    Genera una nueva orden desde el catálogo.
                   </p>
                 </div>
               </div>
-
-              <div className="flex flex-wrap gap-3">
+              <div className="flex flex-wrap gap-2.5">
                 <Link
                   href="/"
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white text-slate-950 font-black text-xs"
+                  className="px-4 py-2.5 rounded-lg bg-[#0a2540] text-white font-semibold text-xs"
                 >
-                  <span>Volver al catálogo</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
+                  Volver al catálogo
                 </Link>
                 <Link
                   href={`/order/${orderId}`}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-white/15 text-xs font-bold text-slate-200"
+                  className="px-4 py-2.5 rounded-lg border border-slate-200 text-slate-700 font-semibold text-xs"
                 >
-                  <span>Ver detalle de orden</span>
+                  Ver orden
                 </Link>
               </div>
             </div>
           ) : !data.receiver ? (
-            <div className="rounded-2xl bg-[#0e1018] border border-white/[0.1] p-7 text-center space-y-3">
-              <AlertTriangle className="w-7 h-7 text-amber-400 mx-auto" />
-              <p className="text-xs text-slate-300">
-                No hay cuenta bancaria receptora activa en este momento.
-              </p>
+            <div className="py-8 text-center space-y-2 text-xs text-slate-600">
+              <AlertTriangle className="w-7 h-7 text-amber-500 mx-auto" />
+              <p>No hay cuenta bancaria receptora configurada.</p>
             </div>
           ) : (
-            <div className="rounded-2xl bg-[#0e1018] border border-white/[0.1] p-6 sm:p-8 space-y-7 shadow-[0_24px_60px_-15px_rgba(0,0,0,0.75)]">
-              {/* Step 1: Bank Details Table */}
-              <section className="space-y-3.5">
+            <div className="space-y-6">
+              {/* Component 1: Unified Stripe Bank Details Box */}
+              <div className="space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-white text-slate-950 font-black text-[11px] inline-flex items-center justify-center">
-                      1
-                    </span>
-                    <h2 className="text-sm font-extrabold text-white">
-                      Transfiere el monto exacto vía Pago Móvil
-                    </h2>
-                  </div>
-
+                  <h1 className="text-sm font-bold text-[#0a2540]">
+                    Datos para Pago Móvil
+                  </h1>
                   <button
                     type="button"
                     onClick={handleCopyAll}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.1] border border-white/10 text-[11px] font-semibold text-slate-200 transition-colors"
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#635bff] hover:text-[#4b43e6] transition-colors"
                   >
                     {copiedKey === "all" ? (
-                      <Check className="w-3 h-3 text-emerald-400" />
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        <span className="text-emerald-700">Copiado</span>
+                      </>
                     ) : (
-                      <Copy className="w-3 h-3 text-slate-400" />
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copiar todo</span>
+                      </>
                     )}
-                    <span>{copiedKey === "all" ? "Copiado" : "Copiar todo"}</span>
                   </button>
                 </div>
 
-                {/* Expired Rate Inline Strip */}
-                {isRateExpired && (
-                  <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 p-3.5 flex flex-wrap items-center justify-between gap-3">
-                    <div className="text-xs text-amber-100">
-                      La tasa congelada venció. Actualízala antes de transferir.
-                    </div>
-                    <button
-                      type="button"
-                      disabled={refreshingRate}
-                      onClick={() => void handleRefreshRate()}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs shrink-0"
-                    >
-                      <RefreshCw
-                        className={`w-3.5 h-3.5 ${
-                          refreshingRate ? "animate-spin" : ""
-                        }`}
-                      />
-                      <span>Actualizar tasa</span>
-                    </button>
-                  </div>
-                )}
-
-                {/* Highlighted Exact Bs Amount Row */}
-                <div className="rounded-xl bg-[#090d11] border border-emerald-500/25 p-4 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[11px] font-semibold text-emerald-300/90">
-                      Monto exacto a enviar (Bs)
-                    </div>
-                    <div className="text-xl font-black text-white font-mono tabular-nums mt-0.5">
-                      Bs. {formatBsNumber(data.amountDueBsCents)}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void copyField("amount", exactCopyBs, "Monto en Bs")
-                    }
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-black text-xs transition-colors shrink-0"
-                  >
-                    {copiedKey === "amount" ? (
-                      <Check className="w-3.5 h-3.5" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
-                    )}
-                    <span className="font-mono tabular-nums">{exactCopyBs}</span>
-                  </button>
-                </div>
-
-                {/* Stripe Structured Table for Receiver Info */}
-                <div className="rounded-xl bg-[#090b10] border border-white/[0.08] divide-y divide-white/[0.06] overflow-hidden">
+                <div className="rounded-xl border border-slate-200 bg-slate-50/75 divide-y divide-slate-200/80 overflow-hidden">
                   {[
                     {
+                      key: "amount",
+                      label: "Monto exacto",
+                      display: `Bs. ${exactCopyBs}`,
+                      sub: null as string | null,
+                      copyVal: exactCopyBs,
+                    },
+                    {
                       key: "bank",
-                      label: "Banco destino",
-                      displayVal: `${data.receiver.bankCode} • ${data.receiver.bankName}`,
-                      copyVal: data.receiver.bankCode,
-                      tag:
+                      label: "Banco",
+                      display: `${data.receiver.bankCode} · ${data.receiver.bankName}`,
+                      sub: `${
                         data.receiver.accountType === "natural"
                           ? "Cuenta Natural"
-                          : "Cuenta Jurídica",
+                          : "Cuenta Jurídica"
+                      } · ${data.receiver.holderName}`,
+                      copyVal: data.receiver.bankCode,
                     },
                     {
                       key: "phone",
                       label: "Teléfono",
-                      displayVal: data.receiver.phone,
+                      display: data.receiver.phone,
+                      sub: null,
                       copyVal: data.receiver.phone,
                     },
                     {
                       key: "dni",
                       label: "Cédula / RIF",
-                      displayVal: data.receiver.dni,
+                      display: data.receiver.dni,
+                      sub: null,
                       copyVal: data.receiver.dni.replace(/[^0-9]/g, ""),
-                    },
-                    {
-                      key: "holder",
-                      label: "Titular",
-                      displayVal: data.receiver.holderName,
-                      copyVal: data.receiver.holderName,
                     },
                   ].map((row) => (
                     <div
@@ -785,19 +699,17 @@ function PagoMovilHostedCheckoutContent() {
                       className="px-4 py-3 flex items-center justify-between gap-3"
                     >
                       <div className="min-w-0">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                        <div className="text-[11px] font-medium text-slate-500">
                           {row.label}
                         </div>
-                        <div className="flex items-center gap-2 flex-wrap mt-0.5">
-                          <span className="text-xs sm:text-sm font-bold text-white font-mono">
-                            {row.displayVal}
-                          </span>
-                          {row.tag && (
-                            <span className="px-2 py-0.5 rounded bg-white/[0.05] text-[10px] font-medium text-slate-300">
-                              {row.tag}
-                            </span>
-                          )}
+                        <div className="text-sm font-semibold text-[#0a2540] font-mono tabular-nums truncate">
+                          {row.display}
                         </div>
+                        {row.sub && (
+                          <div className="text-[11px] text-slate-500 truncate">
+                            {row.sub}
+                          </div>
+                        )}
                       </div>
 
                       <button
@@ -806,16 +718,16 @@ function PagoMovilHostedCheckoutContent() {
                           void copyField(row.key, row.copyVal, row.label)
                         }
                         aria-label={`Copiar ${row.label}`}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.1] text-[11px] font-semibold text-slate-300 hover:text-white transition-colors shrink-0"
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-white hover:bg-slate-100 border border-slate-200 text-[11px] font-semibold text-slate-700 shadow-2xs transition-colors shrink-0"
                       >
                         {copiedKey === row.key ? (
                           <>
-                            <Check className="w-3 h-3 text-emerald-400" />
-                            <span className="text-emerald-300">Copiado</span>
+                            <Check className="w-3 h-3 text-emerald-600" />
+                            <span className="text-emerald-700">Copiado</span>
                           </>
                         ) : (
                           <>
-                            <Copy className="w-3 h-3" />
+                            <Copy className="w-3 h-3 text-slate-400" />
                             <span>Copiar</span>
                           </>
                         )}
@@ -823,136 +735,148 @@ function PagoMovilHostedCheckoutContent() {
                     </div>
                   ))}
                 </div>
-              </section>
+              </div>
 
-              {/* Step 2: Verification Form */}
-              <section className="space-y-4 pt-5 border-t border-white/[0.07]">
-                <div className="flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-white text-slate-950 font-black text-[11px] inline-flex items-center justify-center">
-                    2
-                  </span>
-                  <h2 className="text-sm font-extrabold text-white">
-                    Ingresa tu número de referencia
+              {/* Component 2: Stripe Connected Payment Element Form */}
+              <form onSubmit={handleVerifySubmit} className="space-y-4">
+                <div className="space-y-2">
+                  <h2 className="text-sm font-bold text-[#0a2540]">
+                    Confirma tu transferencia
                   </h2>
-                </div>
 
-                <form onSubmit={handleVerifySubmit} className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label
-                      htmlFor="pm-reference"
-                      className="block text-xs font-semibold text-slate-300"
-                    >
-                      Últimos {data.settings.minReferenceDigits}+ dígitos de
-                      referencia bancaria
-                    </label>
-                    <input
-                      id="pm-reference"
-                      type="text"
-                      inputMode="numeric"
-                      required
-                      minLength={data.settings.minReferenceDigits}
-                      maxLength={32}
-                      value={referenceDigits}
-                      onChange={(e) =>
-                        setReferenceDigits(
-                          e.target.value.replace(/[^0-9A-Za-z]/g, "")
-                        )
-                      }
-                      placeholder="Ej. 123456"
-                      className="w-full rounded-xl bg-[#090b10] border border-white/[0.12] px-4 py-3 text-sm font-mono font-bold text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 focus:border-emerald-400/60 transition-all tabular-nums"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                    <div className="space-y-1.5">
+                  {/* Unified Hairline Connected Input Group */}
+                  <div className="rounded-xl border border-slate-300 bg-white overflow-hidden shadow-xs divide-y divide-slate-200 focus-within:border-[#635bff] focus-within:ring-2 focus-within:ring-[#635bff]/20 transition-all">
+                    <div className="px-3.5 py-2.5">
                       <label
-                        htmlFor="pm-bank"
-                        className="block text-xs font-semibold text-slate-300"
+                        htmlFor="pm-reference"
+                        className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-0.5"
                       >
-                        Banco emisor (opcional)
-                      </label>
-                      <select
-                        id="pm-bank"
-                        value={senderBankCode}
-                        onChange={(e) => setSenderBankCode(e.target.value)}
-                        className="w-full rounded-xl bg-[#090b10] border border-white/[0.12] px-3.5 py-2.5 text-xs font-medium text-white focus:outline-none focus:ring-2 focus:ring-emerald-400/35 focus:border-emerald-400/60 transition-all"
-                      >
-                        <option value="">Cualquier banco</option>
-                        {VENEZUELAN_BANKS.map((b) => (
-                          <option key={b.code} value={b.code}>
-                            {b.code} — {b.shortName}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label
-                        htmlFor="pm-phone"
-                        className="block text-xs font-semibold text-slate-300"
-                      >
-                        Teléfono emisor{" "}
-                        {data.settings.requireSenderPhone
-                          ? "(requerido)"
-                          : "(opcional)"}
+                        Número de referencia (últimos{" "}
+                        {data.settings.minReferenceDigits}+ dígitos)
                       </label>
                       <input
-                        id="pm-phone"
-                        type="tel"
-                        required={data.settings.requireSenderPhone}
-                        value={senderPhone}
-                        onChange={(e) => setSenderPhone(e.target.value)}
-                        placeholder="04121234567"
-                        className="w-full rounded-xl bg-[#090b10] border border-white/[0.12] px-3.5 py-2.5 text-xs font-mono text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-emerald-400/35 focus:border-emerald-400/60 transition-all"
+                        id="pm-reference"
+                        type="text"
+                        inputMode="numeric"
+                        required
+                        minLength={data.settings.minReferenceDigits}
+                        maxLength={32}
+                        value={referenceDigits}
+                        onChange={(e) =>
+                          setReferenceDigits(
+                            e.target.value.replace(/[^0-9A-Za-z]/g, "")
+                          )
+                        }
+                        placeholder="Ej. 123456"
+                        className="w-full bg-transparent text-sm font-mono font-semibold text-[#0a2540] placeholder-slate-400 focus:outline-none tabular-nums"
                       />
                     </div>
-                  </div>
 
-                  {/* Verification Feedback Banner */}
-                  {verifyFeedback && (
-                    <div
-                      className={`rounded-xl border px-4 py-3 text-xs leading-relaxed flex items-start gap-2.5 ${
-                        verifyFeedback.type === "waiting"
-                          ? "bg-sky-500/10 border-sky-500/25 text-sky-100"
-                          : verifyFeedback.type === "warning"
-                            ? "bg-amber-500/10 border-amber-500/30 text-amber-100"
-                            : "bg-rose-500/10 border-rose-500/30 text-rose-100"
-                      }`}
-                    >
-                      {verifyFeedback.type === "waiting" ? (
-                        <span className="mt-1.5 w-2 h-2 rounded-full bg-sky-400 animate-pulse shrink-0" />
-                      ) : (
-                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                      )}
-                      <span>{verifyFeedback.message}</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
+                      <div className="px-3.5 py-2.5">
+                        <label
+                          htmlFor="pm-bank"
+                          className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-0.5"
+                        >
+                          Banco de origen
+                        </label>
+                        <select
+                          id="pm-bank"
+                          value={senderBankCode}
+                          onChange={(e) => setSenderBankCode(e.target.value)}
+                          className="w-full bg-transparent text-xs font-medium text-[#0a2540] focus:outline-none"
+                        >
+                          <option value="">Cualquier banco</option>
+                          {VENEZUELAN_BANKS.map((b) => (
+                            <option key={b.code} value={b.code}>
+                              {b.code} · {b.shortName}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="px-3.5 py-2.5">
+                        <label
+                          htmlFor="pm-phone"
+                          className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-0.5"
+                        >
+                          Teléfono emisor{" "}
+                          {data.settings.requireSenderPhone
+                            ? "*"
+                            : "(opcional)"}
+                        </label>
+                        <input
+                          id="pm-phone"
+                          type="tel"
+                          required={data.settings.requireSenderPhone}
+                          value={senderPhone}
+                          onChange={(e) => setSenderPhone(e.target.value)}
+                          placeholder="04121234567"
+                          className="w-full bg-transparent text-xs font-mono font-medium text-[#0a2540] placeholder-slate-400 focus:outline-none"
+                        />
+                      </div>
                     </div>
-                  )}
+                  </div>
+                </div>
 
-                  <button
-                    type="submit"
-                    disabled={submitting || isRateExpired}
-                    className="w-full py-3.5 px-5 rounded-xl bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-black text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/15 transition-all disabled:opacity-45 disabled:cursor-not-allowed"
+                {/* Inline Stripe Feedback */}
+                {verifyFeedback && (
+                  <div
+                    className={`rounded-lg border px-3.5 py-2.5 text-xs leading-relaxed flex items-start gap-2.5 ${
+                      verifyFeedback.type === "waiting"
+                        ? "bg-sky-50 border-sky-200 text-sky-900"
+                        : verifyFeedback.type === "warning"
+                          ? "bg-amber-50 border-amber-200 text-amber-900"
+                          : "bg-rose-50 border-rose-200 text-rose-900"
+                    }`}
                   >
-                    {submitting ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>Validando referencia...</span>
-                      </>
+                    {verifyFeedback.type === "waiting" ? (
+                      <span className="mt-1.5 w-2 h-2 rounded-full bg-sky-600 animate-pulse shrink-0" />
                     ) : (
-                      <>
-                        <ShieldCheck className="w-4 h-4" />
-                        <span>
-                          {data.waitingBankConfirmation
-                            ? "Actualizar referencia bancaria"
-                            : "Confirmar Pago Móvil"}
-                        </span>
-                      </>
+                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                     )}
-                  </button>
-                </form>
+                    <span>{verifyFeedback.message}</span>
+                  </div>
+                )}
 
-                <StripeSecurityFooter label="Tu orden sigue guardada en Mis Órdenes si sales de esta pantalla" />
-              </section>
+                <button
+                  type="submit"
+                  disabled={submitting || isRateExpired}
+                  className="w-full py-3.5 px-5 rounded-xl bg-[#0a2540] hover:bg-[#163859] text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-sm transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
+                >
+                  {submitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Verificando pago...</span>
+                    </>
+                  ) : (
+                    <span>
+                      {data.waitingBankConfirmation
+                        ? `Actualizar referencia · Bs. ${formatBsNumber(data.amountDueBsCents)}`
+                        : `Confirmar Pago Móvil · Bs. ${formatBsNumber(data.amountDueBsCents)}`}
+                    </span>
+                  )}
+                </button>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 pt-1">
+                  <span className="inline-flex items-center gap-1.5">
+                    <Lock className="w-3 h-3 text-slate-400" />
+                    <span>Verificación automática segura</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        data.watchdog.online ? "bg-emerald-500" : "bg-amber-400"
+                      }`}
+                    />
+                    <span>
+                      {data.watchdog.online
+                        ? "Sensor Bancamiga en línea"
+                        : "Confirmación pendiente"}
+                    </span>
+                  </span>
+                </div>
+              </form>
             </div>
           )}
         </main>
@@ -965,8 +889,8 @@ export default function PagoMovilHostedCheckoutPage() {
   return (
     <Suspense
       fallback={
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-24 text-center text-xs text-slate-400">
-          Cargando ventana de Pago Móvil...
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 py-24 text-center text-xs text-slate-400">
+          Cargando Pago Móvil...
         </div>
       }
     >
