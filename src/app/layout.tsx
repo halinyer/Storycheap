@@ -1,4 +1,4 @@
-import React from "react";
+import React, { Suspense } from "react";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "sonner";
@@ -35,7 +35,13 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen flex flex-col bg-[#08090e] text-[#f5f6fa]`}
       >
         <StoreProvider>
-          <Navbar />
+          <Suspense
+            fallback={
+              <header className="sticky top-0 z-40 w-full h-[104px] border-b border-white/[0.07] bg-[#0b0d14]/95 backdrop-blur-2xl" />
+            }
+          >
+            <Navbar />
+          </Suspense>
           <CartDrawer />
           <main className="flex-1">{children}</main>
           <Footer />
