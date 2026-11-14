@@ -1,12 +1,15 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useStore } from "@/context/store-context";
 import { formatCents } from "@/lib/catalog-seed";
+import { resolveBrandTheme } from "@/lib/brand-theme";
 import type { CreditLedgerEntryDTO, OrderDTO } from "@/types";
 import {
   ArrowRight,
+  ExternalLink,
   KeyRound,
   Lock,
   Receipt,
@@ -221,42 +224,58 @@ export default function AccountPage() {
               </Link>
             </div>
           ) : (
-            orders.map((o) => (
-              <Link
-                key={o.id}
-                href={`/order/${o.id}`}
-                className="block rounded-2xl apple-glass hover:border-white/25 p-5 transition-all"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-4">
-                  <div>
-                    <div className="text-xs font-mono text-slate-400">
-                      {o.orderNumber} • {new Date(o.createdAt).toLocaleString()}
-                    </div>
-                    <div className="text-sm font-black text-white mt-1">
-                      {o.items
-                        .map((i) => `${i.productName} (${i.denominationLabel}) ×${i.quantity}`)
-                        .join(", ")}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-4">
-                    <span
-                      className={`px-3 py-1 rounded-xl border text-xs font-bold ${
-                        ORDER_STATUS_BADGES[o.status]?.className ??
-                        "bg-white/[0.06] border-white/10 text-sky-300"
-                      }`}
-                    >
-                      {ORDER_STATUS_BADGES[o.status]?.label ?? o.status}
-                    </span>
-                    <div className="text-right">
-                      <div className="text-sm font-black text-white">
-                        {formatCents(o.subtotalCents)} USD
+            orders.map((o) => {
+              const firstItem = o.items[0];
+              const theme = resolveBrandTheme(
+                firstItem?.productName ?? "Gift Card",
+                firstItem?.productSlug
+              );
+              return (
+                <Link
+                  key={o.id}
+                  href={`/order/${o.id}`}
+                  className="group block rounded-2xl bg-[#11131c] border border-white/10 hover:border-white/25 p-4 sm:p-5 transition-all shadow-lg"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div className="flex items-center gap-4 min-w-0">
+                      <div className="w-12 h-16 rounded-xl bg-slate-950 border border-white/10 p-1.5 flex items-center justify-center shrink-0">
+                        <img
+                          src={theme.imageUrl}
+                          alt={firstItem?.productName ?? "Gift Card"}
+                          className="max-h-full max-w-full object-contain rounded group-hover:scale-105 transition-transform"
+                        />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-mono text-slate-400">
+                          #{o.orderNumber} • {new Date(o.createdAt).toLocaleString()}
+                        </div>
+                        <div className="text-sm sm:text-base font-black text-white mt-0.5 truncate group-hover:text-sky-300 transition-colors">
+                          {o.items
+                            .map((i) => `${i.productName} (${i.denominationLabel}) ×${i.quantity}`)
+                            .join(", ")}
+                        </div>
                       </div>
                     </div>
-                    <ArrowRight className="w-4 h-4 text-slate-400" />
+                    <div className="flex items-center gap-4">
+                      <span
+                        className={`px-3 py-1 rounded-full border text-xs font-bold ${
+                          ORDER_STATUS_BADGES[o.status]?.className ??
+                          "bg-white/[0.06] border-white/10 text-sky-300"
+                        }`}
+                      >
+                        {ORDER_STATUS_BADGES[o.status]?.label ?? o.status}
+                      </span>
+                      <div className="text-right">
+                        <div className="text-sm font-black text-white">
+                          {formatCents(o.subtotalCents)} USD
+                        </div>
+                      </div>
+                      <ArrowRight className="w-4 h-4 text-slate-400 group-hover:translate-x-0.5 transition-transform" />
+                    </div>
                   </div>
-                </div>
-              </Link>
-            ))
+                </Link>
+              );
+            })
           )}
         </div>
       ) : tab === "codes" ? (
@@ -266,34 +285,63 @@ export default function AccountPage() {
               Aún no tienes códigos entregados en tu bóveda.
             </div>
           ) : (
-            allFulfillments.map((f) => (
-              <div
-                key={f.id}
-                className="rounded-2xl apple-glass p-5 flex items-center justify-between gap-4"
-              >
-                <div>
-                  <span className="text-[10px] font-bold uppercase text-slate-400">
-                    Orden {f.orderNumber} • {f.region}
-                  </span>
-                  <h3 className="text-sm font-black text-white mt-0.5">
-                    {f.productName}
-                  </h3>
-                  <p className="text-xs text-sky-400 font-bold">
-                    {f.denominationLabel}
-                  </p>
-                  <p className="text-[11px] text-slate-400 font-mono mt-2">
-                    Terminación: ••••-{f.codeLast4}
-                  </p>
-                </div>
-
-                <Link
-                  href={`/order/${f.orderId}`}
-                  className="px-4 py-2.5 rounded-xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs shrink-0"
+            allFulfillments.map((f) => {
+              const theme = resolveBrandTheme(f.productName);
+              return (
+                <div
+                  key={f.id}
+                  className="relative overflow-hidden rounded-[24px] bg-[#11131c] border border-white/10 hover:border-white/25 p-5 flex items-center justify-between gap-4 shadow-xl transition-all"
                 >
-                  Abrir / Revelar
-                </Link>
-              </div>
-            ))
+                  <div
+                    className="absolute -top-16 -left-16 w-40 h-40 rounded-full opacity-20 blur-3xl pointer-events-none"
+                    style={{ background: theme.accentHex }}
+                  />
+                  <div className="relative z-10 flex items-center gap-4 min-w-0">
+                    <div className="w-14 h-20 rounded-xl bg-slate-950 border border-white/15 p-1.5 flex items-center justify-center shrink-0 shadow-md">
+                      <img
+                        src={theme.imageUrl}
+                        alt={f.productName}
+                        className="max-h-full max-w-full object-contain rounded"
+                      />
+                    </div>
+                    <div className="min-w-0">
+                      <span className="text-[10px] font-bold uppercase text-slate-400 block">
+                        #{f.orderNumber} • Región {f.region}
+                      </span>
+                      <h3 className="text-sm sm:text-base font-black text-white mt-0.5 truncate">
+                        {f.productName}
+                      </h3>
+                      <p className="text-xs text-emerald-400 font-extrabold">
+                        {f.denominationLabel}
+                      </p>
+                      <p className="text-[11px] text-slate-400 font-mono mt-1.5">
+                        PIN: •••• •••• {f.codeLast4}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="relative z-10 flex flex-col items-end gap-2 shrink-0">
+                    <Link
+                      href={`/order/${f.orderId}`}
+                      className="px-4 py-2.5 rounded-full bg-white hover:bg-slate-200 text-slate-950 font-black text-xs transition-colors"
+                    >
+                      Ver código
+                    </Link>
+                    {theme.redeemUrl && (
+                      <a
+                        href={theme.redeemUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-400 hover:text-white transition-colors"
+                      >
+                        <span>{theme.brandName}</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
+                  </div>
+                </div>
+              );
+            })
           )}
         </div>
       ) : (
