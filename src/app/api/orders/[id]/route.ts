@@ -100,7 +100,7 @@ export async function GET(
   if (order.status === "FULFILLING" || order.status === "PARTIAL") {
     const now = Date.now();
     const prev = lastSupplierPollAt.get(order.id) ?? 0;
-    if (now - prev >= 4_000) {
+    if (now - prev >= 1_500) {
       lastSupplierPollAt.set(order.id, now);
       try {
         const pendingSuppliers = await listPendingSupplierOrdersForOrder(

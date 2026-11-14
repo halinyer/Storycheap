@@ -13,6 +13,7 @@ import {
   ExternalLink,
   Eye,
   KeyRound,
+  Loader2,
   RefreshCw,
   ShieldCheck,
   Sparkles,
@@ -141,32 +142,54 @@ function OrderDetailInner() {
     if (!order || !POLLABLE_STATUSES.includes(order.status)) return;
     const id = setInterval(() => {
       void fetchOrder();
-    }, 3000);
+    }, 2500);
     return () => clearInterval(id);
   }, [order, fetchOrder]);
 
-  const handleRevealCodes = async () => {
-    setRevealing(true);
-    try {
-      const res = await fetch(`/api/orders/${orderId}/reveal`, {
-        method: "POST",
-      });
-      const data = (await res.json()) as {
-        error?: string;
-        codes?: RevealedCodeDTO[];
-      };
-      if (!res.ok || !data.codes) {
-        throw new Error(data.error ?? "No se pudieron revelar los códigos.");
+  const handleRevealCodes = useCallback(
+    async (silent = false) => {
+      setRevealing(true);
+      try {
+        const res = await fetch(`/api/orders/${orderId}/reveal`, {
+          method: "POST",
+        });
+        const data = (await res.json()) as {
+          error?: string;
+          codes?: RevealedCodeDTO[];
+        };
+        if (!res.ok || !data.codes) {
+          if (!silent) {
+            throw new Error(data.error ?? "No se pudieron revelar los códigos.");
+          }
+          return;
+        }
+        setRevealedCodes(data.codes);
+        if (!silent) {
+          toast.success("Códigos descifrados desde tu bóveda segura");
+        }
+      } catch (err) {
+        if (!silent) {
+          toast.error(err instanceof Error ? err.message : "Error al revelar");
+        }
+      } finally {
+        setRevealing(false);
       }
-      setRevealedCodes(data.codes);
-      void fetchOrder();
-      toast.success("Códigos descifrados desde tu bóveda segura");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Error al revelar");
-    } finally {
-      setRevealing(false);
+    },
+    [orderId]
+  );
+
+  // Auto-reveal codes once as soon as the order is DELIVERED or PARTIAL
+  useEffect(() => {
+    if (
+      order &&
+      (order.status === "DELIVERED" || order.status === "PARTIAL") &&
+      order.fulfillments.length > 0 &&
+      !revealedCodes &&
+      !revealing
+    ) {
+      void handleRevealCodes(true);
     }
-  };
+  }, [order, revealedCodes, revealing, handleRevealCodes]);
 
   const handleSimulateSandboxPayment = async (
     outcome: "completed" | "underpaid" | "overpaid" | "expired"
@@ -310,30 +333,62 @@ function OrderDetailInner() {
             onClick={() => void fetchOrder()}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.1] border border-white/10 text-xs font-bold text-slate-200"
           >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>Actualizar</span>
+            <RefreshCw className={`w-3.5 h-3.5 ${POLLABLE_STATUSES.includes(order.status) ? "animate-spin text-sky-400" : ""}`} />
+            <span>{POLLABLE_STATUSES.includes(order.status) ? "Sincronizando en vivo..." : "Actualizar"}</span>
           </button>
         </div>
+
+        {/* Live Animated Processing Banner while waiting for payment or code */}
+        {(order.status === "PAID" || order.status === "FULFILLING") && (
+          <div className="rounded-2xl bg-sky-500/10 border border-sky-400/30 p-5 flex items-center gap-4">
+            <div className="w-11 h-11 rounded-2xl bg-sky-500/20 border border-sky-400/40 flex items-center justify-center shrink-0">
+              <Loader2 className="w-5 h-5 text-sky-300 animate-spin" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-black text-white">
+                  Pago confirmado • Despachando tu código digital...
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-400/15 text-[10px] font-bold text-sky-300 uppercase tracking-wider">
+                  En curso
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Estamos obteniendo tu PIN en tiempo real y aparecerá en esta misma pantalla automáticamente en unos segundos (sin necesidad de recargar).
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Calm Live Stepper */}
         {order.status !== "EXPIRED" && order.status !== "CANCELLED" && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
             {steps.map((s) => {
               const reached = stepIndex >= s.num;
+              const isCurrentWaitStep =
+                POLLABLE_STATUSES.includes(order.status) &&
+                ((order.status === "CREATED" || order.status === "PENDING_PAYMENT")
+                  ? s.num === 1
+                  : s.num === 3);
+
               return (
                 <div
                   key={s.num}
                   className={`rounded-2xl p-3.5 border transition-all ${
-                    reached
-                      ? "bg-emerald-500/10 border-emerald-500/30 text-white"
-                      : "bg-white/[0.02] border-white/[0.06] text-slate-500"
+                    isCurrentWaitStep
+                      ? "bg-sky-500/15 border-sky-400/40 text-white shadow-[0_0_20px_-6px_rgba(56,189,248,0.35)]"
+                      : reached
+                        ? "bg-emerald-500/10 border-emerald-500/30 text-white"
+                        : "bg-white/[0.02] border-white/[0.06] text-slate-500"
                   }`}
                 >
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-[10px] font-black uppercase">
                       Paso {s.num}
                     </span>
-                    {reached ? (
+                    {isCurrentWaitStep ? (
+                      <Loader2 className="w-4 h-4 text-sky-300 animate-spin" />
+                    ) : reached ? (
                       <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                     ) : (
                       <Clock className="w-4 h-4 text-slate-600" />
@@ -545,10 +600,12 @@ function OrderDetailInner() {
               </div>
               <div>
                 <h2 className="text-lg font-black text-white">
-                  Tus Códigos Digitales ({order.fulfillments.length})
+                  ¡Tu código está listo! ({order.fulfillments.length})
                 </h2>
-                <p className="text-xs text-slate-400">
-                  Cifrados en servidor. Presiona revelar para descifrarlos en pantalla.
+                <p className="text-xs text-slate-300">
+                  {revealedCodes
+                    ? "Copia tu código digital abajo y canjéalo directamente en la plataforma."
+                    : "Descifrando tu código de forma segura..."}
                 </p>
               </div>
             </div>
@@ -560,8 +617,12 @@ function OrderDetailInner() {
                 onClick={() => void handleRevealCodes()}
                 className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs shadow-lg"
               >
-                <Eye className="w-4 h-4" />
-                <span>{revealing ? "Descifrando..." : "Revelar códigos"}</span>
+                {revealing ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Eye className="w-4 h-4" />
+                )}
+                <span>{revealing ? "Cargando código..." : "Mostrar código"}</span>
               </button>
             )}
           </div>

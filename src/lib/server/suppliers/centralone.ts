@@ -312,12 +312,19 @@ export async function getCentralOneOrderCodes(
     Record<string, unknown> | Array<Record<string, unknown>>
   >(`/orders/${encodeURIComponent(externalOrderId)}/codes`);
 
-  const rawEntries: unknown[] = Array.isArray(data)
-    ? data
-    : Array.isArray(data.codes)
-      ? data.codes
-      : Array.isArray(data.items)
-        ? (data.items as Array<Record<string, unknown>>).flatMap((line) =>
+  const root =
+    !Array.isArray(data) &&
+    data.order &&
+    typeof data.order === "object"
+      ? (data.order as Record<string, unknown>)
+      : data;
+
+  const rawEntries: unknown[] = Array.isArray(root)
+    ? root
+    : Array.isArray(root.codes)
+      ? root.codes
+      : Array.isArray(root.items)
+        ? (root.items as Array<Record<string, unknown>>).flatMap((line) =>
             Array.isArray(line.codes) ? line.codes : [line]
           )
         : [];

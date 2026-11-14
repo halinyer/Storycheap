@@ -5,7 +5,8 @@ import { getSiteUrl, isResendConfigured } from "./env";
 function getFromEmail(): string {
   return (
     process.env.RESEND_FROM_EMAIL?.trim() ||
-    "StoryCheap Pedidos <pedidos@storycheap.com>"
+    process.env.EMAIL_FROM?.trim() ||
+    "StoryCheap <noreply@storycheap.com>"
   );
 }
 

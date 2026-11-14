@@ -2407,7 +2407,7 @@ export async function listPendingSupplierOrdersForOrder(
     .select("*")
     .eq("order_id", orderId)
     .eq("provider", provider)
-    .in("status", ["pending", "confirmed", "processing"])
+    .in("status", ["pending", "confirmed", "processing", "completed"])
     .order("created_at", { ascending: true });
 
   if (error) throw error;
