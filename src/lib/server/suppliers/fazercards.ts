@@ -74,6 +74,7 @@ export interface FazerCardsOrderResource {
 }
 
 let cachedBalanceCents: { value: number | null; expiresAt: number } | null = null;
+let cachedCategories: { items: FazerCardsGiftCardCategory[]; expiresAt: number } | null = null;
 
 export function invalidateFazerCardsBalanceCache() {
   cachedBalanceCents = null;
@@ -239,13 +240,23 @@ export async function getFazerCardsCatalog(query?: string): Promise<CentralOneCa
     return [];
   }
 
-  const allCategories: FazerCardsGiftCardCategory[] = [];
-  let cursor: string | undefined = undefined;
-  for (let page = 0; page < 4; page++) {
-    const res = await getFazerCardsCategories({ limit: 100, cursor });
-    allCategories.push(...res.items);
-    if (!res.hasMore || !res.nextCursor) break;
-    cursor = res.nextCursor;
+  let allCategories: FazerCardsGiftCardCategory[] = [];
+  if (cachedCategories && Date.now() < cachedCategories.expiresAt) {
+    allCategories = cachedCategories.items;
+  } else {
+    let cursor: string | undefined = undefined;
+    for (let page = 0; page < 10; page++) {
+      const res = await getFazerCardsCategories({ limit: 100, cursor });
+      allCategories.push(...res.items);
+      if (!res.hasMore || !res.nextCursor) break;
+      cursor = res.nextCursor;
+    }
+    if (allCategories.length > 0) {
+      cachedCategories = {
+        items: allCategories,
+        expiresAt: Date.now() + 10 * 60_000,
+      };
+    }
   }
 
   const q = (query || "").trim().toLowerCase();
