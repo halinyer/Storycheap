@@ -96,6 +96,27 @@ export function extractZenoTransactionsFromPayload(
   return [];
 }
 
+export function extractZenoStoreIdFromPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const obj = payload as Record<string, unknown>;
+  const dataObj =
+    obj.data && typeof obj.data === "object"
+      ? (obj.data as Record<string, unknown>)
+      : null;
+  const liveObj =
+    obj.liveSession && typeof obj.liveSession === "object"
+      ? (obj.liveSession as Record<string, unknown>)
+      : null;
+
+  const candidates = [dataObj?.storeId, liveObj?.storeId, obj.storeId];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim().length > 0) {
+      return c.trim();
+    }
+  }
+  return null;
+}
+
 function mapCheckoutDto(
   dto: CheckoutResponseDto,
   isSandbox = false

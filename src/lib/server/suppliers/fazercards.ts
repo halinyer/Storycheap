@@ -80,7 +80,7 @@ export function invalidateFazerCardsBalanceCache() {
   cachedBalanceCents = null;
 }
 
-async function fazerRequest<T = any>(
+async function fazerRequest<T = Record<string, unknown>>(
   path: string,
   options: {
     method?: "GET" | "POST";
@@ -112,25 +112,30 @@ async function fazerRequest<T = any>(
     headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
     cache: "no-store",
+    signal: AbortSignal.timeout(8000),
   });
 
   const text = await res.text();
-  let json: any = null;
+  let json: Record<string, unknown> = {};
   try {
-    json = text ? JSON.parse(text) : {};
+    json = text ? (JSON.parse(text) as Record<string, unknown>) : {};
   } catch {
     throw new Error(`FazerCards non-JSON response (${res.status}): ${text.slice(0, 180)}`);
   }
 
-  if (!res.ok || json?.ok === false) {
+  if (!res.ok || json.ok === false) {
+    const errObj =
+      json.error && typeof json.error === "object"
+        ? (json.error as { message?: unknown })
+        : null;
     const errMsg =
-      json?.error?.message ||
-      json?.message ||
+      (typeof errObj?.message === "string" && errObj.message) ||
+      (typeof json.message === "string" && json.message) ||
       `FazerCards API error (${res.status})`;
     throw new Error(errMsg);
   }
 
-  return json as T;
+  return json as unknown as T;
 }
 
 export async function getFazerCardsBalance(): Promise<SupplierBalanceStatus> {
@@ -163,14 +168,17 @@ export async function getFazerCardsBalance(): Promise<SupplierBalanceStatus> {
       currency: data.currency || "USD",
       healthy: true,
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     return {
       configured: true,
       sandbox: false,
       balanceCents: null,
       currency: "USD",
       healthy: false,
-      errorMessage: err?.message || "Error al consultar GET /balance en FazerCards",
+      errorMessage:
+        err instanceof Error
+          ? err.message
+          : "Error al consultar GET /balance en FazerCards",
     };
   }
 }
@@ -380,7 +388,7 @@ export async function createFazerCardsGiftCardOrder(input: {
 
   invalidateFazerCardsBalanceCache();
 
-  const order: FazerCardsOrderResource = (data?.order ?? (data as any)) as FazerCardsOrderResource;
+  const order = (data?.order ?? data) as unknown as FazerCardsOrderResource;
   if (!order?.id) {
     throw new Error("La respuesta de FazerCards no incluyó un ID de orden.");
   }
@@ -421,7 +429,7 @@ export async function getFazerCardsOrder(externalOrRawOrderId: string): Promise<
     `/orders/${encodeURIComponent(rawOrderId)}`
   );
 
-  const order: FazerCardsOrderResource = (data?.order ?? (data as any)) as FazerCardsOrderResource;
+  const order = (data?.order ?? data) as unknown as FazerCardsOrderResource;
   return {
     externalOrderId: `${FAZERCARDS_PRODUCT_PREFIX}${order?.id || rawOrderId}`,
     rawOrderId: order?.id || rawOrderId,
@@ -430,6 +438,92 @@ export async function getFazerCardsOrder(externalOrRawOrderId: string): Promise<
     failReason: order?.fail_reason ?? null,
     rawResponse: data as Record<string, unknown>,
   };
+}
+
+export interface FazerCardsApiOrderSummary {
+  id: string;
+  externalOrderId: string;
+  title: string;
+  quantity: number;
+  totalUsdCents: number;
+  status: string;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface SupplierOrdersReport<T> {
+  configured: boolean;
+  healthy: boolean;
+  errorMessage?: string;
+  orders: T[];
+  totalSpentCents: number;
+  completedCount: number;
+}
+
+export async function listFazerCardsOrders(
+  limit = 50
+): Promise<SupplierOrdersReport<FazerCardsApiOrderSummary>> {
+  if (!isFazerCardsConfigured()) {
+    return {
+      configured: false,
+      healthy: false,
+      errorMessage: "FAZERCARDS_API_KEY no configurada en el servidor.",
+      orders: [],
+      totalSpentCents: 0,
+      completedCount: 0,
+    };
+  }
+
+  try {
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+    const data = await fazerRequest<{
+      ok?: boolean;
+      items?: Array<Record<string, unknown>>;
+    }>(`/orders?limit=${safeLimit}`);
+
+    const rawItems = Array.isArray(data.items) ? data.items : [];
+    const orders: FazerCardsApiOrderSummary[] = rawItems.map((it) => {
+      const id = String(it.id ?? "").trim();
+      const totalCents =
+        parseCentralOneDecimalToCents(it.total_usd as string | number | undefined) ?? 0;
+      const offer = String(it.offer_name ?? "").trim();
+      const category = String(it.category_name ?? "").trim();
+      const fallbackTitle = [category, offer].filter(Boolean).join(" · ") || id;
+      return {
+        id,
+        externalOrderId: id.startsWith(FAZERCARDS_PRODUCT_PREFIX)
+          ? id
+          : `${FAZERCARDS_PRODUCT_PREFIX}${id}`,
+        title: String(it.title ?? fallbackTitle),
+        quantity: Number(it.quantity ?? 1) || 1,
+        totalUsdCents: totalCents,
+        status: normalizeFazerStatus(String(it.status ?? "PENDING")),
+        createdAt: String(it.created_at ?? ""),
+        completedAt: it.completed_at ? String(it.completed_at) : null,
+      };
+    });
+
+    const completed = orders.filter((o) => o.status === "COMPLETED");
+    const totalSpentCents = completed.reduce((sum, o) => sum + o.totalUsdCents, 0);
+
+    return {
+      configured: true,
+      healthy: true,
+      orders,
+      totalSpentCents,
+      completedCount: completed.length,
+    };
+  } catch (err) {
+    return {
+      configured: true,
+      healthy: false,
+      errorMessage:
+        err instanceof Error ? err.message : "Error consultando GET /orders en FazerCards",
+      orders: [],
+      totalSpentCents: 0,
+      completedCount: 0,
+    };
+  }
 }
 
 export function verifyFazerCardsWebhookSignature(

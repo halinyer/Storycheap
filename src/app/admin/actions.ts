@@ -11,6 +11,8 @@ import { requireAdminUser } from "@/lib/server/auth";
 import {
   adminRefundOrderToCredit,
   fulfillOrder,
+  syncAllPendingSupplierOrders,
+  syncSupplierOrdersForOrder,
 } from "@/lib/server/fulfillment";
 import {
   deleteBotDevice,
@@ -29,6 +31,7 @@ import {
   createVariantAdmin,
   deleteProductAdmin,
   deleteVariantAdmin,
+  getOrderById,
   insertInventoryBatch,
   listCatalog,
   markOrderAttentionFlag,
@@ -160,7 +163,21 @@ export async function voidInventoryCodeAction(inventoryId: string) {
 
 export async function retryOrderFulfillmentAction(orderId: string) {
   const adminUser = await requireAdminUser();
-  const updated = await fulfillOrder(orderId);
+  const syncResult = await syncSupplierOrdersForOrder(orderId).catch(() => ({
+    checked: 0,
+    addedCodes: 0,
+  }));
+  const current = await getOrderById(orderId);
+  if (!current) {
+    throw new Error("Orden no encontrada.");
+  }
+
+  const updated =
+    current.status === "PAID" ||
+    current.status === "PARTIAL" ||
+    current.status === "MANUAL_REVIEW"
+      ? await fulfillOrder(orderId)
+      : current;
 
   await appendAuditLog({
     actorId: adminUser.id,
@@ -168,7 +185,11 @@ export async function retryOrderFulfillmentAction(orderId: string) {
     action: "order.admin_retry_fulfill",
     targetType: "order",
     targetId: orderId,
-    metadata: { resultingStatus: updated.status },
+    metadata: {
+      resultingStatus: updated.status,
+      syncedSupplierOrders: syncResult.checked,
+      addedCodesFromSync: syncResult.addedCodes,
+    },
   });
 
   revalidatePath("/admin");
@@ -364,18 +385,25 @@ export async function toggleProviderConfigAction(input: {
 export async function runReconcileCronAction() {
   const adminUser = await requireAdminUser();
   const res = await releaseExpiredReservations();
+  const supplierSync = await syncAllPendingSupplierOrders().catch((err) => ({
+    checked: 0,
+    addedCodes: 0,
+    errors: 1,
+    error: err instanceof Error ? err.message : "Error syncing supplier orders",
+  }));
+  const combined = { ...res, supplierSync };
   await appendAuditLog({
     actorId: adminUser.id,
     actorRole: adminUser.role,
     action: "system.manual_reconcile",
     targetType: "system",
     targetId: "reconcile",
-    metadata: res,
+    metadata: combined,
   });
   revalidatePath("/admin");
   revalidatePath("/admin/inventory");
   revalidatePath("/admin/orders");
-  return res;
+  return combined;
 }
 
 export async function fetchCentralOneCatalogAdminAction(): Promise<CentralOneCatalogItem[]> {

@@ -34,7 +34,10 @@ import {
 import { canTransitionOrder } from "./state-machine";
 import { getSupabaseAdmin } from "./supabase-admin";
 import type { ZenoCheckoutTransaction } from "./payments/types";
-import { extractZenoTransactionsFromPayload } from "./payments/zenobank";
+import {
+  extractZenoStoreIdFromPayload,
+  extractZenoTransactionsFromPayload,
+} from "./payments/zenobank";
 import {
   computeCentralOneUnitCapacity,
   getCachedCentralOneBalanceCents,
@@ -2568,6 +2571,7 @@ export interface ZenoPaymentProofDTO {
   gatewayCheckoutId: string;
   eventType: string;
   processedAt: string;
+  storeId?: string | null;
   transactions: ZenoCheckoutTransaction[];
 }
 
@@ -2581,14 +2585,20 @@ export async function listZenoPaymentProofsAdmin(): Promise<
     for (const w of getSandboxState().webhookEvents) {
       if (w.gateway !== "zenobank" || !w.orderId) continue;
       const txs = extractZenoTransactionsFromPayload(w.payload);
+      const storeId = extractZenoStoreIdFromPayload(w.payload);
       const prev = byOrder[w.orderId];
-      if (!prev || (prev.transactions.length === 0 && txs.length > 0)) {
+      if (
+        !prev ||
+        (prev.transactions.length === 0 && txs.length > 0) ||
+        (!prev.storeId && storeId)
+      ) {
         byOrder[w.orderId] = {
           orderId: w.orderId,
           gatewayCheckoutId: w.gatewayCheckoutId ?? "",
           eventType: w.eventType,
           processedAt: w.processedAt,
-          transactions: txs,
+          storeId: storeId ?? prev?.storeId ?? null,
+          transactions: txs.length > 0 ? txs : prev?.transactions ?? [],
         };
       }
     }
@@ -2608,14 +2618,20 @@ export async function listZenoPaymentProofsAdmin(): Promise<
     const orderId = r.order_id as string | null;
     if (!orderId) continue;
     const txs = extractZenoTransactionsFromPayload(r.payload);
+    const storeId = extractZenoStoreIdFromPayload(r.payload);
     const prev = byOrder[orderId];
-    if (!prev || (prev.transactions.length === 0 && txs.length > 0)) {
+    if (
+      !prev ||
+      (prev.transactions.length === 0 && txs.length > 0) ||
+      (!prev.storeId && storeId)
+    ) {
       byOrder[orderId] = {
         orderId,
         gatewayCheckoutId: (r.gateway_checkout_id as string | null) ?? "",
         eventType: (r.event_type as string) ?? "",
         processedAt: (r.processed_at as string) ?? "",
-        transactions: txs,
+        storeId: storeId ?? prev?.storeId ?? null,
+        transactions: txs.length > 0 ? txs : prev?.transactions ?? [],
       };
     }
   }
@@ -2640,7 +2656,11 @@ export async function getZenoPaymentProofForOrder(
     .limit(10);
   if (error || !data || data.length === 0) return null;
 
+  let detectedStoreId: string | null = null;
   for (const r of data) {
+    if (!detectedStoreId) {
+      detectedStoreId = extractZenoStoreIdFromPayload(r.payload);
+    }
     const txs = extractZenoTransactionsFromPayload(r.payload);
     if (txs.length > 0) {
       return {
@@ -2648,6 +2668,7 @@ export async function getZenoPaymentProofForOrder(
         gatewayCheckoutId: (r.gateway_checkout_id as string | null) ?? "",
         eventType: (r.event_type as string) ?? "",
         processedAt: (r.processed_at as string) ?? "",
+        storeId: detectedStoreId,
         transactions: txs,
       };
     }
@@ -2658,6 +2679,7 @@ export async function getZenoPaymentProofForOrder(
     gatewayCheckoutId: (latest.gateway_checkout_id as string | null) ?? "",
     eventType: (latest.event_type as string) ?? "",
     processedAt: (latest.processed_at as string) ?? "",
+    storeId: detectedStoreId,
     transactions: [],
   };
 }
@@ -2812,17 +2834,19 @@ export async function upsertSupplierOrder(params: {
 }
 
 export async function getSupplierOrderByExternalId(
-  provider: string,
+  provider: string | string[],
   externalOrderId: string
 ): Promise<SupplierOrderRecord | null> {
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") return null;
 
+  const providers = Array.isArray(provider) ? provider : [provider];
   const { data, error } = await ctx.admin
     .from("supplier_orders")
     .select("*")
-    .eq("provider", provider)
+    .in("provider", providers)
     .eq("external_order_id", externalOrderId)
+    .limit(1)
     .maybeSingle();
 
   if (error) throw error;
@@ -2830,16 +2854,17 @@ export async function getSupplierOrderByExternalId(
 }
 
 export async function listPendingSupplierOrders(
-  provider: string,
+  provider: string | string[],
   limit = 25
 ): Promise<SupplierOrderRecord[]> {
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") return [];
 
+  const providers = Array.isArray(provider) ? provider : [provider];
   const { data, error } = await ctx.admin
     .from("supplier_orders")
     .select("*")
-    .eq("provider", provider)
+    .in("provider", providers)
     .in("status", ["pending", "confirmed", "processing"])
     .order("created_at", { ascending: true })
     .limit(limit);
@@ -2850,21 +2875,119 @@ export async function listPendingSupplierOrders(
 
 export async function listPendingSupplierOrdersForOrder(
   orderId: string,
-  provider = "centralone"
+  provider: string | string[] = ["centralone", "fazercards"]
 ): Promise<SupplierOrderRecord[]> {
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") return [];
 
+  const providers = Array.isArray(provider) ? provider : [provider];
   const { data, error } = await ctx.admin
     .from("supplier_orders")
     .select("*")
     .eq("order_id", orderId)
-    .eq("provider", provider)
-    .in("status", ["pending", "confirmed", "processing", "completed"])
+    .in("provider", providers)
+    .in("status", [
+      "pending",
+      "confirmed",
+      "processing",
+      "completed",
+      "delivered",
+      "partially_delivered",
+      "partially_completed",
+    ])
     .order("created_at", { ascending: true });
 
   if (error) throw error;
   return (data ?? []).map((r) => mapSupplierOrderRow(r as Record<string, unknown>));
+}
+
+export async function listSupplierProvidersByOrderAdmin(): Promise<
+  Record<string, Array<"fazercards" | "centralone">>
+> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") return {};
+
+  const { data, error } = await ctx.admin
+    .from("supplier_orders")
+    .select("order_id, provider, external_order_id");
+
+  if (error) throw error;
+
+  const grouped: Record<string, Set<"fazercards" | "centralone">> = {};
+  for (const row of data ?? []) {
+    const rec = row as Record<string, unknown>;
+    const orderId = typeof rec.order_id === "string" ? rec.order_id : "";
+    const rawProvider = rec.provider;
+    const externalOrderId =
+      typeof rec.external_order_id === "string" ? rec.external_order_id : null;
+    const effectiveProvider = isFazerCardsProductId(externalOrderId)
+      ? "fazercards"
+      : rawProvider;
+    if (
+      !orderId ||
+      (effectiveProvider !== "fazercards" && effectiveProvider !== "centralone")
+    ) {
+      continue;
+    }
+    if (!grouped[orderId]) grouped[orderId] = new Set();
+    grouped[orderId].add(effectiveProvider);
+  }
+
+  const result: Record<string, Array<"fazercards" | "centralone">> = {};
+  for (const [orderId, set] of Object.entries(grouped)) {
+    result[orderId] = Array.from(set);
+  }
+  return result;
+}
+
+export async function listSupplierItemCostsAdmin(): Promise<Record<string, number>> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") return {};
+
+  const { data, error } = await ctx.admin
+    .from("supplier_orders")
+    .select("order_item_id, supplier_unit_cost_cents, status")
+    .not("supplier_unit_cost_cents", "is", null)
+    .not("status", "in", "(failed,cancelled)");
+
+  if (error || !data) return {};
+
+  const byItem: Record<string, number> = {};
+  for (const row of data) {
+    const itemId = row.order_item_id as string | null;
+    const cost = row.supplier_unit_cost_cents as number | null;
+    if (itemId && typeof cost === "number" && cost > 0) {
+      byItem[itemId] = cost;
+    }
+  }
+  return byItem;
+}
+
+export async function updateOrderItemUnitCostCents(
+  orderItemId: string,
+  unitCostCents: number
+): Promise<void> {
+  if (!Number.isFinite(unitCostCents) || unitCostCents <= 0) return;
+  const rounded = Math.round(unitCostCents);
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    for (const o of getSandboxState().orders) {
+      const target = o.items.find((it) => it.id === orderItemId);
+      if (target) {
+        target.unitCostCents = rounded;
+        return;
+      }
+    }
+    return;
+  }
+
+  const { error } = await ctx.admin
+    .from("order_items")
+    .update({ unit_cost_cents: rounded })
+    .eq("id", orderItemId);
+  if (error) {
+    // Non-fatal cost enrichment fallback
+  }
 }
 
 export async function updateSupplierOrderState(

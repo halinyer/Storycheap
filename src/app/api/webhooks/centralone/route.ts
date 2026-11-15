@@ -24,11 +24,17 @@ export async function POST(request: NextRequest) {
 
   const timestampHeader = request.headers.get("x-centralone-timestamp");
   const signatureHeader = request.headers.get("x-centralone-signature");
+  const previousSignatureHeader = request.headers.get(
+    "x-centralone-signature-previous"
+  );
+  const headerEventId = request.headers.get("x-centralone-event-id")?.trim() ?? "";
+  const headerEventType = request.headers.get("x-centralone-event")?.trim() ?? "";
 
   const verification = verifyCentralOneWebhookSignature({
     rawBody,
     timestampHeader,
     signatureHeader,
+    previousSignatureHeader,
   });
 
   if (!verification.valid) {
@@ -45,14 +51,26 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400 });
   }
 
-  const eventId = String(payload.event_id ?? payload.id ?? "").trim();
-  const eventType = String(payload.event ?? payload.type ?? "unknown").trim();
+  const eventId = (
+    headerEventId || String(payload.event_id ?? payload.id ?? "")
+  ).trim();
+  const eventType = (
+    headerEventType || String(payload.event ?? payload.type ?? "unknown")
+  ).trim();
   const dataObj =
     payload.data && typeof payload.data === "object"
       ? (payload.data as Record<string, unknown>)
       : payload;
+  const nestedOrderObj =
+    dataObj.order && typeof dataObj.order === "object"
+      ? (dataObj.order as Record<string, unknown>)
+      : undefined;
   const externalOrderId = String(
-    dataObj.order_id ?? dataObj.id ?? payload.order_id ?? ""
+    dataObj.order_id ??
+      nestedOrderObj?.id ??
+      dataObj.id ??
+      payload.order_id ??
+      ""
   ).trim();
   const sequence =
     typeof payload.sequence === "number"
@@ -61,9 +79,24 @@ export async function POST(request: NextRequest) {
         ? dataObj.sequence
         : undefined;
 
-  if (!eventId || !externalOrderId) {
+  if (!eventId) {
     return NextResponse.json(
-      { error: "Missing event_id or order_id in Central One webhook" },
+      { error: "Missing event_id in Central One webhook" },
+      { status: 400 }
+    );
+  }
+
+  // Non-order webhook events documented by Central One (e.g. webhook.test,
+  // deposit.*, balance.*, product.*) do not reference a specific order.
+  if (!externalOrderId) {
+    if (eventType !== "unknown" && !eventType.startsWith("order.")) {
+      return NextResponse.json(
+        { received: true, eventId, eventType, acknowledged: true },
+        { status: 200 }
+      );
+    }
+    return NextResponse.json(
+      { error: "Missing order_id in Central One webhook" },
       { status: 400 }
     );
   }

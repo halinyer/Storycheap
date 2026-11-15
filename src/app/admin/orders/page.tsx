@@ -2,7 +2,10 @@ import React, { Suspense } from "react";
 import Link from "next/link";
 import { connection } from "next/server";
 import { formatCents } from "@/lib/catalog-seed";
-import { listOrdersAdmin } from "@/lib/server/repository";
+import {
+  listOrdersAdmin,
+  listSupplierItemCostsAdmin,
+} from "@/lib/server/repository";
 import {
   formatBsCents,
   formatBsRate,
@@ -19,9 +22,10 @@ async function AdminOrdersContent({
   const sp = await searchParams;
   const attentionOnly = sp.attention === "1";
 
-  const orders = await listOrdersAdmin({
-    needsAttentionOnly: attentionOnly,
-  });
+  const [orders, actualItemCostCents] = await Promise.all([
+    listOrdersAdmin({ needsAttentionOnly: attentionOnly }),
+    listSupplierItemCostsAdmin(),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -80,7 +84,7 @@ async function AdminOrdersContent({
               </thead>
               <tbody className="divide-y divide-white/[0.06]">
                 {orders.map((o) => {
-                  const snap = getOrderSnapshot(o);
+                  const snap = getOrderSnapshot(o, actualItemCostCents);
                   return (
                   <tr key={o.id} className="hover:bg-white/[0.02]">
                     <td className="px-5 py-4">
@@ -109,10 +113,10 @@ async function AdminOrdersContent({
                       {formatCents(o.subtotalCents)} USD
                     </td>
                     <td className="px-5 py-4 text-slate-300">
-                      {snap.totalBsCents !== null && snap.bsRateCents !== null ? (
+                      {snap.actualBsCents !== null && snap.bsRateCents !== null ? (
                         <div>
                           <div className="font-bold text-white">
-                            {formatBsCents(snap.totalBsCents)}
+                            {formatBsCents(snap.actualBsCents)}
                           </div>
                           <div className="text-[10px] text-slate-400">
                             @ {formatBsRate(snap.bsRateCents)}

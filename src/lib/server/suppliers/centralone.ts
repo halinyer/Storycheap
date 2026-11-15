@@ -27,6 +27,7 @@ export interface CentralOneOrderResult {
   status: string;
   deliveredCount: number;
   unitCostCents: number | null;
+  failureReason?: string | null;
   raw: Record<string, unknown>;
 }
 
@@ -79,6 +80,7 @@ async function centralOneFetch<T>(
     ...init,
     headers,
     cache: "no-store",
+    signal: init.signal ?? AbortSignal.timeout(8000),
   });
 
   const text = await response.text();
@@ -238,15 +240,33 @@ export async function getCentralOneCatalog(): Promise<CentralOneCatalogItem[]> {
     .filter((item) => item.id.length > 0);
 }
 
-function normalizeCentralOneOrderResponse(raw: Record<string, unknown>): CentralOneOrderResult {
+function extractCentralOneFailureMessage(
+  obj: Record<string, unknown> | undefined
+): string | null {
+  if (!obj || typeof obj !== "object") return null;
+  const f = obj.failure as Record<string, unknown> | null | undefined;
+  if (!f || typeof f !== "object") return null;
+  const msgEs = typeof f.message_es === "string" ? f.message_es.trim() : "";
+  const msg = typeof f.message === "string" ? f.message.trim() : "";
+  const code = typeof f.code === "string" ? f.code.trim() : "";
+  return msgEs || msg || code || null;
+}
+
+function normalizeCentralOneOrderResponse(
+  raw: Record<string, unknown>,
+  expectedQuantity = 1
+): CentralOneOrderResult {
   const orderObj =
     raw.order && typeof raw.order === "object"
       ? (raw.order as Record<string, unknown>)
       : raw;
 
-  const lines = Array.isArray(orderObj.items)
-    ? (orderObj.items as Array<Record<string, unknown>>)
-    : [];
+  // Central One GET /orders/{id} returns `lines[]`; accept `items[]` as legacy fallback.
+  const lines = Array.isArray(orderObj.lines)
+    ? (orderObj.lines as Array<Record<string, unknown>>)
+    : Array.isArray(orderObj.items)
+      ? (orderObj.items as Array<Record<string, unknown>>)
+      : [];
 
   const deliveredCount = lines.reduce(
     (sum, line) => sum + Number(line.delivered_count ?? 0),
@@ -254,12 +274,26 @@ function normalizeCentralOneOrderResponse(raw: Record<string, unknown>): Central
   );
 
   const firstLine = lines[0];
-  const unitCostCents =
-    parseCentralOneDecimalToCents(
-      (firstLine?.reseller_price as string | undefined) ??
-        (firstLine?.unit_price as string | undefined) ??
-        (orderObj.total_sale_amount as string | undefined)
-    ) ?? null;
+  const rawUnitPrice =
+    (firstLine?.unit_price as string | number | undefined) ??
+    (firstLine?.reseller_price as string | number | undefined);
+  let unitCostCents = parseCentralOneDecimalToCents(rawUnitPrice);
+  if (unitCostCents === null) {
+    const totalSaleCents = parseCentralOneDecimalToCents(
+      orderObj.total_sale_amount as string | number | undefined
+    );
+    const divisor = Math.max(
+      1,
+      Number(firstLine?.quantity ?? expectedQuantity) || 1
+    );
+    unitCostCents =
+      totalSaleCents !== null ? Math.round(totalSaleCents / divisor) : null;
+  }
+
+  const failureReason =
+    extractCentralOneFailureMessage(orderObj) ??
+    lines.map(extractCentralOneFailureMessage).find((m): m is string => Boolean(m)) ??
+    null;
 
   return {
     externalOrderId: String(orderObj.id ?? ""),
@@ -267,6 +301,7 @@ function normalizeCentralOneOrderResponse(raw: Record<string, unknown>): Central
     status: String(orderObj.status ?? "confirmed").toLowerCase(),
     deliveredCount,
     unitCostCents,
+    failureReason,
     raw,
   };
 }
@@ -289,11 +324,11 @@ export async function createCentralOneOrder(params: {
           quantity: params.quantity,
         },
       ],
-      ...(params.externalReference ? { external_reference: params.externalReference } : {}),
+      ...(params.externalReference ? { note: params.externalReference } : {}),
     }),
   });
 
-  return normalizeCentralOneOrderResponse(data);
+  return normalizeCentralOneOrderResponse(data, params.quantity);
 }
 
 export async function getCentralOneOrder(
@@ -303,6 +338,49 @@ export async function getCentralOneOrder(
     `/orders/${encodeURIComponent(externalOrderId)}`
   );
   return normalizeCentralOneOrderResponse(data);
+}
+
+function collectCentralOneCodeEntries(
+  entries: unknown[],
+  out: CentralOneOrderCode[]
+): void {
+  for (const entry of entries) {
+    if (typeof entry === "string") {
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split(/\s+-\s+/);
+      out.push({
+        codePlaintext: parts[0] ?? trimmed,
+        pinPlaintext: parts[1] ?? null,
+      });
+      continue;
+    }
+
+    if (entry && typeof entry === "object") {
+      const obj = entry as Record<string, unknown>;
+      // Official GET /orders/{id}/codes nests `codes: ["..."]` per order_line_id.
+      if (Array.isArray(obj.codes)) {
+        collectCentralOneCodeEntries(obj.codes, out);
+        continue;
+      }
+
+      const rawCode = String(obj.code ?? obj.pin ?? obj.value ?? "").trim();
+      if (!rawCode) continue;
+      const pinVal = obj.serial ?? obj.pin_code ?? null;
+      if (!pinVal && rawCode.includes(" - ")) {
+        const [first, second] = rawCode.split(/\s+-\s+/);
+        out.push({
+          codePlaintext: first ?? rawCode,
+          pinPlaintext: second ?? null,
+        });
+      } else {
+        out.push({
+          codePlaintext: rawCode,
+          pinPlaintext: pinVal ? String(pinVal) : null,
+        });
+      }
+    }
+  }
 }
 
 export async function getCentralOneOrderCodes(
@@ -323,59 +401,145 @@ export async function getCentralOneOrderCodes(
     ? root
     : Array.isArray(root.codes)
       ? root.codes
-      : Array.isArray(root.items)
-        ? (root.items as Array<Record<string, unknown>>).flatMap((line) =>
-            Array.isArray(line.codes) ? line.codes : [line]
-          )
-        : [];
+      : Array.isArray(root.lines)
+        ? root.lines
+        : Array.isArray(root.items)
+          ? (root.items as Array<Record<string, unknown>>).flatMap((line) =>
+              Array.isArray(line.codes) ? line.codes : [line]
+            )
+          : [];
 
   const parsed: CentralOneOrderCode[] = [];
-  for (const entry of rawEntries) {
-    if (typeof entry === "string") {
-      const trimmed = entry.trim();
-      if (!trimmed) continue;
-      const parts = trimmed.split(/\s+-\s+/);
-      parsed.push({
-        codePlaintext: parts[0] ?? trimmed,
-        pinPlaintext: parts[1] ?? null,
-      });
-      continue;
-    }
+  collectCentralOneCodeEntries(rawEntries, parsed);
+  return parsed;
+}
 
-    if (entry && typeof entry === "object") {
-      const obj = entry as Record<string, unknown>;
-      const rawCode = String(obj.code ?? obj.pin ?? obj.value ?? "").trim();
-      if (!rawCode) continue;
-      const pinVal = obj.serial ?? obj.pin_code ?? null;
-      if (!pinVal && rawCode.includes(" - ")) {
-        const [first, second] = rawCode.split(/\s+-\s+/);
-        parsed.push({
-          codePlaintext: first ?? rawCode,
-          pinPlaintext: second ?? null,
-        });
-      } else {
-        parsed.push({
-          codePlaintext: rawCode,
-          pinPlaintext: pinVal ? String(pinVal) : null,
-        });
-      }
-    }
+export interface CentralOneApiOrderSummary {
+  id: string;
+  referenceCode: string | null;
+  status: string;
+  totalSaleCents: number;
+  currency: string;
+  lineCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CentralOneOrdersReport {
+  configured: boolean;
+  healthy: boolean;
+  errorMessage?: string;
+  orders: CentralOneApiOrderSummary[];
+  totalSpentCents: number;
+  completedCount: number;
+}
+
+const CENTRALONE_SETTLED_ORDER_STATUSES = new Set([
+  "delivered",
+  "partially_delivered",
+  "partially_completed",
+  "completed",
+  "confirmed",
+  "processing",
+]);
+
+export async function listCentralOneOrders(limit = 50): Promise<CentralOneOrdersReport> {
+  if (!isCentralOneConfigured()) {
+    return {
+      configured: false,
+      healthy: false,
+      errorMessage: "CENTRAL_ONE_API_KEY no configurada en el servidor.",
+      orders: [],
+      totalSpentCents: 0,
+      completedCount: 0,
+    };
   }
 
-  return parsed;
+  try {
+    // Docs GET /orders allows limit 1..50 (default 20).
+    const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+    const { data } = await centralOneFetch<Record<string, unknown>>(
+      `/orders?limit=${safeLimit}`
+    );
+    const rawOrders = Array.isArray(data.orders)
+      ? (data.orders as Array<Record<string, unknown>>)
+      : Array.isArray(data.items)
+        ? (data.items as Array<Record<string, unknown>>)
+        : [];
+
+    const orders: CentralOneApiOrderSummary[] = rawOrders.map((o) => {
+      const grossCents =
+        parseCentralOneDecimalToCents(
+          (o.total_sale_amount as string | number | undefined) ??
+            (o.total_usd as string | number | undefined)
+        ) ?? 0;
+      const refundObj =
+        o.refund && typeof o.refund === "object"
+          ? (o.refund as Record<string, unknown>)
+          : null;
+      const refundCents = refundObj?.refunded
+        ? (parseCentralOneDecimalToCents(
+            refundObj.amount as string | number | undefined
+          ) ?? 0)
+        : 0;
+      const totalSaleCents = Math.max(0, grossCents - refundCents);
+      const status = String(o.status ?? "unknown").toLowerCase();
+      return {
+        id: String(o.id ?? ""),
+        referenceCode: o.reference_code ? String(o.reference_code) : null,
+        status,
+        totalSaleCents,
+        currency: String(o.currency ?? "USD"),
+        lineCount: Number(o.line_count ?? 1) || 1,
+        createdAt: String(o.created_at ?? ""),
+        updatedAt: String(o.updated_at ?? o.created_at ?? ""),
+      };
+    });
+
+    const settled = orders.filter((o) => CENTRALONE_SETTLED_ORDER_STATUSES.has(o.status));
+    const totalSpentCents = settled.reduce((sum, o) => sum + o.totalSaleCents, 0);
+
+    return {
+      configured: true,
+      healthy: true,
+      orders,
+      totalSpentCents,
+      completedCount: settled.length,
+    };
+  } catch (err) {
+    return {
+      configured: true,
+      healthy: false,
+      errorMessage:
+        err instanceof Error ? err.message : "Error consultando GET /orders en Central One",
+      orders: [],
+      totalSpentCents: 0,
+      completedCount: 0,
+    };
+  }
+}
+
+function timingSafeHexSignatureMatch(expectedHex: string, headerValue: string): boolean {
+  const provided = headerValue.trim().replace(/^sha256=/i, "").toLowerCase();
+  if (provided.length !== expectedHex.length) return false;
+  return crypto.timingSafeEqual(
+    Buffer.from(provided, "utf8"),
+    Buffer.from(expectedHex, "utf8")
+  );
 }
 
 export function verifyCentralOneWebhookSignature(params: {
   rawBody: string;
   timestampHeader: string | null;
   signatureHeader: string | null;
+  previousSignatureHeader?: string | null;
   nowMs?: number;
 }): { valid: boolean; reason?: string } {
   const secret = getCentralOneWebhookSecret();
   if (!secret) {
     return { valid: false, reason: "CENTRAL_ONE_WEBHOOK_SECRET not configured" };
   }
-  if (!params.timestampHeader || !params.signatureHeader) {
+  if (!params.timestampHeader || (!params.signatureHeader && !params.previousSignatureHeader)) {
     return { valid: false, reason: "Missing signature headers" };
   }
 
@@ -389,20 +553,15 @@ export function verifyCentralOneWebhookSignature(params: {
     return { valid: false, reason: "Timestamp outside 5-minute replay window" };
   }
 
-  const provided = params.signatureHeader.trim().replace(/^sha256=/i, "").toLowerCase();
   const expected = crypto
     .createHmac("sha256", secret)
     .update(`${tsSeconds}.${params.rawBody}`)
     .digest("hex")
     .toLowerCase();
 
-  if (provided.length !== expected.length) {
-    return { valid: false, reason: "Signature length mismatch" };
-  }
-
-  const valid = crypto.timingSafeEqual(
-    Buffer.from(provided, "utf8"),
-    Buffer.from(expected, "utf8")
+  const candidates = [params.signatureHeader, params.previousSignatureHeader].filter(
+    (s): s is string => Boolean(s && s.trim().length > 0)
   );
+  const valid = candidates.some((headerVal) => timingSafeHexSignatureMatch(expected, headerVal));
   return valid ? { valid: true } : { valid: false, reason: "Invalid HMAC signature" };
 }

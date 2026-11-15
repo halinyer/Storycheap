@@ -21,12 +21,15 @@ import {
   getUserCreditBalanceCents,
   getVariantsLookupByIds,
   insertFulfillmentRecord,
+  listPendingSupplierOrders,
+  listPendingSupplierOrdersForOrder,
   markOrderAttentionFlag,
   markOrderItemProgress,
   recordWebhookEventOnce,
   releaseReservedCodesForOrder,
   reserveManualCodes,
   transitionOrderStatus,
+  updateOrderItemUnitCostCents,
   updateOrderPartialPaymentCents,
   updateSupplierOrderState,
   updateWebhookEventStatus,
@@ -223,11 +226,20 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
         );
       } else {
         try {
-          const fzOrder = await createFazerCardsGiftCardOrder({
-            fazerProductId: variantMeta.centraloneProductId,
-            quantity: remaining,
-            customIdentifier: `sc-item-${item.id}`,
-          });
+          const existingFz = (
+            await listPendingSupplierOrdersForOrder(order.id, "fazercards")
+          ).find((so) => so.orderItemId === item.id && Boolean(so.externalOrderId));
+
+          const fzOrder = existingFz?.externalOrderId
+            ? {
+                ...(await getFazerCardsOrder(existingFz.externalOrderId)),
+                unitCostCents: existingFz.supplierUnitCostCents ?? 0,
+              }
+            : await createFazerCardsGiftCardOrder({
+                fazerProductId: variantMeta.centraloneProductId,
+                quantity: remaining,
+                customIdentifier: `sc-item-${item.id}`,
+              });
 
           const fzStatusNormalized =
             fzOrder.status === "COMPLETED"
@@ -239,8 +251,8 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
           await upsertSupplierOrder({
             orderId: order.id,
             orderItemId: item.id,
-            provider: "centralone",
-            idempotencyKey: `sc-item-${item.id}`,
+            provider: "fazercards",
+            idempotencyKey: existingFz?.idempotencyKey ?? `sc-item-${item.id}`,
             externalOrderId: fzOrder.externalOrderId,
             referenceCode: fzOrder.rawOrderId,
             status: fzStatusNormalized,
@@ -249,6 +261,9 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
             supplierUnitCostCents: fzOrder.unitCostCents,
             rawPayload: fzOrder.rawResponse,
           });
+          if (fzOrder.unitCostCents > 0) {
+            await updateOrderItemUnitCostCents(item.id, fzOrder.unitCostCents);
+          }
           invalidateFazerCardsBalanceCache();
 
           if (fzOrder.codes.length > 0) {
@@ -309,18 +324,24 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
         );
       } else {
         try {
-          const c1Order = await createCentralOneOrder({
-            idempotencyKey: `sc-item-${item.id}`,
-            catalogItemId: variantMeta.centraloneProductId,
-            quantity: remaining,
-            externalReference: `${order.orderNumber}:${item.id}`,
-          });
+          const existingC1 = (
+            await listPendingSupplierOrdersForOrder(order.id, "centralone")
+          ).find((so) => so.orderItemId === item.id && Boolean(so.externalOrderId));
+
+          const c1Order = existingC1?.externalOrderId
+            ? await getCentralOneOrder(existingC1.externalOrderId)
+            : await createCentralOneOrder({
+                idempotencyKey: `sc-item-${item.id}`,
+                catalogItemId: variantMeta.centraloneProductId,
+                quantity: remaining,
+                externalReference: `${order.orderNumber}:${item.id}`,
+              });
 
           await upsertSupplierOrder({
             orderId: order.id,
             orderItemId: item.id,
             provider: "centralone",
-            idempotencyKey: `sc-item-${item.id}`,
+            idempotencyKey: existingC1?.idempotencyKey ?? `sc-item-${item.id}`,
             externalOrderId: c1Order.externalOrderId,
             referenceCode: c1Order.referenceCode,
             status: c1Order.status,
@@ -329,42 +350,65 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
             supplierUnitCostCents: c1Order.unitCostCents,
             rawPayload: c1Order.raw,
           });
+          if (c1Order.unitCostCents && c1Order.unitCostCents > 0) {
+            await updateOrderItemUnitCostCents(item.id, c1Order.unitCostCents);
+          }
           invalidateCentralOneBalanceCache();
 
-          if (c1Order.status === "completed" && c1Order.deliveredCount > 0) {
-            const codes = await getCentralOneOrderCodes(c1Order.externalOrderId);
-            const existingC1Count = order.fulfillments.filter(
-              (f) => f.orderItemId === item.id && f.source === "centralone"
-            ).length;
-            const unseenCodes = codes.slice(
-              existingC1Count,
-              existingC1Count + remaining
-            );
-            for (const c of unseenCodes) {
-              await insertFulfillmentRecord({
-                orderItemId: item.id,
-                orderId: order.id,
-                userId: order.userId,
-                source: "centralone",
-                codeInventoryId: null,
-                codeCiphertext: encryptCode(c.codePlaintext),
-                codeLast4: extractLast4(c.codePlaintext),
-                pinCiphertext: c.pinPlaintext ? encryptCode(c.pinPlaintext) : null,
-                supplierTxId: c1Order.externalOrderId,
-              });
-              delivered += 1;
-              anyFulfilledNowOrBefore = true;
-            }
-          } else if (
-            c1Order.status === "confirmed" ||
-            c1Order.status === "processing" ||
-            c1Order.status === "pending"
+          const existingC1Count = order.fulfillments.filter(
+            (f) => f.orderItemId === item.id && f.source === "centralone"
+          ).length;
+
+          if (
+            isCentralOneReadyStatus(c1Order.status) ||
+            c1Order.deliveredCount > existingC1Count
           ) {
+            const codesRes = await fetchCentralOneCodesSafe(
+              c1Order.externalOrderId
+            );
+            if (!codesRes.ready) {
+              if (delivered < item.quantity) {
+                itemPendingAsync = true;
+                hasPendingAsyncSupplier = true;
+              }
+            } else {
+              const unseenCodes = codesRes.codes.slice(
+                existingC1Count,
+                existingC1Count + remaining
+              );
+              for (const c of unseenCodes) {
+                await insertFulfillmentRecord({
+                  orderItemId: item.id,
+                  orderId: order.id,
+                  userId: order.userId,
+                  source: "centralone",
+                  codeInventoryId: null,
+                  codeCiphertext: encryptCode(c.codePlaintext),
+                  codeLast4: extractLast4(c.codePlaintext),
+                  pinCiphertext: c.pinPlaintext ? encryptCode(c.pinPlaintext) : null,
+                  supplierTxId: c1Order.externalOrderId,
+                });
+                delivered += 1;
+                anyFulfilledNowOrBefore = true;
+              }
+
+              if (delivered < item.quantity) {
+                if (isCentralOnePartialStatus(c1Order.status)) {
+                  attentionReasons.push(
+                    `Central One entregó parcialmente (${delivered}/${item.quantity}) para ${item.productName}${c1Order.failureReason ? `: ${c1Order.failureReason}` : ""}.`
+                  );
+                } else {
+                  itemPendingAsync = true;
+                  hasPendingAsyncSupplier = true;
+                }
+              }
+            }
+          } else if (isCentralOnePendingStatus(c1Order.status)) {
             itemPendingAsync = true;
             hasPendingAsyncSupplier = true;
           } else {
             attentionReasons.push(
-              `Central One devolvió estado "${c1Order.status}" para ${item.productName}.`
+              `Central One devolvió estado "${c1Order.status}" para ${item.productName}${c1Order.failureReason ? ` (${c1Order.failureReason})` : ""}.`
             );
           }
         } catch (err) {
@@ -770,6 +814,45 @@ export async function adminRefundOrderToCredit(params: {
   });
 }
 
+function isCentralOneReadyStatus(status: string): boolean {
+  return (
+    status === "delivered" ||
+    status === "completed" ||
+    status === "partially_delivered" ||
+    status === "partially_completed"
+  );
+}
+
+function isCentralOnePartialStatus(status: string): boolean {
+  return status === "partially_delivered" || status === "partially_completed";
+}
+
+function isCentralOnePendingStatus(status: string): boolean {
+  return status === "confirmed" || status === "processing" || status === "pending";
+}
+
+async function fetchCentralOneCodesSafe(externalOrderId: string) {
+  try {
+    const codes = await getCentralOneOrderCodes(externalOrderId);
+    return { ready: true as const, codes };
+  } catch (err) {
+    const typed = err as { message?: string; code?: string; httpStatus?: number };
+    const message = typed?.message ?? "";
+    if (
+      typed?.httpStatus === 409 ||
+      typed?.code === "codes_not_ready" ||
+      message.includes("codes_not_ready") ||
+      message.includes("409")
+    ) {
+      return {
+        ready: false as const,
+        codes: [] as Awaited<ReturnType<typeof getCentralOneOrderCodes>>,
+      };
+    }
+    throw err;
+  }
+}
+
 /**
  * Reconciles an asynchronous Central One order against GET /orders/{id} and
  * GET /orders/{id}/codes. Called by /api/webhooks/centralone and /api/cron/reconcile.
@@ -778,7 +861,11 @@ export async function syncCentralOneOrderProgress(
   externalOrderId: string,
   sequenceHint?: number
 ): Promise<{ ok: boolean; status: string; addedCodes: number }> {
-  const supplierOrder = await getSupplierOrderByExternalId("centralone", externalOrderId);
+  const isFazerOrder = isFazerCardsProductId(externalOrderId);
+  const supplierOrder = await getSupplierOrderByExternalId(
+    isFazerOrder ? ["fazercards", "centralone"] : ["centralone", "fazercards"],
+    externalOrderId
+  );
   if (!supplierOrder) {
     return { ok: false, status: "unknown_supplier_order", addedCodes: 0 };
   }
@@ -791,7 +878,6 @@ export async function syncCentralOneOrderProgress(
     return { ok: true, status: "stale_sequence_ignored", addedCodes: 0 };
   }
 
-  const isFazerOrder = isFazerCardsProductId(externalOrderId);
   const live = isFazerOrder
     ? await (async () => {
         const fz = await getFazerCardsOrder(externalOrderId);
@@ -804,6 +890,7 @@ export async function syncCentralOneOrderProgress(
               : "processing",
           deliveredCount: fz.codes.length,
           unitCostCents: supplierOrder.supplierUnitCostCents,
+          failureReason: null as string | null,
           raw: fz.rawResponse,
           fazerCodes: fz.codes,
           fazerFailReason: fz.failReason,
@@ -813,6 +900,7 @@ export async function syncCentralOneOrderProgress(
         const c1 = await getCentralOneOrder(externalOrderId);
         return {
           ...c1,
+          failureReason: c1.failureReason ?? null,
           fazerCodes: null as string[] | null,
           fazerFailReason: null as string | null,
         };
@@ -828,17 +916,31 @@ export async function syncCentralOneOrderProgress(
     return { ok: false, status: "order_item_not_found", addedCodes: 0 };
   }
 
-  let addedCodes = 0;
-  if (live.deliveredCount > 0) {
-    const existingCount = order.fulfillments.filter(
-      (f) => f.orderItemId === targetItem.id && f.source === "centralone"
-    ).length;
+  const existingCount = order.fulfillments.filter(
+    (f) => f.orderItemId === targetItem.id && f.source === "centralone"
+  ).length;
 
-    if (live.deliveredCount > existingCount) {
-      const codes = live.fazerCodes
-        ? live.fazerCodes.map((codePlaintext) => ({ codePlaintext, pinPlaintext: null }))
-        : await getCentralOneOrderCodes(externalOrderId);
-      const pendingCodes = codes.slice(existingCount);
+  let addedCodes = 0;
+  const shouldFetchCodes =
+    existingCount < targetItem.quantity &&
+    (isCentralOneReadyStatus(live.status) || live.deliveredCount > existingCount);
+
+  if (shouldFetchCodes) {
+    const codesRes = live.fazerCodes
+      ? {
+          ready: true as const,
+          codes: live.fazerCodes.map((codePlaintext) => ({
+            codePlaintext,
+            pinPlaintext: null,
+          })),
+        }
+      : await fetchCentralOneCodesSafe(externalOrderId);
+
+    if (codesRes.ready) {
+      const pendingCodes = codesRes.codes.slice(
+        existingCount,
+        targetItem.quantity
+      );
       for (const c of pendingCodes) {
         await insertFulfillmentRecord({
           orderItemId: targetItem.id,
@@ -856,21 +958,28 @@ export async function syncCentralOneOrderProgress(
     }
   }
 
+  const totalCentralOneForItem = existingCount + addedCodes;
   const newDeliveredForItem = Math.min(
     targetItem.quantity,
-    targetItem.deliveredCount + addedCodes
+    Math.max(targetItem.deliveredCount + addedCodes, totalCentralOneForItem)
   );
 
+  const resolvedUnitCost = live.unitCostCents ?? supplierOrder.supplierUnitCostCents;
   await updateSupplierOrderState(supplierOrder.id, {
     status: live.status,
-    deliveredCount: live.deliveredCount,
-    supplierUnitCostCents: live.unitCostCents ?? supplierOrder.supplierUnitCostCents,
+    deliveredCount: Math.max(live.deliveredCount, totalCentralOneForItem),
+    supplierUnitCostCents: resolvedUnitCost,
     lastSequence:
       typeof sequenceHint === "number" && sequenceHint > supplierOrder.lastSequence
         ? sequenceHint
         : supplierOrder.lastSequence,
     rawPayload: live.raw,
   });
+  if (resolvedUnitCost && resolvedUnitCost > 0) {
+    await updateOrderItemUnitCostCents(targetItem.id, resolvedUnitCost);
+  }
+
+  const failureNote = live.failureReason ?? live.fazerFailReason ?? null;
 
   if (live.status === "failed" || live.status === "cancelled") {
     await markOrderItemProgress(targetItem.id, {
@@ -883,7 +992,22 @@ export async function syncCentralOneOrderProgress(
       expectedStatuses: ["FULFILLING", "PARTIAL"],
       nextStatus: nextOrderStatus,
       needsAttention: true,
-      attentionReason: `Central One devolvió estado "${live.status}" (orden ${externalOrderId}).`,
+      attentionReason: `${isFazerOrder ? "FazerCards" : "Central One"} devolvió estado "${live.status}" (orden ${externalOrderId}${failureNote ? `: ${failureNote}` : ""}).`,
+    });
+    return { ok: true, status: live.status, addedCodes };
+  }
+
+  if (isCentralOnePartialStatus(live.status) && newDeliveredForItem < targetItem.quantity) {
+    await markOrderItemProgress(targetItem.id, {
+      deliveredCount: newDeliveredForItem,
+      status: "MANUAL_REVIEW",
+    });
+    await transitionOrderStatus({
+      orderId: order.id,
+      expectedStatuses: ["FULFILLING", "PARTIAL"],
+      nextStatus: newDeliveredForItem > 0 ? "PARTIAL" : "MANUAL_REVIEW",
+      needsAttention: true,
+      attentionReason: `Central One entregó parcialmente (${newDeliveredForItem}/${targetItem.quantity}) en orden ${externalOrderId}${failureNote ? `: ${failureNote}` : ""}.`,
     });
     return { ok: true, status: live.status, addedCodes };
   }
@@ -915,6 +1039,49 @@ export async function syncCentralOneOrderProgress(
   }
 
   return { ok: true, status: live.status, addedCodes };
+}
+
+export async function syncSupplierOrdersForOrder(
+  orderId: string
+): Promise<{ checked: number; addedCodes: number }> {
+  const pendingSuppliers = await listPendingSupplierOrdersForOrder(orderId, [
+    "centralone",
+    "fazercards",
+  ]);
+  let checked = 0;
+  let addedCodes = 0;
+  for (const so of pendingSuppliers) {
+    if (!so.externalOrderId) continue;
+    checked += 1;
+    const res = await syncCentralOneOrderProgress(so.externalOrderId);
+    addedCodes += res.addedCodes;
+  }
+  return { checked, addedCodes };
+}
+
+export async function syncAllPendingSupplierOrders(): Promise<{
+  checked: number;
+  addedCodes: number;
+  errors: number;
+}> {
+  const pendingSuppliers = await listPendingSupplierOrders([
+    "centralone",
+    "fazercards",
+  ]);
+  let checked = 0;
+  let addedCodes = 0;
+  let errors = 0;
+  for (const so of pendingSuppliers) {
+    if (!so.externalOrderId) continue;
+    checked += 1;
+    try {
+      const res = await syncCentralOneOrderProgress(so.externalOrderId);
+      addedCodes += res.addedCodes;
+    } catch {
+      errors += 1;
+    }
+  }
+  return { checked, addedCodes, errors };
 }
 
 /**

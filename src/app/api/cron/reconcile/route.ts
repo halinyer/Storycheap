@@ -92,9 +92,9 @@ export async function GET(request: NextRequest) {
   // 2) Release any remaining expired reservations after reconciliation
   const { releasedCodes, expiredOrders } = await releaseExpiredReservations();
 
-  // Reconcile pending asynchronous Central One supplier orders
+  // Reconcile pending asynchronous supplier orders (Central One + FazerCards)
   let centralOneSyncedCount = 0;
-  const pendingCentralOne = await listPendingSupplierOrders("centralone");
+  const pendingCentralOne = await listPendingSupplierOrders(["centralone", "fazercards"]);
   for (const so of pendingCentralOne) {
     if (!so.externalOrderId) continue;
     try {

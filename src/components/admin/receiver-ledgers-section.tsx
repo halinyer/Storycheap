@@ -35,6 +35,7 @@ export function ReceiverLedgersSection({
   zenoProofs = {},
   activePagoMovilAccount,
   matchedPagoMovilByOrder = {},
+  actualItemCostCents = {},
 }: {
   allOrders: OrderDTO[];
   filteredOrders: OrderDTO[];
@@ -43,7 +44,38 @@ export function ReceiverLedgersSection({
   zenoProofs?: Record<string, ZenoPaymentProofDTO>;
   activePagoMovilAccount: ReceiverBankAccountDTO | null;
   matchedPagoMovilByOrder?: Record<string, MatchedPagoMovilSummary>;
+  actualItemCostCents?: Record<string, number>;
 }) {
+  const detectedZenoMeta = useMemo(() => {
+    const proofs = Object.values(zenoProofs).sort((a, b) =>
+      b.processedAt.localeCompare(a.processedAt)
+    );
+    let account = "";
+    let accountLabel = "";
+    let storeId = "";
+    let token = "";
+    const distinctAccounts = new Set<string>();
+    for (const p of proofs) {
+      if (!storeId && p.storeId) storeId = p.storeId;
+      for (const tx of p.transactions) {
+        const dest = (tx.to || tx.toLabel || "").trim();
+        if (dest) distinctAccounts.add(dest);
+        if (!account && dest) {
+          account = tx.to?.trim() || dest;
+          accountLabel = tx.toLabel?.trim() || "";
+        }
+        if (!token && tx.tokenId) token = tx.tokenId;
+      }
+    }
+    return {
+      account,
+      accountLabel,
+      storeId,
+      token,
+      distinctAccounts: Array.from(distinctAccounts),
+    };
+  }, [zenoProofs]);
+
   const [zenoReceiver, setZenoReceiver] = useState<ZenoBinanceReceiverDTO | null>(
     initialZenoReceiver
   );
@@ -53,13 +85,13 @@ export function ReceiverLedgersSection({
     initialZenoReceiver?.label ?? "Binance Principal (ZenoBank)"
   );
   const [binanceAccount, setBinanceAccount] = useState(
-    initialZenoReceiver?.binanceAccount ?? ""
+    initialZenoReceiver?.binanceAccount || detectedZenoMeta.account || ""
   );
   const [network, setNetwork] = useState(
     initialZenoReceiver?.network ?? "USDT (Binance Pay / BEP20 / TRC20)"
   );
   const [storeReference, setStoreReference] = useState(
-    initialZenoReceiver?.storeReference ?? ""
+    initialZenoReceiver?.storeReference || detectedZenoMeta.storeId || ""
   );
   const [notes, setNotes] = useState(initialZenoReceiver?.notes ?? "");
 
@@ -73,7 +105,7 @@ export function ReceiverLedgersSection({
 
       for (const order of list) {
         if (order.paymentGateway !== "zenobank") continue;
-        const snap = getOrderSnapshot(order);
+        const snap = getOrderSnapshot(order, actualItemCostCents);
         if (order.status === "PENDING_PAYMENT" || order.status === "CREATED") {
           openCount += 1;
           openUsdCents += order.amountDueCents;
@@ -97,7 +129,7 @@ export function ReceiverLedgersSection({
       period: summarize(filteredOrders),
       allTime: summarize(allOrders),
     };
-  }, [allOrders, filteredOrders]);
+  }, [allOrders, filteredOrders, actualItemCostCents]);
 
   const pmLedger = useMemo(() => {
     const summarize = (list: OrderDTO[]) => {
@@ -115,7 +147,7 @@ export function ReceiverLedgersSection({
         ) {
           continue;
         }
-        const snap = getOrderSnapshot(order);
+        const snap = getOrderSnapshot(order, actualItemCostCents);
         if (
           order.status === "PENDING_PAYMENT" ||
           order.status === "CREATED" ||
@@ -134,7 +166,7 @@ export function ReceiverLedgersSection({
         paidCount += 1;
         paidUsdCents += cashPaid;
         const matched = matchedPagoMovilByOrder[order.id];
-        const bsCents = matched?.amountBsCents ?? snap.totalBsCents ?? 0;
+        const bsCents = matched?.amountBsCents ?? snap.actualBsCents ?? 0;
         paidBsCents += bsCents;
         settledOrders.push(order);
       }
@@ -153,7 +185,7 @@ export function ReceiverLedgersSection({
       period: summarize(filteredOrders),
       allTime: summarize(allOrders),
     };
-  }, [allOrders, filteredOrders, matchedPagoMovilByOrder]);
+  }, [allOrders, filteredOrders, matchedPagoMovilByOrder, actualItemCostCents]);
 
   const handleSaveZenoReceiver = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -217,15 +249,36 @@ export function ReceiverLedgersSection({
                 {zenoReceiver?.binanceAccount ? (
                   <p className="text-xs text-amber-200 font-semibold mt-0.5 break-all">
                     Cuenta Binance: {zenoReceiver.binanceAccount}
+                    {detectedZenoMeta.account &&
+                    zenoReceiver.binanceAccount !== detectedZenoMeta.account
+                      ? ` · Pay ID webhook: ${detectedZenoMeta.account}`
+                      : ""}
                   </p>
+                ) : detectedZenoMeta.account ? (
+                  <div className="mt-1 space-y-0.5">
+                    <p className="text-xs text-emerald-300 font-semibold break-all">
+                      Binance Pay ID detectado en ZenoBank:{" "}
+                      <span className="font-mono text-white">
+                        {detectedZenoMeta.account}
+                      </span>
+                      {detectedZenoMeta.accountLabel
+                        ? ` (${detectedZenoMeta.accountLabel})`
+                        : ""}
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      Extraído automáticamente del webhook real de ZenoBank · Pulsa Editar para agregar un alias/correo si quieres.
+                    </p>
+                  </div>
                 ) : (
                   <p className="text-xs text-amber-300/90 mt-0.5">
                     Sin cuenta Binance registrada aquí todavía — pulsa Editar para anotar tu correo/UID/Pay ID conectado en ZenoBank.
                   </p>
                 )}
                 <p className="text-[11px] text-slate-400 mt-0.5">
-                  Red: {zenoReceiver?.network || "USDT"}
-                  {zenoReceiver?.storeReference ? ` · Ref: ${zenoReceiver.storeReference}` : ""}
+                  Red: {zenoReceiver?.network || detectedZenoMeta.token || "USDT"}
+                  {(zenoReceiver?.storeReference || detectedZenoMeta.storeId)
+                    ? ` · Store Zeno: ${zenoReceiver?.storeReference || detectedZenoMeta.storeId}`
+                    : ""}
                 </p>
               </div>
             </div>
@@ -517,8 +570,8 @@ export function ReceiverLedgersSection({
               <div className="divide-y divide-white/[0.06] max-h-56 overflow-y-auto pr-1 text-xs rounded-xl bg-white/[0.02] border border-white/[0.06]">
                 {pmLedger.period.settledOrders.slice(0, 20).map((order) => {
                   const matched = matchedPagoMovilByOrder[order.id];
-                  const snap = getOrderSnapshot(order);
-                  const bsCents = matched?.amountBsCents ?? snap.totalBsCents ?? 0;
+                  const snap = getOrderSnapshot(order, actualItemCostCents);
+                  const bsCents = matched?.amountBsCents ?? snap.actualBsCents ?? 0;
                   const cashPaid =
                     order.paidCents > 0
                       ? order.paidCents

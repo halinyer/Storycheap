@@ -105,7 +105,7 @@ export async function GET(
       try {
         const pendingSuppliers = await listPendingSupplierOrdersForOrder(
           order.id,
-          "centralone"
+          ["centralone", "fazercards"]
         );
         let syncedAny = false;
         for (const so of pendingSuppliers) {

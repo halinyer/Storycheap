@@ -23,7 +23,10 @@ export function OrderDetailActions({
   const [reasonNote, setReasonNote] = useState("");
 
   const canRetry =
-    status === "PAID" || status === "PARTIAL" || status === "MANUAL_REVIEW";
+    status === "PAID" ||
+    status === "FULFILLING" ||
+    status === "PARTIAL" ||
+    status === "MANUAL_REVIEW";
   const canRefund = status !== "DELIVERED" && status !== "REFUNDED_CREDIT";
 
   return (

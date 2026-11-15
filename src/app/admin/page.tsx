@@ -18,10 +18,20 @@ import {
   listInventoryAdmin,
   listOrdersAdmin,
   listProviderConfigs,
+  listSupplierItemCostsAdmin,
+  listSupplierProvidersByOrderAdmin,
   listZenoPaymentProofsAdmin,
 } from "@/lib/server/repository";
-import { getCentralOneBalance } from "@/lib/server/suppliers/centralone";
-import { getFazerCardsBalance } from "@/lib/server/suppliers/fazercards";
+import type { EffectiveProviderId } from "@/lib/server/sales-metrics";
+import {
+  getCentralOneBalance,
+  listCentralOneOrders,
+} from "@/lib/server/suppliers/centralone";
+import {
+  getFazerCardsBalance,
+  isFazerCardsProductId,
+  listFazerCardsOrders,
+} from "@/lib/server/suppliers/fazercards";
 import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
 
 async function AdminOverviewContent() {
@@ -35,6 +45,8 @@ async function AdminOverviewContent() {
     reloadly,
     centralOne,
     fazerCards,
+    fazerOrdersReport,
+    centralOneOrdersReport,
     bsRateCents,
     capitalSnapshots,
     customers,
@@ -42,6 +54,8 @@ async function AdminOverviewContent() {
     pagoMovilNotifications,
     zenoReceiver,
     zenoProofs,
+    actualItemCostCents,
+    supplierProvidersByOrder,
   ] = await Promise.all([
     listOrdersAdmin(),
     listOrdersAdmin({ needsAttentionOnly: true }),
@@ -51,6 +65,8 @@ async function AdminOverviewContent() {
     getReloadlyBalance(),
     getCentralOneBalance(),
     getFazerCardsBalance(),
+    listFazerCardsOrders(50),
+    listCentralOneOrders(50),
     getBsRateCents(),
     getMonthlyCapitalSnapshots(),
     listCustomersAdmin(),
@@ -58,6 +74,8 @@ async function AdminOverviewContent() {
     listBankNotifications(150),
     getZenoBinanceReceiver(),
     listZenoPaymentProofsAdmin(),
+    listSupplierItemCostsAdmin(),
+    listSupplierProvidersByOrderAdmin(),
   ]);
 
   let manualCostCents = 0;
@@ -78,17 +96,29 @@ async function AdminOverviewContent() {
       subtitle: "Netflix, Gift Cards y Top-Ups",
       enabled: providerMap.get("fazercards")?.enabled ?? true,
       configured: fazerCards.configured,
+      healthy: fazerCards.healthy,
+      errorMessage: fazerCards.errorMessage,
       balanceCents: fazerCards.balanceCents,
       previousBalanceCents: null,
+      apiSpentCents: fazerOrdersReport.healthy ? fazerOrdersReport.totalSpentCents : null,
+      apiOrdersCount: fazerOrdersReport.healthy ? fazerOrdersReport.completedCount : null,
     },
     {
       id: "centralone",
       label: "Central One API",
-      subtitle: "GET /balance en vivo",
+      subtitle: "Gift Cards & PINs en vivo",
       enabled: providerMap.get("centralone")?.enabled ?? false,
       configured: centralOne.configured,
+      healthy: centralOne.healthy,
+      errorMessage: centralOne.errorMessage,
       balanceCents: centralOne.balanceCents,
       previousBalanceCents: null,
+      apiSpentCents: centralOneOrdersReport.healthy
+        ? centralOneOrdersReport.totalSpentCents
+        : null,
+      apiOrdersCount: centralOneOrdersReport.healthy
+        ? centralOneOrdersReport.completedCount
+        : null,
     },
     {
       id: "manual",
@@ -96,6 +126,7 @@ async function AdminOverviewContent() {
       subtitle: "Inventario valorizado al costo",
       enabled: providerMap.get("manual_inventory")?.enabled ?? true,
       configured: true,
+      healthy: true,
       balanceCents: manualCostCents,
       previousBalanceCents: null,
       codesAvailableCount: inventory.length,
@@ -106,6 +137,8 @@ async function AdminOverviewContent() {
       subtitle: "Solo cuentas KYC verificadas",
       enabled: providerMap.get("reloadly")?.enabled ?? false,
       configured: reloadly.configured,
+      healthy: reloadly.healthy,
+      errorMessage: reloadly.errorMessage,
       balanceCents: reloadly.balanceCents,
       previousBalanceCents: null,
     },
@@ -155,6 +188,44 @@ async function AdminOverviewContent() {
     }
   }
 
+  const variantsById = new Map(
+    catalog.flatMap((product) => product.variants.map((v) => [v.id, v] as const))
+  );
+  const fallbackProvidersByOrder: Record<string, EffectiveProviderId[]> = {};
+  for (const order of orders) {
+    if (order.fulfillments.length > 0) continue;
+    const seen = new Set<EffectiveProviderId>(
+      supplierProvidersByOrder[order.id] ?? []
+    );
+    if (seen.size === 0) {
+      for (const item of order.items) {
+        const variant = variantsById.get(item.variantId);
+        if (!variant) continue;
+        const isFazer =
+          Boolean(variant.centraloneProductId) &&
+          isFazerCardsProductId(variant.centraloneProductId);
+        if (variant.sourcePriority === "centralone_only") {
+          seen.add(isFazer ? "fazercards" : "centralone");
+        } else if (variant.sourcePriority === "manual_then_centralone") {
+          if (variant.availableStock <= 0 && variant.centraloneProductId) {
+            seen.add(isFazer ? "fazercards" : "centralone");
+          } else if (variant.availableStock > 0) {
+            seen.add("manual");
+          }
+        } else if (variant.sourcePriority === "reloadly_only") {
+          seen.add("reloadly");
+        } else if (variant.sourcePriority === "manual_then_reloadly") {
+          seen.add(variant.availableStock > 0 ? "manual" : "reloadly");
+        } else if (variant.sourcePriority === "manual_only") {
+          seen.add("manual");
+        }
+      }
+    }
+    if (seen.size > 0) {
+      fallbackProvidersByOrder[order.id] = Array.from(seen);
+    }
+  }
+
   return (
     <OverviewConsole
       orders={orders}
@@ -169,6 +240,10 @@ async function AdminOverviewContent() {
       zenoProofs={zenoProofs}
       activePagoMovilAccount={activePagoMovilAccount}
       matchedPagoMovilByOrder={matchedNotificationByOrder}
+      actualItemCostCents={actualItemCostCents}
+      fazerOrdersReport={fazerOrdersReport}
+      centralOneOrdersReport={centralOneOrdersReport}
+      fallbackProvidersByOrder={fallbackProvidersByOrder}
     />
   );
 }

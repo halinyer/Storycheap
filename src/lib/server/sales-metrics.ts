@@ -1,4 +1,19 @@
-import type { OrderDTO } from "@/types";
+import type { FulfillmentSource, OrderDTO } from "@/types";
+
+export type EffectiveProviderId = "fazercards" | "centralone" | "manual" | "reloadly";
+
+export function resolveFulfillmentProvider(f: {
+  source: FulfillmentSource | string;
+  supplierTxId?: string | null;
+}): EffectiveProviderId {
+  if (f.supplierTxId && f.supplierTxId.trim().toLowerCase().startsWith("fazer:")) {
+    return "fazercards";
+  }
+  if (f.source === "centralone" || f.source === "manual" || f.source === "reloadly" || f.source === "fazercards") {
+    return f.source;
+  }
+  return "manual";
+}
 
 export interface OrderFinancialSnapshot {
   isSettledSale: boolean;
@@ -8,6 +23,7 @@ export interface OrderFinancialSnapshot {
   hasAllCosts: boolean;
   bsRateCents: number | null;
   totalBsCents: number | null;
+  actualBsCents: number | null;
 }
 
 export interface PeriodSalesSummary {
@@ -34,7 +50,10 @@ export function formatBsRate(rateCents: number): string {
   return `Bs ${(rateCents / 100).toFixed(2)}/$`;
 }
 
-export function getOrderSnapshot(order: OrderDTO): OrderFinancialSnapshot {
+export function getOrderSnapshot(
+  order: OrderDTO,
+  actualItemCostCents?: Record<string, number>
+): OrderFinancialSnapshot {
   const isSettledSale =
     SETTLED_STATUSES.has(order.status) &&
     (order.paidCents > 0 || order.creditAppliedCents > 0 || order.status === "DELIVERED");
@@ -44,8 +63,12 @@ export function getOrderSnapshot(order: OrderDTO): OrderFinancialSnapshot {
   let hasAllCosts = order.items.length > 0;
 
   for (const item of order.items) {
-    if (typeof item.unitCostCents === "number") {
-      costSum += item.unitCostCents * item.quantity;
+    const unitCost =
+      actualItemCostCents && typeof actualItemCostCents[item.id] === "number"
+        ? actualItemCostCents[item.id]
+        : item.unitCostCents;
+    if (typeof unitCost === "number") {
+      costSum += unitCost * item.quantity;
       hasAnyCost = true;
     } else {
       hasAllCosts = false;
@@ -54,6 +77,8 @@ export function getOrderSnapshot(order: OrderDTO): OrderFinancialSnapshot {
 
   const costCents = hasAnyCost ? costSum : null;
   const profitCents = costCents !== null ? order.subtotalCents - costCents : null;
+  const isBsGateway =
+    order.paymentGateway === "pagomovil" || order.paymentGateway === "pablito";
 
   return {
     isSettledSale,
@@ -63,12 +88,14 @@ export function getOrderSnapshot(order: OrderDTO): OrderFinancialSnapshot {
     hasAllCosts,
     bsRateCents: order.bsRateCents ?? null,
     totalBsCents: order.totalBsCents ?? null,
+    actualBsCents: isBsGateway ? (order.totalBsCents ?? null) : null,
   };
 }
 
 export function computePeriodSales(
   orders: OrderDTO[],
-  now = new Date()
+  now = new Date(),
+  actualItemCostCents?: Record<string, number>
 ): PeriodSalesSummary[] {
   const startOfToday = new Date(now);
   startOfToday.setHours(0, 0, 0, 0);
@@ -78,7 +105,11 @@ export function computePeriodSales(
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
 
   const settled = orders
-    .map((o) => ({ order: o, snap: getOrderSnapshot(o), ts: Date.parse(o.createdAt) }))
+    .map((o) => ({
+      order: o,
+      snap: getOrderSnapshot(o, actualItemCostCents),
+      ts: Date.parse(o.createdAt),
+    }))
     .filter((x) => x.snap.isSettledSale && Number.isFinite(x.ts));
 
   const summarize = (label: string, sinceMs: number): PeriodSalesSummary => {
@@ -97,8 +128,8 @@ export function computePeriodSales(
         missingCostOrders += 1;
         if (snap.costCents !== null) costCents += snap.costCents;
       }
-      if (snap.totalBsCents !== null) {
-        totalBsCents += snap.totalBsCents;
+      if (snap.actualBsCents !== null) {
+        totalBsCents += snap.actualBsCents;
         bsCoveredOrders += 1;
       }
     }

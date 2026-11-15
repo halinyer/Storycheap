@@ -13,11 +13,13 @@ import {
   getOrderById,
   getZenoBinanceReceiver,
   getZenoPaymentProofForOrder,
+  listSupplierItemCostsAdmin,
 } from "@/lib/server/repository";
 import {
   formatBsCents,
   formatBsRate,
   getOrderSnapshot,
+  resolveFulfillmentProvider,
 } from "@/lib/server/sales-metrics";
 import { AlertTriangle, ArrowLeft, Bitcoin, Shield, Smartphone } from "lucide-react";
 
@@ -28,9 +30,12 @@ async function AdminOrderDetailContent({
 }) {
   await connection();
   const { id } = await params;
-  const order = await getOrderById(id);
+  const [order, actualItemCostCents] = await Promise.all([
+    getOrderById(id),
+    listSupplierItemCostsAdmin(),
+  ]);
   if (!order) notFound();
-  const snap = getOrderSnapshot(order);
+  const snap = getOrderSnapshot(order, actualItemCostCents);
 
   const [zenoReceiver, zenoProof, activeBank, pmReport, pmNotification] =
     await Promise.all([
@@ -118,11 +123,15 @@ async function AdminOrderDetailContent({
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
           <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/[0.08]">
-            <span className="text-slate-400 block">Fotografía en Bs</span>
+            <span className="text-slate-400 block">
+              {order.paymentGateway === "zenobank"
+                ? "Cobro en Bs"
+                : "Total cobrado en Bs"}
+            </span>
             <span className="font-black text-white text-sm">
-              {snap.totalBsCents !== null && snap.bsRateCents !== null
-                ? `${formatBsCents(snap.totalBsCents)} (${formatBsRate(snap.bsRateCents)})`
-                : "Sin tasa registrada"}
+              {snap.actualBsCents !== null && snap.bsRateCents !== null
+                ? `${formatBsCents(snap.actualBsCents)} (${formatBsRate(snap.bsRateCents)})`
+                : "Solo USD / USDT"}
             </span>
           </div>
           <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/[0.08]">
@@ -183,6 +192,19 @@ async function AdminOrderDetailContent({
                       : ""}
                   </div>
                 </>
+              ) : zenoProof?.transactions?.[0]?.to ? (
+                <div className="space-y-1">
+                  <div className="font-bold text-emerald-300">
+                    Binance Pay ID detectado: {zenoProof.transactions[0].to}
+                    {zenoProof.transactions[0].toLabel
+                      ? ` (${zenoProof.transactions[0].toLabel})`
+                      : ""}
+                  </div>
+                  <div className="text-slate-300">
+                    Red: {zenoProof.transactions[0].tokenId ?? "USDT"}
+                    {zenoProof.storeId ? ` • Store: ${zenoProof.storeId}` : ""}
+                  </div>
+                </div>
               ) : (
                 <div className="text-amber-200">
                   No has registrado tu correo/UID de Binance en{" "}
@@ -190,7 +212,8 @@ async function AdminOrderDetailContent({
                     Resumen Ejecutivo → Cuentas Receptoras
                   </Link>
                   . Los fondos se liquidaron a la cuenta Binance asociada a tu{" "}
-                  <code>ZENOBANK_API_KEY</code>.
+                  <code>ZENOBANK_API_KEY</code>
+                  {zenoProof?.storeId ? ` (Store: ${zenoProof.storeId})` : ""}.
                 </div>
               )}
               <div className="text-[11px] text-slate-400 pt-1">
@@ -331,7 +354,10 @@ async function AdminOrderDetailContent({
                     {f.productName} ({f.denominationLabel})
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    Origen: <span className="uppercase text-sky-300 font-bold">{f.source}</span>
+                    Origen:{" "}
+                    <span className="uppercase text-sky-300 font-bold">
+                      {resolveFulfillmentProvider(f)}
+                    </span>
                     {f.supplierTxId ? ` (TX: ${f.supplierTxId})` : ""} •
                     Revelado por cliente:{" "}
                     {f.revealedAt
