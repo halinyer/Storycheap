@@ -10,9 +10,11 @@ import {
   deleteVariantAdminAction,
   fetchCentralOneCatalogAdminAction,
   fetchFazerCardsCatalogAdminAction,
+  syncSupplierPricesAdminAction,
   toggleProductActiveAction,
   toggleVariantActiveAction,
   updateProductMetaAction,
+  updateSupplierPricingPolicyAdminAction,
   updateVariantAdminAction,
 } from "@/app/admin/actions";
 import { CARD_IMAGE_PRESETS, suggestProductImageUrl } from "@/lib/brand-theme";
@@ -21,6 +23,7 @@ import {
   evaluateSkuAlignment,
   suggestDenominationLabel,
 } from "@/lib/sku-guard";
+import { parseUsdToTenthsOfCent } from "@/lib/supplier-pricing-policy";
 import type { VariantPricingMeta } from "@/lib/server/repository";
 import { formatBsCents } from "@/lib/server/sales-metrics";
 import type { CentralOneCatalogItem } from "@/lib/server/suppliers/centralone";
@@ -30,6 +33,9 @@ import type {
   ProductVariantDTO,
   Region,
   SourcePriority,
+  SupplierPricingPolicy,
+  SupplierRepriceMode,
+  SupplierSyncState,
 } from "@/types";
 import {
   AlertTriangle,
@@ -43,6 +49,8 @@ import {
   Power,
   RefreshCw,
   Search,
+  Settings2,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Upload,
@@ -460,6 +468,15 @@ function VariantRow({
       ? (marginUsd / parsedPriceFloat) * 100
       : null;
 
+  const liveTenths = liveC1Item
+    ? parseUsdToTenthsOfCent(liveC1Item.resellerPriceRaw)
+    : null;
+  const inputTenths = parseUsdToTenthsOfCent(costUsd);
+  const hasLiveCostDrift =
+    liveTenths !== null &&
+    liveTenths > 0 &&
+    (inputTenths === null || liveTenths !== inputTenths);
+
   const usesCentralOne =
     sourcePriority === "centralone_only" ||
     sourcePriority === "manual_then_centralone";
@@ -754,7 +771,7 @@ function VariantRow({
                   <>
                     <div className="font-semibold text-white truncate">
                       {effectiveC1Name ||
-                        "SKU vinculado (pulsa Auditar SKUs o Cambiar)"}
+                        "SKU vinculado (pulsa Sincronizar precios o Cambiar)"}
                     </div>
                     <div className="font-mono text-[11px] text-slate-400 truncate">
                       {effectiveC1Region ? `${effectiveC1Region} · ` : ""}
@@ -826,6 +843,29 @@ function VariantRow({
                 className="w-full rounded-xl bg-slate-950 border border-white/15 focus:border-sky-400 focus:outline-none pl-6 pr-2 py-2 text-white font-mono tabular-nums"
               />
             </div>
+            {hasLiveCostDrift && liveC1Item ? (
+              <button
+                type="button"
+                onClick={() =>
+                  setCostUsd(
+                    formatCostDisplay(
+                      liveC1Item.resellerPriceRaw,
+                      liveC1Item.resellerPriceCents
+                    )
+                  )
+                }
+                className="mt-1 inline-flex items-center gap-1 rounded bg-amber-500/15 border border-amber-400/30 px-1.5 py-0.5 text-[10px] font-mono text-amber-200 hover:bg-amber-500/25 transition-colors max-w-full truncate"
+                title="Aplicar costo actual reportado por el distribuidor"
+              >
+                <span>API: ${liveC1Item.resellerPriceRaw} · Usar</span>
+              </button>
+            ) : pricingMeta?.previousExactCostUsd &&
+              pricingMeta?.exactCostUsd &&
+              pricingMeta.previousExactCostUsd !== pricingMeta.exactCostUsd ? (
+              <div className="text-[10px] font-mono text-amber-300/85 mt-1 truncate">
+                Antes ${pricingMeta.previousExactCostUsd}
+              </div>
+            ) : null}
           </div>
 
           <div className="min-w-0">
@@ -936,6 +976,29 @@ function VariantRow({
   );
 }
 
+const DEFAULT_POLICY_UI: SupplierPricingPolicy = {
+  mode: "protect_floor",
+  minMarginPct: 1,
+  minMarginUsdCents: 1,
+  autoSyncIntervalMinutes: 5,
+};
+
+const DEFAULT_SYNC_STATE_UI: SupplierSyncState = {
+  lastSyncedAt: null,
+  lastError: null,
+  checkedCount: 0,
+  updatedCostCount: 0,
+  adjustedSaleCount: 0,
+  atRiskCount: 0,
+  recentChanges: [],
+};
+
+const POLICY_MODE_LABELS: Record<SupplierRepriceMode, string> = {
+  protect_floor: "Auto-subir si el costo alcanza el PVP (sin perder)",
+  keep_margin_on_increase: "Subir manteniendo el mismo % de ganancia",
+  cost_only_block: "Solo actualizar costo y bloquear venta bajo pérdida",
+};
+
 export function ProductsConsole({
   catalog,
   pricingMetaMap = {},
@@ -946,6 +1009,8 @@ export function ProductsConsole({
   fazerCardsBalanceCents = null,
   bsRateCents = null,
   initialProductId = null,
+  initialPricingPolicy = DEFAULT_POLICY_UI,
+  initialSyncState = DEFAULT_SYNC_STATE_UI,
 }: {
   catalog: ProductDTO[];
   pricingMetaMap?: Record<string, VariantPricingMeta>;
@@ -956,6 +1021,8 @@ export function ProductsConsole({
   fazerCardsBalanceCents?: number | null;
   bsRateCents?: number | null;
   initialProductId?: string | null;
+  initialPricingPolicy?: SupplierPricingPolicy;
+  initialSyncState?: SupplierSyncState;
 }) {
   const router = useRouter();
   const [selectedProductId, setSelectedProductId] = useState<string | null>(
@@ -970,6 +1037,14 @@ export function ProductsConsole({
   const [togglingProductId, setTogglingProductId] = useState<string | null>(null);
   const [confirmDeleteProduct, setConfirmDeleteProduct] = useState<ProductDTO | null>(null);
   const [deletingProductId, setDeletingProductId] = useState<string | null>(null);
+
+  const [pricingPolicy, setPricingPolicy] =
+    useState<SupplierPricingPolicy>(initialPricingPolicy);
+  const [policyDraft, setPolicyDraft] =
+    useState<SupplierPricingPolicy>(initialPricingPolicy);
+  const [syncState, setSyncState] = useState<SupplierSyncState>(initialSyncState);
+  const [policyPanelOpen, setPolicyPanelOpen] = useState(false);
+  const [savingPolicy, setSavingPolicy] = useState(false);
 
   // Supplier catalog modal state (Central One + FazerCards API v2)
   const [c1ModalOpen, setC1ModalOpen] = useState(false);
@@ -1161,67 +1236,61 @@ export function ProductsConsole({
   const handleAuditLinkedSkus = async () => {
     setAuditingC1(true);
     try {
+      const nextSync = await syncSupplierPricesAdminAction();
+      setSyncState(nextSync);
+      router.refresh();
+
       const hasFazerVariants = catalog.some((p) =>
-        p.variants.some((v) => v.centraloneProductId?.trim().toLowerCase().startsWith("fazer:"))
+        p.variants.some((v) =>
+          v.centraloneProductId?.trim().toLowerCase().startsWith("fazer:")
+        )
       );
       const [c1List, fazerList] = await Promise.all([
-        c1Items ? Promise.resolve(c1Items) : fetchCentralOneCatalogAdminAction(),
+        fetchCentralOneCatalogAdminAction().catch(() => c1Items ?? []),
         hasFazerVariants
-          ? fazerItems
-            ? Promise.resolve(fazerItems)
-            : fetchFazerCardsCatalogAdminAction()
+          ? fetchFazerCardsCatalogAdminAction().catch(() => fazerItems ?? [])
           : Promise.resolve<CentralOneCatalogItem[]>([]),
       ]);
-      if (!c1Items) setC1Items(c1List);
-      if (hasFazerVariants && !fazerItems && fazerList.length > 0) {
+      if (c1List.length > 0) setC1Items(c1List);
+      if (hasFazerVariants && fazerList.length > 0) {
         setFazerItems(fazerList);
       }
-      const map = new Map<string, CentralOneCatalogItem>([
-        ...c1List.map((item): [string, CentralOneCatalogItem] => [item.id, item]),
-        ...fazerList.map((item): [string, CentralOneCatalogItem] => [item.id, item]),
-      ]);
 
-      let linkedCount = 0;
-      let alertCount = 0;
-      for (const product of catalog) {
-        for (const variant of product.variants) {
-          if (!variant.centraloneProductId) continue;
-          linkedCount += 1;
-          const liveItem = map.get(variant.centraloneProductId);
-          const check = evaluateSkuAlignment({
-            denominationLabel: variant.denominationLabel,
-            productName: product.name,
-            supplierName: liveItem?.name ?? pricingMetaMap[variant.id]?.centraloneProductName,
-            supplierSku: liveItem?.sku ?? pricingMetaMap[variant.id]?.centraloneSku,
-            costUsd:
-              liveItem
-                ? Number.parseFloat(liveItem.resellerPriceRaw)
-                : typeof variant.unitCostCents === "number"
-                  ? variant.unitCostCents / 100
-                  : null,
-            saleUsd: variant.salePriceCents / 100,
-          });
-          if (!liveItem || check.severity !== "ok") {
-            alertCount += 1;
-          }
-        }
-      }
-
-      if (alertCount > 0) {
+      if (nextSync.atRiskCount > 0) {
         toast.warning(
-          `Auditoría: ${linkedCount} SKU(s) vinculados y ${alertCount} alerta(s) detectada(s). Revisa los avisos en rojo.`
+          `Sync completado (${nextSync.checkedCount} SKUs): ${nextSync.updatedCostCount} costo(s) actualizado(s), ${nextSync.adjustedSaleCount} precio(s) ajustado(s) y ${nextSync.atRiskCount} SKU(s) requieren atención.`
         );
       } else {
         toast.success(
-          `Auditoría limpia: ${linkedCount} SKU(s) vinculados coinciden con su etiqueta y margen.`
+          `Costos vivos sincronizados (${nextSync.checkedCount} SKUs): ${nextSync.updatedCostCount} actualización(es) de costo y ${nextSync.adjustedSaleCount} ajuste(s) automáticos de PVP.`
         );
       }
     } catch (err) {
       toast.error(
-        err instanceof Error ? err.message : "No se pudo auditar el catálogo"
+        err instanceof Error
+          ? err.message
+          : "No se pudo sincronizar costos vivos"
       );
     } finally {
       setAuditingC1(false);
+    }
+  };
+
+  const handleSavePolicy = async () => {
+    setSavingPolicy(true);
+    try {
+      const saved = await updateSupplierPricingPolicyAdminAction(policyDraft);
+      setPricingPolicy(saved);
+      setPolicyDraft(saved);
+      setPolicyPanelOpen(false);
+      toast.success("Política anti-pérdida guardada");
+      router.refresh();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "No se pudo guardar la política"
+      );
+    } finally {
+      setSavingPolicy(false);
     }
   };
 
@@ -1479,10 +1548,12 @@ export function ProductsConsole({
                 type="button"
                 disabled={auditingC1}
                 onClick={() => void handleAuditLinkedSkus()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-white/10 bg-white/[0.04] hover:bg-white/[0.09] text-slate-200 font-semibold text-xs transition-colors"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-emerald-400/25 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-200 font-semibold text-xs transition-colors"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${auditingC1 ? "animate-spin" : ""}`} />
-                <span>{auditingC1 ? "Auditando…" : "Auditar SKUs API"}</span>
+                <span>
+                  {auditingC1 ? "Sincronizando…" : "Sincronizar precios vivos"}
+                </span>
               </button>
 
               <button
@@ -1498,6 +1569,173 @@ export function ProductsConsole({
                 <span>Nueva Gift Card</span>
               </button>
             </div>
+          </div>
+
+          {/* Protección Anti-Pérdida y Costos Vivos Strip */}
+          <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2.5 text-xs">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-400/25 text-emerald-300 font-semibold">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Anti-Pérdida Activo</span>
+                </span>
+                <span className="text-slate-300 font-medium">
+                  {POLICY_MODE_LABELS[pricingPolicy.mode]}
+                </span>
+                <span className="text-slate-500">·</span>
+                <span className="text-slate-400 font-mono text-[11px]">
+                  {syncState.lastSyncedAt
+                    ? `Sync: ${new Date(syncState.lastSyncedAt).toLocaleString("es-VE", {
+                        dateStyle: "short",
+                        timeStyle: "short",
+                      })} (${syncState.checkedCount} SKUs)`
+                    : "Sin sincronización registrada aún"}
+                </span>
+                {syncState.atRiskCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-400/30 text-[11px] font-semibold text-rose-300">
+                    {syncState.atRiskCount} con alerta / sin stock
+                  </span>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setPolicyPanelOpen((v) => !v)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-white/10 bg-white/[0.04] hover:bg-white/[0.08] text-slate-200 text-xs font-semibold transition-colors"
+              >
+                <Settings2 className="w-3.5 h-3.5" />
+                <span>{policyPanelOpen ? "Cerrar regla" : "Reglas y cambios"}</span>
+              </button>
+            </div>
+
+            {policyPanelOpen && (
+              <div className="pt-3 border-t border-white/[0.06] grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <div className="lg:col-span-6 space-y-3">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    Comportamiento cuando sube el costo mayorista
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">
+                        Regla de ajuste
+                      </label>
+                      <select
+                        value={policyDraft.mode}
+                        onChange={(e) =>
+                          setPolicyDraft((prev) => ({
+                            ...prev,
+                            mode: e.target.value as SupplierRepriceMode,
+                          }))
+                        }
+                        className="w-full rounded-xl bg-slate-950 border border-white/10 px-2.5 py-2 text-xs text-white focus:outline-none focus:border-indigo-400"
+                      >
+                        <option value="protect_floor">Subir mínimo al costo</option>
+                        <option value="keep_margin_on_increase">Mantener % ganancia</option>
+                        <option value="cost_only_block">Solo bloquear venta</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">
+                        Margen piso (%)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.5}
+                        value={policyDraft.minMarginPct}
+                        onChange={(e) =>
+                          setPolicyDraft((prev) => ({
+                            ...prev,
+                            minMarginPct: Math.max(0, Number(e.target.value) || 0),
+                          }))
+                        }
+                        className="w-full rounded-xl bg-slate-950 border border-white/10 px-2.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-indigo-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">
+                        Auto-sync (min)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={1440}
+                        step={1}
+                        value={policyDraft.autoSyncIntervalMinutes}
+                        onChange={(e) =>
+                          setPolicyDraft((prev) => ({
+                            ...prev,
+                            autoSyncIntervalMinutes: Math.max(
+                              1,
+                              Math.round(Number(e.target.value) || 5)
+                            ),
+                          }))
+                        }
+                        className="w-full rounded-xl bg-slate-950 border border-white/10 px-2.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-indigo-400"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] text-slate-400">
+                      Nunca se baja el precio de venta si el proveedor abarata; el checkout y la entrega bloquean cualquier venta por debajo del costo vivo.
+                    </p>
+                    <button
+                      type="button"
+                      disabled={savingPolicy}
+                      onClick={() => void handleSavePolicy()}
+                      className="shrink-0 px-3.5 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-bold transition-colors"
+                    >
+                      {savingPolicy ? "Guardando…" : "Guardar regla"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-6 space-y-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    Últimos cambios detectados en distribuidores
+                  </div>
+                  {syncState.recentChanges.length === 0 ? (
+                    <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] px-3 py-4 text-xs text-slate-500">
+                      Sin variaciones de costo registradas aún. Pulsa &ldquo;Sincronizar precios vivos&rdquo; para auditar contra las APIs ahora.
+                    </div>
+                  ) : (
+                    <div className="max-h-44 overflow-y-auto divide-y divide-white/[0.06] rounded-xl bg-white/[0.02] border border-white/[0.06]">
+                      {syncState.recentChanges.slice(0, 8).map((chg, idx) => (
+                        <div
+                          key={`${chg.variantId}-${chg.detectedAt}-${idx}`}
+                          className="px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                        >
+                          <div className="min-w-0">
+                            <span className="font-semibold text-white">
+                              {chg.productName} ({chg.denominationLabel})
+                            </span>{" "}
+                            <span className="text-slate-500">· {chg.supplierLabel}</span>
+                          </div>
+                          <div className="flex items-center gap-2 font-mono">
+                            <span className="text-amber-300">
+                              Costo: {chg.oldCostUsd ? `$${chg.oldCostUsd}` : "—"} → $
+                              {chg.newCostUsd}
+                            </span>
+                            {chg.saleAdjusted ? (
+                              <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-200">
+                                PVP {formatCents(chg.oldSaleCents)} →{" "}
+                                {formatCents(chg.newSaleCents)}
+                              </span>
+                            ) : chg.belowFloorBlocked ? (
+                              <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300">
+                                Bloqueado (&lt; costo)
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Filter & Search Strip */}
@@ -1917,7 +2155,7 @@ export function ProductsConsole({
                   <div className="divide-y divide-white/[0.06]">
                     {selectedProductVariants.map((variant) => (
                       <VariantRow
-                        key={variant.id}
+                        key={`${variant.id}-${variant.salePriceCents}-${variant.unitCostCents ?? "n"}-${pricingMetaMap[variant.id]?.exactCostUsd ?? "n"}`}
                         productName={selectedProduct.name}
                         productRegion={selectedProduct.region}
                         variant={variant}

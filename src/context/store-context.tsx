@@ -11,7 +11,13 @@ import React, {
 } from "react";
 import { useRouter } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase";
-import type { CartItem, Category, Region, SessionUser } from "@/types";
+import type {
+  CartItem,
+  Category,
+  ProductDTO,
+  Region,
+  SessionUser,
+} from "@/types";
 
 const CART_STORAGE_KEY = "storycheap_cart_v2";
 const CART_EVENT = "storycheap-cart-change";
@@ -81,6 +87,7 @@ interface StoreContextValue {
   updateQuantity: (variantId: string, quantity: number) => void;
   removeFromCart: (variantId: string) => void;
   clearCart: () => void;
+  syncCartPrices: () => Promise<{ changedCount: number; removedCount: number }>;
 
   // Auth / Session state (authoritative from /api/auth/session)
   sessionUser: SessionUser | null;
@@ -325,6 +332,57 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     writeCartToStorage([]);
   }, []);
 
+  const syncCartPrices = useCallback(async () => {
+    const current = readCartFromStorage();
+    if (current.length === 0) {
+      return { changedCount: 0, removedCount: 0 };
+    }
+    try {
+      const res = await fetch("/api/catalog", { cache: "no-store" });
+      if (!res.ok) return { changedCount: 0, removedCount: 0 };
+      const payload = (await res.json()) as { products?: ProductDTO[] };
+      const products = payload.products ?? [];
+      const lookup = new Map<
+        string,
+        { product: ProductDTO; variant: ProductDTO["variants"][number] }
+      >();
+      for (const product of products) {
+        for (const variant of product.variants) {
+          lookup.set(variant.id, { product, variant });
+        }
+      }
+
+      let changedCount = 0;
+      let removedCount = 0;
+      const next: CartItem[] = [];
+      for (const item of current) {
+        const match = lookup.get(item.variantId);
+        if (!match || !match.product.active || !match.variant.active) {
+          removedCount += 1;
+          continue;
+        }
+        if (match.variant.salePriceCents !== item.unitPriceCents) {
+          changedCount += 1;
+        }
+        next.push({
+          ...item,
+          productName: match.product.name,
+          denominationLabel: match.variant.denominationLabel,
+          unitPriceCents: match.variant.salePriceCents,
+          imageUrl: match.product.imageUrl,
+          region: match.product.region,
+        });
+      }
+
+      if (changedCount > 0 || removedCount > 0) {
+        writeCartToStorage(next);
+      }
+      return { changedCount, removedCount };
+    } catch {
+      return { changedCount: 0, removedCount: 0 };
+    }
+  }, []);
+
   const signInSandbox = useCallback(
     async (email: string, role?: "customer" | "admin") => {
       const res = await fetch("/api/auth/magic-link", {
@@ -374,6 +432,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       updateQuantity,
       removeFromCart,
       clearCart,
+      syncCartPrices,
       sessionUser,
       creditBalanceCents,
       sandboxEnabled,
@@ -394,6 +453,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       updateQuantity,
       removeFromCart,
       clearCart,
+      syncCartPrices,
       sessionUser,
       creditBalanceCents,
       sandboxEnabled,

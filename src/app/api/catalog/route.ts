@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { connection } from "next/server";
 import { listCatalog } from "@/lib/server/repository";
+import { ensureFreshSupplierCatalogPrices } from "@/lib/server/supplier-sync";
 
 export async function GET() {
   await connection();
+  await ensureFreshSupplierCatalogPrices();
   const rawProducts = await listCatalog(false);
   const products = rawProducts.map((p) => ({
     ...p,

@@ -1,5 +1,5 @@
 import "server-only";
-import type { OrderDTO, SessionUser } from "@/types";
+import type { OrderDTO, ProductVariantDTO, SessionUser } from "@/types";
 import { encryptCode, extractLast4 } from "./crypto";
 import { sendCreditAdjustmentEmail, sendOrderReadyEmail } from "./email";
 import {
@@ -12,13 +12,16 @@ import {
   appendAuditLog,
   appendCreditLedgerEntry,
   applyAdditionalCreditToOrder,
+  batchSaveVariantPricingMeta,
   commitReservedCodesForOrder,
   ensureCustomerProfile,
   getOrderByGatewayCheckoutId,
   getOrderById,
   getProviderConfig,
   getSupplierOrderByExternalId,
+  getSupplierPricingPolicy,
   getUserCreditBalanceCents,
+  getVariantPricingMetaMap,
   getVariantsLookupByIds,
   insertFulfillmentRecord,
   listPendingSupplierOrders,
@@ -32,9 +35,11 @@ import {
   updateOrderItemUnitCostCents,
   updateOrderPartialPaymentCents,
   updateSupplierOrderState,
+  updateVariantAdmin,
   updateWebhookEventStatus,
   upsertSupplierOrder,
 } from "./repository";
+import { applyLiveQuoteToVariant, fetchLiveQuoteForSku } from "./supplier-sync";
 import {
   createCentralOneOrder,
   getCentralOneOrder,
@@ -48,6 +53,84 @@ import {
   isFazerCardsProductId,
 } from "./suppliers/fazercards";
 import { purchaseReloadlyCard } from "./suppliers/reloadly";
+
+async function checkPreBuySupplierMargin(input: {
+  providerLabel: string;
+  productName: string;
+  variant: ProductVariantDTO;
+  itemUnitPriceCents: number;
+}): Promise<{ blockedReason: string | null }> {
+  const skuId = input.variant.centraloneProductId;
+  if (skuId) {
+    const liveQuote = await fetchLiveQuoteForSku(skuId, { forceFresh: true }).catch(
+      () => null
+    );
+    if (liveQuote) {
+      try {
+        const [pricingMetaMap, policy] = await Promise.all([
+          getVariantPricingMetaMap(),
+          getSupplierPricingPolicy(),
+        ]);
+        await applyLiveQuoteToVariant({
+          productName: input.productName,
+          variant: input.variant,
+          quote: liveQuote,
+          existingMeta: pricingMetaMap[input.variant.id],
+          policy,
+        });
+      } catch {
+        // Non-fatal metadata persistence failure; live quote guard still runs below.
+      }
+
+      if (liveQuote.costTenths >= input.itemUnitPriceCents * 100) {
+        return {
+          blockedReason: `${input.providerLabel} bloqueado (anti-pérdida) para ${input.productName}: costo actual ($${liveQuote.costRaw}) alcanza o supera el precio cobrado ($${(input.itemUnitPriceCents / 100).toFixed(2)}).`,
+        };
+      }
+      return { blockedReason: null };
+    }
+  }
+
+  if (
+    typeof input.variant.unitCostCents === "number" &&
+    input.variant.unitCostCents > input.itemUnitPriceCents
+  ) {
+    return {
+      blockedReason: `${input.providerLabel} bloqueado (anti-pérdida) para ${input.productName}: costo configurado ($${(input.variant.unitCostCents / 100).toFixed(2)}) supera el precio de venta ($${(input.itemUnitPriceCents / 100).toFixed(2)}).`,
+    };
+  }
+
+  return { blockedReason: null };
+}
+
+async function syncActualBilledVariantCost(
+  variant: ProductVariantDTO,
+  billedUnitCostCents: number
+): Promise<void> {
+  if (!Number.isFinite(billedUnitCostCents) || billedUnitCostCents <= 0) return;
+  if (variant.unitCostCents === billedUnitCostCents) return;
+  try {
+    await updateVariantAdmin(variant.id, { unitCostCents: billedUnitCostCents });
+    const metaMap = await getVariantPricingMetaMap();
+    const existing = metaMap[variant.id];
+    const existingRounded =
+      existing?.exactCostUsd && /^\d+(\.\d+)?$/.test(existing.exactCostUsd.trim())
+        ? Math.round(Number.parseFloat(existing.exactCostUsd.trim()) * 100)
+        : null;
+    if (existingRounded !== billedUnitCostCents) {
+      await batchSaveVariantPricingMeta({
+        [variant.id]: {
+          ...(existing ?? {}),
+          previousExactCostUsd: existing?.exactCostUsd ?? null,
+          exactCostUsd: (billedUnitCostCents / 100).toFixed(4),
+          lastSyncedAt: new Date().toISOString(),
+        },
+      });
+    }
+  } catch {
+    // Non-fatal post-purchase cost sync
+  }
+}
 
 /**
  * Delivers all items of a PAID/PARTIAL/MANUAL_REVIEW order using pre-reserved
@@ -217,23 +300,33 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       variantMeta.centraloneProductId
     ) {
       const remaining = item.quantity - delivered;
-      if (
-        typeof variantMeta.unitCostCents === "number" &&
-        variantMeta.unitCostCents > item.unitPriceCents
-      ) {
-        attentionReasons.push(
-          `FazerCards bloqueado para ${item.productName}: costo configurado ($${(variantMeta.unitCostCents / 100).toFixed(2)}) supera el precio de venta ($${(item.unitPriceCents / 100).toFixed(2)}).`
-        );
+      const existingFz = (
+        await listPendingSupplierOrdersForOrder(order.id, "fazercards")
+      ).find((so) => so.orderItemId === item.id && Boolean(so.externalOrderId));
+
+      const marginCheck = existingFz?.externalOrderId
+        ? { blockedReason: null }
+        : await checkPreBuySupplierMargin({
+            providerLabel: "FazerCards",
+            productName: item.productName,
+            variant: variantMeta,
+            itemUnitPriceCents: item.unitPriceCents,
+          });
+
+      if (marginCheck.blockedReason) {
+        attentionReasons.push(marginCheck.blockedReason);
       } else {
         try {
-          const existingFz = (
-            await listPendingSupplierOrdersForOrder(order.id, "fazercards")
-          ).find((so) => so.orderItemId === item.id && Boolean(so.externalOrderId));
-
-          const fzOrder = existingFz?.externalOrderId
+          const fetchedFz = existingFz?.externalOrderId
+            ? await getFazerCardsOrder(existingFz.externalOrderId)
+            : null;
+          const fzOrder = fetchedFz
             ? {
-                ...(await getFazerCardsOrder(existingFz.externalOrderId)),
-                unitCostCents: existingFz.supplierUnitCostCents ?? 0,
+                ...fetchedFz,
+                unitCostCents:
+                  fetchedFz.unitCostCents > 0
+                    ? fetchedFz.unitCostCents
+                    : (existingFz?.supplierUnitCostCents ?? 0),
               }
             : await createFazerCardsGiftCardOrder({
                 fazerProductId: variantMeta.centraloneProductId,
@@ -263,6 +356,7 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
           });
           if (fzOrder.unitCostCents > 0) {
             await updateOrderItemUnitCostCents(item.id, fzOrder.unitCostCents);
+            await syncActualBilledVariantCost(variantMeta, fzOrder.unitCostCents);
           }
           invalidateFazerCardsBalanceCache();
 
@@ -315,19 +409,23 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       variantMeta.centraloneProductId
     ) {
       const remaining = item.quantity - delivered;
-      if (
-        typeof variantMeta.unitCostCents === "number" &&
-        variantMeta.unitCostCents > item.unitPriceCents
-      ) {
-        attentionReasons.push(
-          `Central One bloqueado para ${item.productName}: costo configurado ($${(variantMeta.unitCostCents / 100).toFixed(2)}) supera el precio de venta ($${(item.unitPriceCents / 100).toFixed(2)}).`
-        );
+      const existingC1 = (
+        await listPendingSupplierOrdersForOrder(order.id, "centralone")
+      ).find((so) => so.orderItemId === item.id && Boolean(so.externalOrderId));
+
+      const marginCheck = existingC1?.externalOrderId
+        ? { blockedReason: null }
+        : await checkPreBuySupplierMargin({
+            providerLabel: "Central One",
+            productName: item.productName,
+            variant: variantMeta,
+            itemUnitPriceCents: item.unitPriceCents,
+          });
+
+      if (marginCheck.blockedReason) {
+        attentionReasons.push(marginCheck.blockedReason);
       } else {
         try {
-          const existingC1 = (
-            await listPendingSupplierOrdersForOrder(order.id, "centralone")
-          ).find((so) => so.orderItemId === item.id && Boolean(so.externalOrderId));
-
           const c1Order = existingC1?.externalOrderId
             ? await getCentralOneOrder(existingC1.externalOrderId)
             : await createCentralOneOrder({
@@ -352,6 +450,7 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
           });
           if (c1Order.unitCostCents && c1Order.unitCostCents > 0) {
             await updateOrderItemUnitCostCents(item.id, c1Order.unitCostCents);
+            await syncActualBilledVariantCost(variantMeta, c1Order.unitCostCents);
           }
           invalidateCentralOneBalanceCache();
 
@@ -889,7 +988,8 @@ export async function syncCentralOneOrderProgress(
               ? "failed"
               : "processing",
           deliveredCount: fz.codes.length,
-          unitCostCents: supplierOrder.supplierUnitCostCents,
+          unitCostCents:
+            fz.unitCostCents > 0 ? fz.unitCostCents : supplierOrder.supplierUnitCostCents,
           failureReason: null as string | null,
           raw: fz.rawResponse,
           fazerCodes: fz.codes,
@@ -977,6 +1077,15 @@ export async function syncCentralOneOrderProgress(
   });
   if (resolvedUnitCost && resolvedUnitCost > 0) {
     await updateOrderItemUnitCostCents(targetItem.id, resolvedUnitCost);
+    try {
+      const variantLookup = await getVariantsLookupByIds([targetItem.variantId]);
+      const billedVariant = variantLookup?.get?.(targetItem.variantId)?.variant;
+      if (billedVariant) {
+        await syncActualBilledVariantCost(billedVariant, resolvedUnitCost);
+      }
+    } catch {
+      // Non-fatal variant metadata sync
+    }
   }
 
   const failureNote = live.failureReason ?? live.fazerFailReason ?? null;

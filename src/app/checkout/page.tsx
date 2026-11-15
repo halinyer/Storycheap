@@ -39,6 +39,7 @@ export default function CheckoutPage() {
     cartItems,
     cartSubtotalCents,
     clearCart,
+    syncCartPrices,
     sessionUser,
     creditBalanceCents,
     refreshSession,
@@ -71,6 +72,21 @@ export default function CheckoutPage() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void syncCartPrices().then(({ changedCount, removedCount }) => {
+      if (!active) return;
+      if (changedCount > 0 || removedCount > 0) {
+        toast.info(
+          "Actualizamos los precios y disponibilidad de tu carrito según la cotización vigente."
+        );
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [syncCartPrices]);
 
   const usableCreditCents =
     sessionUser && applyCredit
@@ -106,6 +122,7 @@ export default function CheckoutPage() {
           items: cartItems.map((it) => ({
             variantId: it.variantId,
             quantity: it.quantity,
+            expectedUnitPriceCents: it.unitPriceCents,
           })),
           applyStoreCredit: Boolean(sessionUser && applyCredit),
           paymentGateway: amountDueCents === 0 ? "zenobank" : paymentGateway,
@@ -114,10 +131,15 @@ export default function CheckoutPage() {
 
       const data = (await res.json()) as {
         error?: string;
+        code?: string;
         orderId?: string;
         checkoutUrl?: string;
         paidInFullByCredit?: boolean;
       };
+
+      if (data.code === "PRICE_UPDATED") {
+        await syncCartPrices();
+      }
 
       if (!res.ok || !data.orderId) {
         throw new Error(

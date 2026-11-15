@@ -19,6 +19,8 @@ import type {
   Region,
   RevealedCodeDTO,
   SourcePriority,
+  SupplierPricingPolicy,
+  SupplierSyncState,
   TreasuryAccountId,
   TreasuryMovementDTO,
   TreasuryMovementType,
@@ -1547,9 +1549,68 @@ export interface VariantPricingMeta {
   centraloneProductName?: string | null;
   centraloneSku?: string | null;
   centraloneRegion?: string | null;
+  previousExactCostUsd?: string | null;
+  lastSyncedAt?: string | null;
+  supplierAvailable?: boolean | null;
+  supplierStockCount?: number | null;
 }
 
 const sandboxVariantPricingMeta: Record<string, VariantPricingMeta> = {};
+
+const SUPPLIER_PRICING_POLICY_KEY = "supplier_pricing_policy";
+const SUPPLIER_SYNC_STATE_KEY = "supplier_sync_state";
+
+export const DEFAULT_SUPPLIER_PRICING_POLICY: SupplierPricingPolicy = {
+  mode: "protect_floor",
+  minMarginPct: 2,
+  minMarginUsdCents: 5,
+  autoSyncIntervalMinutes: 3,
+};
+
+export const DEFAULT_SUPPLIER_SYNC_STATE: SupplierSyncState = {
+  lastSyncedAt: null,
+  lastError: null,
+  checkedCount: 0,
+  updatedCostCount: 0,
+  adjustedSaleCount: 0,
+  atRiskCount: 0,
+  recentChanges: [],
+};
+
+const sandboxSettingsStore = new Map<string, unknown>();
+
+async function readSettingJson<T>(key: string, fallback: T): Promise<T> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const val = sandboxSettingsStore.get(key);
+    return val !== undefined ? (val as T) : fallback;
+  }
+  const { data, error } = await ctx.admin
+    .from("store_settings")
+    .select("value")
+    .eq("key", key)
+    .maybeSingle();
+  if (error || !data || !data.value) return fallback;
+  return data.value as T;
+}
+
+async function writeSettingJson<T>(
+  key: string,
+  value: T,
+  updatedBy?: string | null
+): Promise<void> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    sandboxSettingsStore.set(key, value);
+    return;
+  }
+  const { error } = await ctx.admin.from("store_settings").upsert({
+    key,
+    value,
+    updated_by: updatedBy ?? null,
+  });
+  if (error) throw error;
+}
 
 /** Reads per-variant 4-decimal cost and linked Central One display metadata from store_settings. */
 export async function getVariantPricingMetaMap(): Promise<
@@ -1560,16 +1621,38 @@ export async function getVariantPricingMetaMap(): Promise<
     return { ...sandboxVariantPricingMeta };
   }
 
-  const { data, error } = await ctx.admin
-    .from("store_settings")
-    .select("value")
-    .eq("key", "variant_pricing_meta")
-    .maybeSingle();
-
-  if (error || !data) return {};
-  const map = (data.value as { variants?: Record<string, VariantPricingMeta> } | null)
-    ?.variants;
+  const data = await readSettingJson<{ variants?: Record<string, VariantPricingMeta> }>(
+    "variant_pricing_meta",
+    {}
+  );
+  const map = data?.variants;
   return map && typeof map === "object" ? map : {};
+}
+
+/** Batch-upserts per-variant 4-decimal cost and supplier metadata in store_settings. */
+export async function batchSaveVariantPricingMeta(
+  updates: Record<string, VariantPricingMeta>,
+  updatedBy?: string | null
+): Promise<void> {
+  const entries = Object.entries(updates);
+  if (entries.length === 0) return;
+
+  const existing = await getVariantPricingMetaMap();
+  const next: Record<string, VariantPricingMeta> = { ...existing };
+  for (const [variantId, meta] of entries) {
+    next[variantId] = {
+      ...(existing[variantId] ?? {}),
+      ...meta,
+    };
+  }
+
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    Object.assign(sandboxVariantPricingMeta, next);
+    return;
+  }
+
+  await writeSettingJson("variant_pricing_meta", { variants: next }, updatedBy);
 }
 
 /** Upserts per-variant 4-decimal cost and Central One display metadata in store_settings. */
@@ -1578,27 +1661,7 @@ export async function saveVariantPricingMeta(
   meta: VariantPricingMeta,
   updatedBy?: string | null
 ): Promise<void> {
-  const existing = await getVariantPricingMetaMap();
-  const next: Record<string, VariantPricingMeta> = {
-    ...existing,
-    [variantId]: {
-      ...(existing[variantId] ?? {}),
-      ...meta,
-    },
-  };
-
-  const ctx = assertDbOrSandbox();
-  if (ctx.mode === "sandbox") {
-    Object.assign(sandboxVariantPricingMeta, next);
-    return;
-  }
-
-  const { error } = await ctx.admin.from("store_settings").upsert({
-    key: "variant_pricing_meta",
-    value: { variants: next },
-    updated_by: updatedBy ?? null,
-  });
-  if (error) throw error;
+  await batchSaveVariantPricingMeta({ [variantId]: meta }, updatedBy);
 }
 
 /** Removes pricing metadata entries for deleted variants from store_settings. */
@@ -1626,12 +1689,86 @@ export async function removeVariantPricingMeta(
   }
   if (!changed) return;
 
-  const { error } = await ctx.admin.from("store_settings").upsert({
-    key: "variant_pricing_meta",
-    value: { variants: next },
-    updated_by: updatedBy ?? null,
-  });
-  if (error) throw error;
+  await writeSettingJson("variant_pricing_meta", { variants: next }, updatedBy);
+}
+
+export async function getSupplierPricingPolicy(): Promise<SupplierPricingPolicy> {
+  const raw = await readSettingJson<Partial<SupplierPricingPolicy>>(
+    SUPPLIER_PRICING_POLICY_KEY,
+    {}
+  );
+  const mode =
+    raw.mode === "protect_floor" ||
+    raw.mode === "keep_margin_on_increase" ||
+    raw.mode === "cost_only_block"
+      ? raw.mode
+      : DEFAULT_SUPPLIER_PRICING_POLICY.mode;
+  return {
+    mode,
+    minMarginPct:
+      typeof raw.minMarginPct === "number" &&
+      Number.isFinite(raw.minMarginPct) &&
+      raw.minMarginPct >= 0
+        ? raw.minMarginPct
+        : DEFAULT_SUPPLIER_PRICING_POLICY.minMarginPct,
+    minMarginUsdCents:
+      typeof raw.minMarginUsdCents === "number" &&
+      Number.isFinite(raw.minMarginUsdCents) &&
+      raw.minMarginUsdCents >= 0
+        ? Math.round(raw.minMarginUsdCents)
+        : DEFAULT_SUPPLIER_PRICING_POLICY.minMarginUsdCents,
+    autoSyncIntervalMinutes:
+      typeof raw.autoSyncIntervalMinutes === "number" &&
+      Number.isFinite(raw.autoSyncIntervalMinutes) &&
+      raw.autoSyncIntervalMinutes >= 1
+        ? Math.round(raw.autoSyncIntervalMinutes)
+        : DEFAULT_SUPPLIER_PRICING_POLICY.autoSyncIntervalMinutes,
+    updatedAt: raw.updatedAt,
+  };
+}
+
+export async function saveSupplierPricingPolicy(
+  patch: Partial<SupplierPricingPolicy>,
+  updatedBy?: string | null
+): Promise<SupplierPricingPolicy> {
+  const current = await getSupplierPricingPolicy();
+  const next: SupplierPricingPolicy = {
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  await writeSettingJson(SUPPLIER_PRICING_POLICY_KEY, next, updatedBy);
+  return next;
+}
+
+export async function getSupplierSyncState(): Promise<SupplierSyncState> {
+  const raw = await readSettingJson<Partial<SupplierSyncState>>(
+    SUPPLIER_SYNC_STATE_KEY,
+    {}
+  );
+  return {
+    lastSyncedAt: typeof raw.lastSyncedAt === "string" ? raw.lastSyncedAt : null,
+    lastError: typeof raw.lastError === "string" ? raw.lastError : null,
+    checkedCount: typeof raw.checkedCount === "number" ? raw.checkedCount : 0,
+    updatedCostCount: typeof raw.updatedCostCount === "number" ? raw.updatedCostCount : 0,
+    adjustedSaleCount: typeof raw.adjustedSaleCount === "number" ? raw.adjustedSaleCount : 0,
+    atRiskCount: typeof raw.atRiskCount === "number" ? raw.atRiskCount : 0,
+    recentChanges: Array.isArray(raw.recentChanges) ? raw.recentChanges.slice(0, 30) : [],
+  };
+}
+
+export async function saveSupplierSyncState(
+  state: SupplierSyncState,
+  updatedBy?: string | null
+): Promise<void> {
+  await writeSettingJson(
+    SUPPLIER_SYNC_STATE_KEY,
+    {
+      ...state,
+      recentChanges: state.recentChanges.slice(0, 30),
+    },
+    updatedBy
+  );
 }
 
 export async function createOrderWithItems(

@@ -86,7 +86,7 @@ export const CATALOG_SEED: ProductDTO[] = [
       "Introduce el código de 16 caracteres y confirma.",
     ],
     terms: "Válido solo en Nintendo eShop región EE. UU. Requiere conexión a internet.",
-    imageUrl: "/cards/nintendo.jpg",
+    imageUrl: "/cards/nintendo.png",
     accentColor: "#e60012",
     gradient: "from-red-600 to-rose-900",
     active: true,

@@ -41,6 +41,7 @@ import {
   previewCsvInventoryBatch,
   releaseExpiredReservations,
   saveMonthlyCapitalSnapshot,
+  saveSupplierPricingPolicy,
   saveVariantPricingMeta,
   saveZenoBinanceReceiver,
   setBsRateCents,
@@ -66,11 +67,17 @@ import {
   getFazerCardsCatalog,
 } from "@/lib/server/suppliers/fazercards";
 import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
+import {
+  invalidateSupplierQuoteCache,
+  syncSupplierCatalogCosts,
+} from "@/lib/server/supplier-sync";
 import type {
   BotDeviceDTO,
   PagoMovilBotSettingsDTO,
   ProviderConfigDTO,
   SourcePriority,
+  SupplierPricingPolicy,
+  SupplierSyncState,
   TreasuryMovementDTO,
   TreasuryMovementType,
 } from "@/types";
@@ -1324,4 +1331,61 @@ export async function settleHistoricalTestsAction(input: {
     flaggedOrdersCount: parsed.orderIds.length,
     createdMovementsCount: createdIds.length,
   };
+}
+
+export async function syncSupplierPricesAdminAction(): Promise<SupplierSyncState> {
+  const adminUser = await requireAdminUser();
+  invalidateSupplierQuoteCache();
+  const state = await syncSupplierCatalogCosts({
+    force: true,
+    updatedBy: adminUser.id,
+  });
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "catalog.sync_supplier_prices",
+    targetType: "catalog",
+    targetId: "all",
+    metadata: {
+      checkedCount: state.checkedCount,
+      updatedCostCount: state.updatedCostCount,
+      adjustedSaleCount: state.adjustedSaleCount,
+      atRiskCount: state.atRiskCount,
+      lastError: state.lastError,
+    },
+  });
+
+  revalidatePath("/", "layout");
+  revalidatePath("/admin");
+  revalidatePath("/admin/products");
+  return state;
+}
+
+const supplierPricingPolicySchema = z.object({
+  mode: z.enum(["protect_floor", "keep_margin_on_increase", "cost_only_block"]),
+  minMarginPct: z.number().min(0).max(100),
+  minMarginUsdCents: z.number().int().min(0).max(50_000),
+  autoSyncIntervalMinutes: z.number().int().min(1).max(1440),
+});
+
+export async function updateSupplierPricingPolicyAdminAction(
+  input: SupplierPricingPolicy
+): Promise<SupplierPricingPolicy> {
+  const adminUser = await requireAdminUser();
+  const parsed = supplierPricingPolicySchema.parse(input);
+  const saved = await saveSupplierPricingPolicy(parsed, adminUser.id);
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "catalog.update_supplier_policy",
+    targetType: "store_setting",
+    targetId: "supplier_pricing_policy",
+    metadata: { ...saved },
+  });
+
+  revalidatePath("/admin/products");
+  revalidatePath("/", "layout");
+  return saved;
 }

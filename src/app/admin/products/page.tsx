@@ -3,10 +3,13 @@ import { connection } from "next/server";
 import { ProductsConsole } from "@/components/admin/products-console";
 import {
   getBsRateCents,
+  getSupplierPricingPolicy,
+  getSupplierSyncState,
   getVariantPricingMetaMap,
   listCatalog,
   listProviderConfigs,
 } from "@/lib/server/repository";
+import { ensureFreshSupplierCatalogPrices } from "@/lib/server/supplier-sync";
 import { getCachedCentralOneBalanceCents } from "@/lib/server/suppliers/centralone";
 import { getCachedFazerCardsBalanceCents } from "@/lib/server/suppliers/fazercards";
 
@@ -16,6 +19,7 @@ async function AdminProductsContent({
   searchParams: Promise<{ product?: string }>;
 }) {
   await connection();
+  await ensureFreshSupplierCatalogPrices({ maxAgeMs: 90_000 });
   const [
     sp,
     catalog,
@@ -24,6 +28,8 @@ async function AdminProductsContent({
     centralOneBalanceCents,
     fazerCardsBalanceCents,
     bsRateCents,
+    pricingPolicy,
+    syncState,
   ] = await Promise.all([
     searchParams,
     listCatalog(true),
@@ -32,6 +38,8 @@ async function AdminProductsContent({
     getCachedCentralOneBalanceCents(),
     getCachedFazerCardsBalanceCents(),
     getBsRateCents(),
+    getSupplierPricingPolicy(),
+    getSupplierSyncState(),
   ]);
   const reloadlyEnabled = Boolean(
     providers.find((p) => p.id === "reloadly")?.enabled
@@ -54,6 +62,8 @@ async function AdminProductsContent({
       fazerCardsBalanceCents={fazerCardsBalanceCents}
       bsRateCents={bsRateCents}
       initialProductId={sp.product ?? null}
+      initialPricingPolicy={pricingPolicy}
+      initialSyncState={syncState}
     />
   );
 }

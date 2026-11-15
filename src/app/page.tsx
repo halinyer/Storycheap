@@ -6,11 +6,13 @@ import { GiftCardGrid } from "@/components/storefront/gift-card-grid";
 import { HeroSection } from "@/components/storefront/hero-section";
 import { PayYourWay } from "@/components/storefront/pay-your-way";
 import { listCatalog } from "@/lib/server/repository";
+import { ensureFreshSupplierCatalogPrices } from "@/lib/server/supplier-sync";
 import { isStorePreviewMode } from "@/lib/server/env";
 import { CheckCircle2, Lock, ShieldCheck, Zap } from "lucide-react";
 
 async function CatalogSectionLoader() {
   await connection();
+  await ensureFreshSupplierCatalogPrices();
   const products = await listCatalog(false);
   return <GiftCardGrid initialProducts={products} />;
 }

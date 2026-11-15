@@ -557,6 +557,21 @@ function normalizeFazerStatus(
   return "PENDING";
 }
 
+function extractFazerOrderUnitCostCents(
+  order: FazerCardsOrderResource | null | undefined,
+  quantityFallback = 1
+): number {
+  if (!order) return 0;
+  const unitCents = parseCentralOneDecimalToCents(order.price_usd_per_unit);
+  if (unitCents && unitCents > 0) return unitCents;
+  const totalCents = parseCentralOneDecimalToCents(order.total_usd);
+  const qty = Number(order.quantity ?? quantityFallback);
+  if (totalCents && totalCents > 0 && qty > 0) {
+    return Math.round(totalCents / qty);
+  }
+  return 0;
+}
+
 export async function createFazerCardsGiftCardOrder(input: {
   fazerProductId: string;
   quantity: number;
@@ -597,20 +612,11 @@ export async function createFazerCardsGiftCardOrder(input: {
     throw new Error("La respuesta de FazerCards no incluyó un ID de orden.");
   }
 
-  const unitCents = parseCentralOneDecimalToCents(order.price_usd_per_unit);
-  const totalCents = parseCentralOneDecimalToCents(order.total_usd);
-  const unitCostCents =
-    unitCents && unitCents > 0
-      ? unitCents
-      : totalCents && totalCents > 0 && input.quantity > 0
-      ? Math.round(totalCents / input.quantity)
-      : 0;
-
   return {
     externalOrderId: `${FAZERCARDS_PRODUCT_PREFIX}${order.id}`,
     rawOrderId: order.id,
     status: normalizeFazerStatus(order.status),
-    unitCostCents,
+    unitCostCents: extractFazerOrderUnitCostCents(order, input.quantity),
     codes: extractCodesFromOrder(order),
     failReason: order.fail_reason ?? null,
     rawResponse: data as Record<string, unknown>,
@@ -621,6 +627,7 @@ export async function getFazerCardsOrder(externalOrRawOrderId: string): Promise<
   externalOrderId: string;
   rawOrderId: string;
   status: "COMPLETED" | "PENDING" | "FAILED";
+  unitCostCents: number;
   codes: string[];
   failReason?: string | null;
   rawResponse: Record<string, unknown>;
@@ -638,6 +645,7 @@ export async function getFazerCardsOrder(externalOrRawOrderId: string): Promise<
     externalOrderId: `${FAZERCARDS_PRODUCT_PREFIX}${order?.id || rawOrderId}`,
     rawOrderId: order?.id || rawOrderId,
     status: normalizeFazerStatus(order?.status),
+    unitCostCents: extractFazerOrderUnitCostCents(order, 1),
     codes: extractCodesFromOrder(order),
     failReason: order?.fail_reason ?? null,
     rawResponse: data as Record<string, unknown>,

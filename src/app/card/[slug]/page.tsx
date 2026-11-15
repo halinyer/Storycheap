@@ -2,6 +2,7 @@ import React, { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import { getProductBySlug } from "@/lib/server/repository";
+import { ensureFreshSupplierCatalogPrices } from "@/lib/server/supplier-sync";
 import { ProductDetailClient } from "./product-detail-client";
 
 async function ProductDetailLoader({
@@ -10,6 +11,7 @@ async function ProductDetailLoader({
   params: Promise<{ slug: string }>;
 }) {
   await connection();
+  await ensureFreshSupplierCatalogPrices();
   const { slug } = await params;
   const product = await getProductBySlug(slug);
   if (!product) {

@@ -423,3 +423,40 @@ export interface TreasuryPositionSummary {
   fundedBySupplierUsdCents: Record<string, number>;
 }
 
+export type SupplierRepriceMode =
+  | "protect_floor"
+  | "keep_margin_on_increase"
+  | "cost_only_block";
+
+export interface SupplierPricingPolicy {
+  mode: SupplierRepriceMode;
+  minMarginPct: number;
+  minMarginUsdCents: number;
+  autoSyncIntervalMinutes: number;
+  updatedAt?: string;
+}
+
+export interface SupplierCostChangeRecord {
+  variantId: string;
+  productName: string;
+  denominationLabel: string;
+  supplierLabel: string;
+  oldCostUsd: string | null;
+  newCostUsd: string;
+  oldSaleCents: number;
+  newSaleCents: number;
+  saleAdjusted: boolean;
+  belowFloorBlocked: boolean;
+  detectedAt: string;
+}
+
+export interface SupplierSyncState {
+  lastSyncedAt: string | null;
+  lastError: string | null;
+  checkedCount: number;
+  updatedCostCount: number;
+  adjustedSaleCount: number;
+  atRiskCount: number;
+  recentChanges: SupplierCostChangeRecord[];
+}
+

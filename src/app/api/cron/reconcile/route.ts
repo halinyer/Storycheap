@@ -10,6 +10,7 @@ import {
   listPendingSupplierOrders,
   releaseExpiredReservations,
 } from "@/lib/server/repository";
+import { syncSupplierCatalogCosts } from "@/lib/server/supplier-sync";
 
 export async function GET(request: NextRequest) {
   await connection();
@@ -105,11 +106,42 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // 3) Sync live distributor wholesale prices and enforce anti-loss floor protection
+  let priceSync: {
+    checkedCount: number;
+    updatedCostCount: number;
+    adjustedSaleCount: number;
+    atRiskCount: number;
+    lastError: string | null;
+  } | null = null;
+  try {
+    const syncRes = await syncSupplierCatalogCosts({
+      force: true,
+      updatedBy: "cron:reconcile",
+    });
+    priceSync = {
+      checkedCount: syncRes.checkedCount,
+      updatedCostCount: syncRes.updatedCostCount,
+      adjustedSaleCount: syncRes.adjustedSaleCount,
+      atRiskCount: syncRes.atRiskCount,
+      lastError: syncRes.lastError,
+    };
+  } catch (err) {
+    priceSync = {
+      checkedCount: 0,
+      updatedCostCount: 0,
+      adjustedSaleCount: 0,
+      atRiskCount: 0,
+      lastError: err instanceof Error ? err.message : "price_sync_failed",
+    };
+  }
+
   return NextResponse.json({
     ok: true,
     releasedCodes,
     expiredOrders,
     reconciledCount,
     centralOneSyncedCount,
+    priceSync,
   });
 }
