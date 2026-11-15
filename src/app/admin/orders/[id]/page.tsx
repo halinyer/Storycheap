@@ -79,9 +79,16 @@ async function AdminOrderDetailContent({
             </p>
           </div>
 
-          <span className="px-3.5 py-1.5 rounded-xl bg-white/[0.08] border border-white/15 text-xs font-black text-white">
-            {order.status}
-          </span>
+          <div className="flex items-center gap-2">
+            {order.isTest && (
+              <span className="px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-400/35 text-xs font-black text-amber-200 uppercase">
+                Prueba
+              </span>
+            )}
+            <span className="px-3.5 py-1.5 rounded-xl bg-white/[0.08] border border-white/15 text-xs font-black text-white">
+              {order.status}
+            </span>
+          </div>
         </div>
 
         {order.needsAttention && (
@@ -167,7 +174,7 @@ async function AdminOrderDetailContent({
             <span>Cuenta Receptora y Comprobante</span>
           </h2>
           <Link
-            href="/admin"
+            href="/admin/treasury"
             className="text-xs font-semibold text-sky-400 hover:text-sky-300"
           >
             Ver libro de receptoras →
@@ -324,6 +331,8 @@ async function AdminOrderDetailContent({
         orderId={order.id}
         status={order.status}
         needsAttention={order.needsAttention}
+        isTest={order.isTest}
+        testNote={order.testNote}
       />
 
       {/* Fulfillments (Privacy Enforced: Last 4 Chars Only) */}

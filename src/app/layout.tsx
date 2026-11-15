@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import { CartDrawer } from "@/components/cart/cart-drawer";
 import { Footer } from "@/components/layout/footer";
 import { Navbar } from "@/components/layout/navbar";
+import { StoreChromeGuard } from "@/components/layout/store-chrome-guard";
 import { StoreProvider } from "@/context/store-context";
 import "./globals.css";
 
@@ -35,16 +36,20 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen flex flex-col bg-[#08090e] text-[#f5f6fa]`}
       >
         <StoreProvider>
-          <Suspense
-            fallback={
-              <header className="sticky top-0 z-40 w-full h-[104px] border-b border-white/[0.07] bg-[#0b0d14]/95 backdrop-blur-2xl" />
-            }
-          >
-            <Navbar />
-          </Suspense>
-          <CartDrawer />
+          <StoreChromeGuard>
+            <Suspense
+              fallback={
+                <header className="sticky top-0 z-40 w-full h-[104px] border-b border-white/[0.07] bg-[#0b0d14]/95 backdrop-blur-2xl" />
+              }
+            >
+              <Navbar />
+            </Suspense>
+            <CartDrawer />
+          </StoreChromeGuard>
           <main className="flex-1">{children}</main>
-          <Footer />
+          <StoreChromeGuard>
+            <Footer />
+          </StoreChromeGuard>
           <Toaster
             theme="dark"
             position="bottom-left"

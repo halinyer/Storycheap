@@ -7,7 +7,7 @@ import {
   getCentralOneWebhookSecret,
   isCentralOneConfigured,
 } from "@/lib/server/env";
-import type { SupplierBalanceStatus } from "./types";
+import { normalizeExactUsdString, type SupplierBalanceStatus } from "./types";
 
 export interface CentralOneCatalogItem {
   id: string;
@@ -134,6 +134,7 @@ export async function getCentralOneBalance(): Promise<SupplierBalanceStatus> {
       configured: true,
       sandbox: false,
       balanceCents,
+      exactBalanceUsd: normalizeExactUsdString(rawBalance),
       currency: String(data.currency ?? "USD"),
       healthy: balanceCents !== null,
     };

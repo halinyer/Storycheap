@@ -2,6 +2,7 @@ import React, { Suspense } from "react";
 import Link from "next/link";
 import { connection } from "next/server";
 import { formatCents } from "@/lib/catalog-seed";
+import { getAdminIncludeTestsPreference } from "@/lib/server/admin-preferences";
 import {
   listOrdersAdmin,
   listSupplierItemCostsAdmin,
@@ -11,21 +12,40 @@ import {
   formatBsRate,
   getOrderSnapshot,
 } from "@/lib/server/sales-metrics";
-import { AlertTriangle, ArrowRight } from "lucide-react";
+import { AlertTriangle, ArrowRight, FlaskConical } from "lucide-react";
 
 async function AdminOrdersContent({
   searchParams,
 }: {
-  searchParams: Promise<{ attention?: string; status?: string }>;
+  searchParams: Promise<{ attention?: string; status?: string; scope?: string }>;
 }) {
   await connection();
   const sp = await searchParams;
   const attentionOnly = sp.attention === "1";
 
-  const [orders, actualItemCostCents] = await Promise.all([
+  const [allOrders, actualItemCostCents, includeTestOrders] = await Promise.all([
     listOrdersAdmin({ needsAttentionOnly: attentionOnly }),
     listSupplierItemCostsAdmin(),
+    getAdminIncludeTestsPreference(),
   ]);
+
+  const activeScope: "all" | "real" | "test" =
+    sp.scope === "real" || sp.scope === "test" || sp.scope === "all"
+      ? sp.scope
+      : attentionOnly
+        ? "all"
+        : includeTestOrders
+          ? "all"
+          : "real";
+
+  const orders = allOrders.filter((o) => {
+    if (activeScope === "real") return !o.isTest;
+    if (activeScope === "test") return Boolean(o.isTest);
+    return true;
+  });
+
+  const testCount = allOrders.filter((o) => o.isTest).length;
+  const realCount = allOrders.length - testCount;
 
   return (
     <div className="space-y-6">
@@ -33,27 +53,48 @@ async function AdminOrdersContent({
         <div>
           <h1 className="text-2xl font-black text-white">Gestión de Órdenes</h1>
           <p className="text-xs text-slate-400 mt-1">
-            Revisa entregas, reintenta órdenes fallidas o acredita saldo a favor interno.
+            Revisa entregas, clasifica órdenes de prueba, reintenta fallos o acredita saldo a favor interno.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Link
-            href="/admin/orders"
-            className={`px-3.5 py-2 rounded-xl text-xs font-bold border ${
-              !attentionOnly
+            href="/admin/orders?scope=real"
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold border transition-colors ${
+              !attentionOnly && activeScope === "real"
                 ? "bg-white text-slate-950 border-white"
-                : "bg-white/[0.04] text-slate-300 border-white/10"
+                : "bg-white/[0.04] text-slate-300 border-white/10 hover:text-white"
             }`}
           >
-            Todas
+            Reales ({realCount})
+          </Link>
+          <Link
+            href="/admin/orders?scope=test"
+            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold border transition-colors ${
+              !attentionOnly && activeScope === "test"
+                ? "bg-amber-400 text-slate-950 border-amber-400"
+                : "bg-white/[0.04] text-amber-200 border-amber-500/25 hover:bg-amber-500/15"
+            }`}
+          >
+            <FlaskConical className="w-3.5 h-3.5" />
+            <span>Pruebas ({testCount})</span>
+          </Link>
+          <Link
+            href="/admin/orders?scope=all"
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold border transition-colors ${
+              !attentionOnly && activeScope === "all"
+                ? "bg-indigo-500 text-white border-indigo-400"
+                : "bg-white/[0.04] text-slate-300 border-white/10 hover:text-white"
+            }`}
+          >
+            Todas ({allOrders.length})
           </Link>
           <Link
             href="/admin/orders?attention=1"
-            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold border ${
+            className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold border transition-colors ${
               attentionOnly
                 ? "bg-rose-500 text-white border-rose-500"
-                : "bg-white/[0.04] text-rose-300 border-rose-500/30"
+                : "bg-white/[0.04] text-rose-300 border-rose-500/30 hover:bg-rose-500/15"
             }`}
           >
             <AlertTriangle className="w-3.5 h-3.5" />
@@ -88,8 +129,13 @@ async function AdminOrdersContent({
                   return (
                   <tr key={o.id} className="hover:bg-white/[0.02]">
                     <td className="px-5 py-4">
-                      <div className="font-mono font-bold text-white">
-                        {o.orderNumber}
+                      <div className="flex items-center gap-2 font-mono font-bold text-white">
+                        <span>{o.orderNumber}</span>
+                        {o.isTest && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-400/30 font-sans text-[9px] font-black uppercase">
+                            Prueba
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-slate-400">
                         {new Date(o.createdAt).toLocaleString()}

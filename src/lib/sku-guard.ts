@@ -37,7 +37,7 @@ export function suggestDenominationLabel(
 ): string | null {
   const clean = supplierName
     .replace(/\s*·\s*PIN\b/gi, "")
-    .replace(/\s*\((?:LATAM|USA|GLOBAL|EU|BR|CIS|MX|CO)\)\s*/gi, " ")
+    .replace(/\s*\((?:LATAM|USA|US|GLOBAL|EU|ES|UK|BR|CIS|MX|CO)\)\s*/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -52,14 +52,15 @@ export function suggestDenominationLabel(
 
     let stripped = clean;
     for (const word of brandWords) {
-      stripped = stripped.replace(new RegExp(`^${word}\\b[:\\s·-]*`, "i"), "").trim();
+      stripped = stripped.replace(new RegExp(`^${word}\\b[:\\s·\\-\u2013\u2014]*`, "i"), "").trim();
     }
+    stripped = stripped.replace(/^[:\s·\-\u2013\u2014]+/, "").trim();
     if (stripped.length >= 2) {
       return stripped.slice(0, 40);
     }
   }
 
-  return clean.slice(0, 40);
+  return clean.replace(/^[:\s·\-\u2013\u2014]+/, "").trim().slice(0, 40);
 }
 
 /**

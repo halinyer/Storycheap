@@ -1,7 +1,9 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { z } from "zod";
+import { ADMIN_INCLUDE_TESTS_COOKIE } from "@/lib/server/admin-preferences";
 import {
   BANK_BY_CODE,
   DEFAULT_ANDROID_PACKAGES_BY_BANK,
@@ -28,6 +30,7 @@ import {
   appendAuditLog,
   appendCreditLedgerEntry,
   createProductWithVariantAdmin,
+  createTreasuryMovementAdmin,
   createVariantAdmin,
   deleteProductAdmin,
   deleteVariantAdmin,
@@ -41,12 +44,14 @@ import {
   saveVariantPricingMeta,
   saveZenoBinanceReceiver,
   setBsRateCents,
+  setOrdersTestFlagAdmin,
   toggleProductActiveAdmin,
   toggleVariantActiveAdmin,
   updateProductAdmin,
   updateProviderConfig,
   updateVariantAdmin,
   voidInventoryCode,
+  voidTreasuryMovementAdmin,
   type CapitalSnapshotRecord,
   type CsvPreviewRow,
   type VariantPricingMeta,
@@ -66,6 +71,8 @@ import type {
   PagoMovilBotSettingsDTO,
   ProviderConfigDTO,
   SourcePriority,
+  TreasuryMovementDTO,
+  TreasuryMovementType,
 } from "@/types";
 
 export async function parseCsvCodesAction(rawText: string): Promise<CsvPreviewRow[]> {
@@ -520,11 +527,24 @@ export async function deleteProductAdminAction(input: { productId: string }) {
   return res;
 }
 
+const productImageUrlSchema = z
+  .string()
+  .trim()
+  .max(200_000, "La imagen es demasiado pesada (máx. ~150 KB)")
+  .refine(
+    (val) =>
+      val.startsWith("/") ||
+      /^https?:\/\//i.test(val) ||
+      /^data:image\/(png|jpeg|jpg|webp|gif);base64,/i.test(val),
+    "URL o formato de imagen inválido (usa /cards/..., https://... o sube PNG/JPG/WebP)."
+  );
+
 const updateProductMetaSchema = z.object({
   productId: z.string().uuid(),
   name: z.string().trim().min(2).max(80),
   region: z.enum(["USA", "Global", "Latam", "Europa"]),
   category: z.enum(["gaming", "streaming", "shopping", "crypto"]),
+  imageUrl: productImageUrlSchema.optional(),
 });
 
 export async function updateProductMetaAction(
@@ -537,6 +557,7 @@ export async function updateProductMetaAction(
     name: parsed.name,
     region: parsed.region,
     category: parsed.category,
+    ...(parsed.imageUrl ? { imageUrl: parsed.imageUrl } : {}),
   });
 
   await appendAuditLog({
@@ -560,7 +581,7 @@ const createProductSchema = z.object({
   category: z.enum(["gaming", "streaming", "shopping", "crypto"]),
   region: z.enum(["USA", "Global", "Latam", "Europa"]),
   description: z.string().trim().max(400).optional(),
-  imageUrl: z.string().trim().max(240).optional(),
+  imageUrl: productImageUrlSchema.optional(),
   denominationLabel: z.string().trim().min(1).max(40),
   faceValueCents: z.number().int().positive(),
   salePriceCents: z.number().int().positive(),
@@ -1038,7 +1059,269 @@ export async function saveZenoBinanceReceiverAction(input: {
   });
 
   revalidatePath("/admin");
+  revalidatePath("/admin/treasury");
   revalidatePath("/admin/providers");
   revalidatePath("/admin/orders");
   return saved;
+}
+
+// ============================================================================
+// TREASURY (LIBRO DE CAJA) & TEST ORDER RECONCILIATION ACTIONS
+// ============================================================================
+
+function revalidateFinanceViews() {
+  revalidatePath("/admin");
+  revalidatePath("/admin/treasury");
+  revalidatePath("/admin/orders");
+  revalidatePath("/admin/audit");
+  revalidatePath("/admin/providers");
+}
+
+export async function setAdminIncludeTestsAction(includeTests: boolean) {
+  await requireAdminUser();
+  const store = await cookies();
+  store.set(ADMIN_INCLUDE_TESTS_COOKIE, includeTests ? "1" : "0", {
+    path: "/admin",
+    maxAge: 60 * 60 * 24 * 30,
+    sameSite: "lax",
+    httpOnly: true,
+  });
+  revalidateFinanceViews();
+}
+
+const createTreasuryMovementSchema = z.object({
+  movementType: z.enum([
+    "CAPITAL_IN",
+    "SUPPLIER_TOPUP",
+    "INTERNAL_TRANSFER",
+    "PROFIT_WITHDRAWAL",
+    "EXPENSE_FEE",
+    "RECONCILIATION_ADJUSTMENT",
+  ]),
+  sourceAccount: z.string().trim().min(1).max(60),
+  targetAccount: z.string().trim().min(1).max(60),
+  amountUsdCents: z.number().int().min(0).max(500_000_000),
+  amountBsCents: z.number().int().min(0).max(5_000_000_000).nullable().optional(),
+  exchangeRateCents: z.number().int().min(1).max(50_000_000).nullable().optional(),
+  partnerName: z.string().trim().max(80).nullable().optional(),
+  reference: z.string().trim().max(120).nullable().optional(),
+  notes: z.string().trim().max(400).optional(),
+  occurredAt: z.string().datetime().optional(),
+  relatedOrderId: z.string().uuid().nullable().optional(),
+});
+
+export async function createTreasuryMovementAction(input: {
+  movementType: TreasuryMovementType;
+  sourceAccount: string;
+  targetAccount: string;
+  amountUsdCents: number;
+  amountBsCents?: number | null;
+  exchangeRateCents?: number | null;
+  partnerName?: string | null;
+  reference?: string | null;
+  notes?: string;
+  occurredAt?: string;
+  relatedOrderId?: string | null;
+}): Promise<TreasuryMovementDTO> {
+  const adminUser = await requireAdminUser();
+  const parsed = createTreasuryMovementSchema.parse(input);
+  if (parsed.amountUsdCents <= 0 && (!parsed.amountBsCents || parsed.amountBsCents <= 0)) {
+    throw new Error("El monto debe ser mayor a $0.00.");
+  }
+  if (parsed.sourceAccount === parsed.targetAccount) {
+    throw new Error("La cuenta de origen y destino no pueden ser iguales.");
+  }
+
+  const created = await createTreasuryMovementAdmin({
+    movementType: parsed.movementType,
+    sourceAccount: parsed.sourceAccount,
+    targetAccount: parsed.targetAccount,
+    amountUsdCents: parsed.amountUsdCents,
+    amountBsCents: parsed.amountBsCents ?? null,
+    exchangeRateCents: parsed.exchangeRateCents ?? null,
+    partnerName: parsed.partnerName || null,
+    reference: parsed.reference || null,
+    notes: parsed.notes ?? "",
+    occurredAt: parsed.occurredAt,
+    relatedOrderId: parsed.relatedOrderId ?? null,
+    createdBy: adminUser.id,
+  });
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "treasury.movement_created",
+    targetType: "treasury_movement",
+    targetId: created.id,
+    metadata: {
+      movementType: created.movementType,
+      sourceAccount: created.sourceAccount,
+      targetAccount: created.targetAccount,
+      amountUsdCents: created.amountUsdCents,
+      amountBsCents: created.amountBsCents,
+      partnerName: created.partnerName,
+    },
+  });
+
+  revalidateFinanceViews();
+  return created;
+}
+
+export async function voidTreasuryMovementAction(input: {
+  movementId: string;
+  reason: string;
+}): Promise<TreasuryMovementDTO> {
+  const adminUser = await requireAdminUser();
+  const reason = input.reason.trim();
+  if (reason.length < 3) {
+    throw new Error("Indica el motivo de la anulación (mínimo 3 caracteres).");
+  }
+
+  const voided = await voidTreasuryMovementAdmin(
+    input.movementId,
+    reason,
+    adminUser.id
+  );
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "treasury.movement_voided",
+    targetType: "treasury_movement",
+    targetId: voided.id,
+    metadata: { reason },
+  });
+
+  revalidateFinanceViews();
+  return voided;
+}
+
+export async function toggleOrderTestFlagAction(input: {
+  orderId: string;
+  isTest: boolean;
+  testNote?: string | null;
+}) {
+  const adminUser = await requireAdminUser();
+  const cleanNote = input.testNote?.trim() || null;
+
+  const result = await setOrdersTestFlagAdmin(
+    [input.orderId],
+    input.isTest,
+    cleanNote,
+    adminUser.id
+  );
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: input.isTest ? "order.marked_as_test" : "order.unmarked_as_test",
+    targetType: "order",
+    targetId: input.orderId,
+    metadata: {
+      isTest: input.isTest,
+      testNote: cleanNote,
+      usedCompatibilityStore: result.usedCompatibilityStore,
+    },
+  });
+
+  revalidateFinanceViews();
+  revalidatePath(`/admin/orders/${input.orderId}`);
+  return result;
+}
+
+const settleHistoricalTestsSchema = z.object({
+  orderIds: z.array(z.string().min(1)).max(200),
+  testNote: z.string().trim().max(240).optional(),
+  openingSupplierCapitalCents: z.record(z.string(), z.number().int().min(0).max(500_000_000)),
+  openingReceiverUsdCents: z
+    .object({
+      zenobank: z.number().int().min(0).max(500_000_000).optional(),
+      pagomovilUsdCents: z.number().int().min(0).max(500_000_000).optional(),
+      pagomovilBsCents: z.number().int().min(0).max(5_000_000_000).optional(),
+    })
+    .optional(),
+});
+
+export async function settleHistoricalTestsAction(input: {
+  orderIds: string[];
+  testNote?: string;
+  openingSupplierCapitalCents: Record<string, number>;
+  openingReceiverUsdCents?: {
+    zenobank?: number;
+    pagomovilUsdCents?: number;
+    pagomovilBsCents?: number;
+  };
+}) {
+  const adminUser = await requireAdminUser();
+  const parsed = settleHistoricalTestsSchema.parse(input);
+  const note =
+    parsed.testNote?.trim() ||
+    "Orden de prueba inicial conciliada al cerrar etapa de pruebas";
+
+  if (parsed.orderIds.length > 0) {
+    await setOrdersTestFlagAdmin(parsed.orderIds, true, note, adminUser.id);
+  }
+
+  const createdIds: string[] = [];
+  for (const [supplierId, amountCents] of Object.entries(
+    parsed.openingSupplierCapitalCents
+  )) {
+    if (amountCents <= 0) continue;
+    const m = await createTreasuryMovementAdmin({
+      movementType: "CAPITAL_IN",
+      sourceAccount: "external",
+      targetAccount: supplierId,
+      amountUsdCents: amountCents,
+      notes: `Saldo vivo inicial tras cuadre de pruebas (${supplierId})`,
+      createdBy: adminUser.id,
+    });
+    createdIds.push(m.id);
+  }
+
+  const zenoOpen = parsed.openingReceiverUsdCents?.zenobank ?? 0;
+  if (zenoOpen > 0) {
+    const m = await createTreasuryMovementAdmin({
+      movementType: "CAPITAL_IN",
+      sourceAccount: "external",
+      targetAccount: "zenobank",
+      amountUsdCents: zenoOpen,
+      notes: "Saldo inicial auditado en Binance / ZenoBank",
+      createdBy: adminUser.id,
+    });
+    createdIds.push(m.id);
+  }
+
+  const pmUsdOpen = parsed.openingReceiverUsdCents?.pagomovilUsdCents ?? 0;
+  const pmBsOpen = parsed.openingReceiverUsdCents?.pagomovilBsCents ?? 0;
+  if (pmUsdOpen > 0 || pmBsOpen > 0) {
+    const m = await createTreasuryMovementAdmin({
+      movementType: "CAPITAL_IN",
+      sourceAccount: "external",
+      targetAccount: "pagomovil",
+      amountUsdCents: pmUsdOpen,
+      amountBsCents: pmBsOpen > 0 ? pmBsOpen : null,
+      notes: "Saldo inicial auditado en Bancamiga / Pago Móvil",
+      createdBy: adminUser.id,
+    });
+    createdIds.push(m.id);
+  }
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "treasury.settle_historical_tests",
+    targetType: "treasury_movement",
+    targetId: createdIds[0] ?? "batch",
+    metadata: {
+      flaggedOrdersCount: parsed.orderIds.length,
+      createdMovementIds: createdIds,
+      openingSupplierCapitalCents: parsed.openingSupplierCapitalCents,
+    },
+  });
+
+  revalidateFinanceViews();
+  return {
+    flaggedOrdersCount: parsed.orderIds.length,
+    createdMovementsCount: createdIds.length,
+  };
 }

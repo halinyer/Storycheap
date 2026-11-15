@@ -2,174 +2,186 @@
 
 import React, { useState } from "react";
 import { toggleProviderConfigAction } from "@/app/admin/actions";
-import { formatCents } from "@/lib/catalog-seed";
-import type { SupplierBalanceStatus } from "@/lib/server/suppliers/types";
-import type { ProviderConfigDTO, WebhookEventDTO } from "@/types";
+import { SupplierPortfolioList } from "@/components/admin/supplier-portfolio-list";
+import {
+  TreasuryMovementModal,
+  type TreasuryMovementModalPreset,
+} from "@/components/admin/treasury-movement-modal";
+import type {
+  ProviderConfigDTO,
+  SupplierPortfolioRow,
+  WebhookEventDTO,
+} from "@/types";
 import { AlertTriangle, Power, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
 export function ProvidersConsole({
-  providers,
-  reloadlyStatus,
-  centralOneStatus,
-  fazerCardsStatus,
+  initialProviders,
   webhooks,
+  suppliers,
+  totalSuppliersUsdCents,
 }: {
-  providers: ProviderConfigDTO[];
-  reloadlyStatus: SupplierBalanceStatus;
-  centralOneStatus: SupplierBalanceStatus;
-  fazerCardsStatus?: SupplierBalanceStatus;
+  initialProviders: ProviderConfigDTO[];
   webhooks: WebhookEventDTO[];
+  suppliers: SupplierPortfolioRow[];
+  totalSuppliersUsdCents: number;
 }) {
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [providers, setProviders] = useState(initialProviders);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalPreset, setModalPreset] = useState<
+    TreasuryMovementModalPreset | undefined
+  >(undefined);
 
-  const handleToggle = async (cfg: ProviderConfigDTO) => {
-    setBusyId(cfg.id);
+  const handleToggle = async (p: ProviderConfigDTO) => {
+    const next = !p.enabled;
+    setTogglingId(p.id);
     try {
       await toggleProviderConfigAction({
-        id: cfg.id,
-        enabled: !cfg.enabled,
+        id: p.id,
+        enabled: next,
       });
+      setProviders((prev) =>
+        prev.map((row) =>
+          row.id === p.id
+            ? { ...row, enabled: next, updatedAt: new Date().toISOString() }
+            : row
+        )
+      );
       toast.success(
-        `${cfg.label}: ${!cfg.enabled ? "ACTIVADO" : "PAUSADO (Kill Switch)"}`
+        `${p.label} ${next ? "habilitado" : "pausado (Kill Switch)"}`
       );
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Error al actualizar");
+      toast.error(err instanceof Error ? err.message : "Error");
     } finally {
-      setBusyId(null);
+      setTogglingId(null);
     }
   };
 
   return (
-    <div className="space-y-8">
-      {/* Supplier Balances & Notices */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {fazerCardsStatus && (
-          <div className="rounded-3xl bg-rose-500/10 border border-rose-500/25 p-5 flex items-start gap-3">
-            <ShieldCheck className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-            <div className="text-xs text-rose-100 leading-relaxed space-y-1">
-              <div className="font-black text-rose-300">
-                FazerCards Reseller API v2 (Netflix & Gift Cards)
-              </div>
-              <p>
-                Webhook: <code>/api/webhooks/fazercards</code> (HMAC-SHA256{" "}
-                <code>X-Webhook-Signature</code>). Base URL:{" "}
-                <code>https://api.fzr.cards/api/v2</code>.
-              </p>
-              <p className="text-rose-200/90 font-bold">
-                Saldo actual:{" "}
-                {fazerCardsStatus.configured
-                  ? fazerCardsStatus.balanceCents !== null
-                    ? `${formatCents(fazerCardsStatus.balanceCents)} ${fazerCardsStatus.currency}`
-                    : fazerCardsStatus.errorMessage ?? "Error"
-                  : fazerCardsStatus.errorMessage}
-              </p>
-            </div>
-          </div>
-        )}
-
-        <div className="rounded-3xl bg-sky-500/10 border border-sky-500/25 p-5 flex items-start gap-3">
-          <ShieldCheck className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
-          <div className="text-xs text-sky-100 leading-relaxed space-y-1">
-            <div className="font-black text-sky-300">
-              Central One API (Gift Cards)
-            </div>
-            <p>
-              Webhook: <code>/api/webhooks/centralone</code>. No tiene modo sandbox: cada compra consume saldo real en Central One.
-            </p>
-            <p className="text-sky-200/90 font-bold">
-              Saldo actual:{" "}
-              {centralOneStatus.configured
-                ? centralOneStatus.balanceCents !== null
-                  ? `${formatCents(centralOneStatus.balanceCents)} ${centralOneStatus.currency}`
-                  : centralOneStatus.errorMessage ?? "Error"
-                : centralOneStatus.errorMessage}
-            </p>
-          </div>
+    <div className="space-y-6">
+      <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-6">
+        <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-400">
+          Canales y Conectividad
         </div>
-
-        <div className="rounded-3xl bg-amber-500/10 border border-amber-500/25 p-5 flex items-start gap-3">
-          <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-          <div className="text-xs text-amber-100 leading-relaxed space-y-1">
-            <div className="font-black text-amber-300">
-              Política de Proveedor Reloadly (Seguridad de Capital)
-            </div>
-            <p>
-              Mantén Reloadly desactivado (<code>enabled: false</code>) y opera con tu{" "}
-              <strong>Inventario Propio CSV</strong> hasta contar con una cuenta Reloadly comercial verificada con KYC propio y sin VPN.
-            </p>
-            <p className="text-amber-200/80">
-              Estado actual SDK:{" "}
-              {reloadlyStatus.configured
-                ? `Conectado (${reloadlyStatus.sandbox ? "Sandbox" : "Live"}) — Balance: ${
-                    reloadlyStatus.balanceCents !== null
-                      ? formatCents(reloadlyStatus.balanceCents)
-                      : "Error"
-                  }`
-                : reloadlyStatus.errorMessage}
-            </p>
-          </div>
-        </div>
+        <h1 className="text-2xl font-bold tracking-tight text-white mt-0.5">
+          Distribuidores, APIs y Kill Switches
+        </h1>
+        <p className="text-xs text-slate-400 mt-1">
+          Estado en vivo de cada distribuidor conectado, control de emergencia para
+          pausar pasarelas/proveedores e historial de webhooks entrantes.
+        </p>
       </div>
+
+      {/* Scalable vertical list of N suppliers from SUPPLIER_REGISTRY */}
+      <SupplierPortfolioList
+        suppliers={suppliers}
+        totalSuppliersUsdCents={totalSuppliersUsdCents}
+        periodLabel="histórico"
+        mode="full"
+        title="Portafolio de Distribuidores (Escalable)"
+        subtitle="Saldos exactos hasta 4 decimales, fondeos recibidos en caja y alertas de recarga."
+        onTopup={(s) => {
+          setModalPreset({
+            movementType: "SUPPLIER_TOPUP",
+            sourceAccount: "zenobank",
+            targetAccount: s.id,
+          });
+          setModalOpen(true);
+        }}
+      />
 
       {/* Kill Switches */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {providers.map((cfg) => (
-          <div
-            key={cfg.id}
-            className="rounded-3xl apple-glass p-5 flex items-center justify-between gap-4"
-          >
-            <div>
-              <div className="flex items-center gap-2">
-                <Power
-                  className={`w-4 h-4 ${
-                    cfg.enabled ? "text-emerald-400" : "text-slate-500"
-                  }`}
-                />
-                <h3 className="text-sm font-black text-white">{cfg.label}</h3>
-              </div>
-              <p className="text-[11px] text-slate-400 mt-1">
-                Modo: {cfg.sandboxMode ? "Sandbox / Test" : "Producción"} • ID:{" "}
-                <code>{cfg.id}</code>
-              </p>
-            </div>
+      <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] overflow-hidden">
+        <div className="px-5 py-4 border-b border-white/[0.07]">
+          <h2 className="text-sm font-bold text-white">
+            Kill Switches de Proveedores y Pasarelas
+          </h2>
+          <p className="text-[11px] text-slate-400 mt-0.5">
+            Deshabilita instantáneamente un canal de pago o proveedor si detectas
+            inestabilidad o agotamiento de saldo.
+          </p>
+        </div>
 
-            <button
-              type="button"
-              disabled={busyId === cfg.id}
-              onClick={() => void handleToggle(cfg)}
-              className={`px-4 py-2 rounded-xl text-xs font-black transition-all ${
-                cfg.enabled
-                  ? "bg-emerald-500 text-slate-950 hover:bg-emerald-400"
-                  : "bg-slate-800 text-slate-300 border border-white/10 hover:bg-slate-700"
-              }`}
+        <div className="divide-y divide-white/[0.05]">
+          {providers.map((p) => (
+            <div
+              key={p.id}
+              className="px-5 py-4 flex flex-wrap items-center justify-between gap-4 hover:bg-white/[0.015] transition-colors"
             >
-              {cfg.enabled ? "Activo" : "Pausado"}
-            </button>
-          </div>
-        ))}
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <span className="text-sm font-bold text-white">{p.label}</span>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase border ${
+                      p.enabled
+                        ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/25"
+                        : "bg-rose-500/15 text-rose-300 border-rose-400/30"
+                    }`}
+                  >
+                    {p.enabled ? "Activo" : "Pausado"}
+                  </span>
+                  {p.sandboxMode && (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-400/25 text-[10px] font-bold">
+                      SANDBOX
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                  id: {p.id} · actualizado{" "}
+                  {new Date(p.updatedAt).toLocaleString()}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                disabled={togglingId === p.id}
+                onClick={() => handleToggle(p)}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-xs transition-colors border ${
+                  p.enabled
+                    ? "bg-rose-500/15 hover:bg-rose-500/25 border-rose-400/30 text-rose-200"
+                    : "bg-emerald-500 hover:bg-emerald-400 border-emerald-400 text-slate-950"
+                }`}
+              >
+                {p.enabled ? (
+                  <>
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>Pausar Canal</span>
+                  </>
+                ) : (
+                  <>
+                    <Power className="w-3.5 h-3.5" />
+                    <span>Reactivar</span>
+                  </>
+                )}
+              </button>
+            </div>
+          ))}
+        </div>
       </div>
 
-      {/* Webhook Audit Log */}
-      <div className="rounded-3xl apple-glass overflow-hidden">
-        <div className="px-6 py-4 border-b border-white/[0.08] flex items-center justify-between">
-          <h2 className="text-sm font-black text-white flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-sky-400" />
-            <span>Eventos Webhook Verificados (ZenoBank Svix & Pago Móvil)</span>
-          </h2>
-          <span className="text-[11px] text-slate-400">
-            Idempotencia por event_id
-          </span>
+      {/* Webhooks */}
+      <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] overflow-hidden">
+        <div className="px-5 py-4 border-b border-white/[0.07] flex items-center gap-2">
+          <ShieldCheck className="w-4 h-4 text-emerald-400" />
+          <div>
+            <h2 className="text-sm font-bold text-white">
+              Últimos Webhooks de Pagos
+            </h2>
+            <p className="text-[11px] text-slate-400">
+              Notificaciones recibidas desde pasarelas externas y validación Svix.
+            </p>
+          </div>
         </div>
 
         {webhooks.length === 0 ? (
-          <div className="p-10 text-center text-xs text-slate-400">
-            Aún no se han recibido webhooks en esta sesión.
+          <div className="p-8 text-center text-xs text-slate-500">
+            Sin eventos webhook registrados aún.
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
-              <thead className="bg-white/[0.04] text-slate-400 uppercase text-[10px]">
+              <thead className="bg-white/[0.02] text-[10px] uppercase tracking-wider text-slate-500 border-b border-white/[0.06]">
                 <tr>
                   <th className="px-5 py-3">Fecha</th>
                   <th className="px-5 py-3">Gateway / Evento</th>
@@ -178,9 +190,9 @@ export function ProvidersConsole({
                   <th className="px-5 py-3">Estado</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/[0.06]">
+              <tbody className="divide-y divide-white/[0.05]">
                 {webhooks.map((w) => (
-                  <tr key={w.id}>
+                  <tr key={w.id} className="hover:bg-white/[0.02]">
                     <td className="px-5 py-3 text-slate-400 whitespace-nowrap">
                       {new Date(w.processedAt).toLocaleString()}
                     </td>
@@ -191,7 +203,13 @@ export function ProvidersConsole({
                       {w.eventId}
                     </td>
                     <td className="px-5 py-3">
-                      <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-bold text-[10px]">
+                      <span
+                        className={`px-2 py-0.5 rounded font-bold text-[10px] ${
+                          w.signatureValid
+                            ? "bg-emerald-500/15 text-emerald-300"
+                            : "bg-rose-500/15 text-rose-300"
+                        }`}
+                      >
                         {w.signatureValid ? "Svix OK" : "Inválida"}
                       </span>
                     </td>
@@ -203,6 +221,13 @@ export function ProvidersConsole({
           </div>
         )}
       </div>
+
+      <TreasuryMovementModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        suppliers={suppliers}
+        preset={modalPreset}
+      />
     </div>
   );
 }

@@ -207,7 +207,7 @@ export const CATALOG_SEED: ProductDTO[] = [
       "Escribe el código de 25 dígitos y pulsa Siguiente para acreditar el saldo.",
     ],
     terms: "Canjeable únicamente en cuentas Microsoft configuradas en Estados Unidos.",
-    imageUrl: "/cards/xbox.jpg",
+    imageUrl: "/cards/xbox.png",
     accentColor: "#107c10",
     gradient: "from-emerald-600 to-green-950",
     active: true,
@@ -733,5 +733,26 @@ export const CATALOG_SEED: ProductDTO[] = [
 ];
 
 export function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+  const sign = cents < 0 ? "-" : "";
+  return `${sign}$${(Math.abs(cents) / 100).toFixed(2)}`;
+}
+
+export function formatExactUsd(
+  cents: number | null | undefined,
+  exactUsd?: string | null
+): string {
+  if (exactUsd && /^-?\d+(\.\d+)?$/.test(exactUsd.trim())) {
+    const parsed = Number.parseFloat(exactUsd.trim());
+    if (Number.isFinite(parsed)) {
+      const sign = parsed < 0 ? "-" : "";
+      const abs = Math.abs(parsed);
+      const decimals = abs.toFixed(4);
+      const trimmed = decimals.replace(/(\.\d{2})0+$/, "$1");
+      return `${sign}$${trimmed}`;
+    }
+  }
+  if (typeof cents === "number" && Number.isFinite(cents)) {
+    return formatCents(cents);
+  }
+  return "—";
 }

@@ -1,6 +1,7 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   createProductAction,
@@ -14,11 +15,14 @@ import {
   updateProductMetaAction,
   updateVariantAdminAction,
 } from "@/app/admin/actions";
+import { CARD_IMAGE_PRESETS, suggestProductImageUrl } from "@/lib/brand-theme";
+import { formatCents } from "@/lib/catalog-seed";
 import {
   evaluateSkuAlignment,
   suggestDenominationLabel,
 } from "@/lib/sku-guard";
 import type { VariantPricingMeta } from "@/lib/server/repository";
+import { formatBsCents } from "@/lib/server/sales-metrics";
 import type { CentralOneCatalogItem } from "@/lib/server/suppliers/centralone";
 import type {
   Category,
@@ -29,7 +33,10 @@ import type {
 } from "@/types";
 import {
   AlertTriangle,
+  ArrowLeft,
   Check,
+  ChevronRight,
+  Image as ImageIcon,
   Link2,
   Pencil,
   Plus,
@@ -38,12 +45,285 @@ import {
   Search,
   Sparkles,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 
 function normalizeDecimalInput(raw: string): string {
   return raw.replace(",", ".").replace(/[^0-9.]/g, "");
+}
+
+const SUPPLIER_ALIAS_MAP: Record<string, string[]> = {
+  usa: ["us", "usa"],
+  eeuu: ["us", "usa"],
+  psn: ["playstation", "psn"],
+  ps4: ["playstation"],
+  ps5: ["playstation"],
+  espana: ["es", "spain"],
+  spain: ["es", "spain"],
+};
+
+function normalizeSearchChunk(raw: string): string {
+  return raw
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function buildSupplierSearchHint(productName: string, region?: string | null): string {
+  const base = productName
+    .split(/[(:·]/)[0]
+    ?.replace(/\b(?:gift|card|cards|store|tienda|pin|pins|eshop|wallet|digital)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const brand = base || productName.split(/[(:·]/)[0]?.trim() || "";
+  if (region === "USA" || /\(\s*usa\s*\)/i.test(productName)) {
+    return `${brand} US`.trim();
+  }
+  return brand;
+}
+
+function matchesSupplierTokens(item: CentralOneCatalogItem, query: string): boolean {
+  const clean = normalizeSearchChunk(query.trim());
+  if (!clean) return true;
+  const tokens = clean
+    .replace(/[()[\]{}·:_/\\|,-]+/g, " ")
+    .split(/\s+/)
+    .map((t) => t.replace(/^\$/, "").trim())
+    .filter(Boolean);
+  if (tokens.length === 0) return true;
+
+  const haystack = normalizeSearchChunk(
+    `${item.name} ${item.sku ?? ""} ${item.region ?? ""} ${item.id}`
+  );
+
+  return tokens.every((token) => {
+    const candidates = SUPPLIER_ALIAS_MAP[token] ?? [token];
+    return candidates.some((cand) => {
+      if (cand.length <= 2 && /^[a-z]+$/.test(cand)) {
+        const escaped = cand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`(?:^|[\\s_()\\[\\]·:-])${escaped}(?:$|[\\s_()\\[\\]·:-])`, "i").test(
+          haystack
+        );
+      }
+      return haystack.includes(cand);
+    });
+  });
+}
+
+async function compressImageFileToDataUrl(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("El archivo debe ser una imagen PNG, JPG o WebP.");
+  }
+
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("No se pudo leer el archivo."));
+    reader.readAsDataURL(file);
+  });
+
+  if (rawDataUrl.length <= 150_000 && /^data:image\/(png|webp|jpeg);base64,/i.test(rawDataUrl)) {
+    return rawDataUrl;
+  }
+
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("No se pudo procesar la imagen seleccionada."));
+    el.src = rawDataUrl;
+  });
+
+  const maxW = 600;
+  const maxH = 750;
+  const scale = Math.min(1, maxW / img.width, maxH / img.height);
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("El navegador no pudo renderizar el lienzo de imagen.");
+  ctx.drawImage(img, 0, 0, w, h);
+
+  for (const quality of [0.88, 0.76, 0.62]) {
+    const webp = canvas.toDataURL("image/webp", quality);
+    if (webp.startsWith("data:image/webp") && webp.length <= 185_000) {
+      return webp;
+    }
+    const jpeg = canvas.toDataURL("image/jpeg", quality);
+    if (jpeg.length <= 185_000) {
+      return jpeg;
+    }
+  }
+
+  throw new Error("La imagen sigue siendo muy pesada incluso optimizada. Usa una imagen menor o pega una URL.");
+}
+
+function ProductImagePicker({
+  value,
+  onChange,
+  compact = false,
+}: {
+  value: string;
+  onChange: (nextUrl: string) => void;
+  compact?: boolean;
+}) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [presetQuery, setPresetQuery] = useState("");
+
+  const filteredPresets = useMemo(() => {
+    const q = presetQuery.trim().toLowerCase();
+    if (!q) return CARD_IMAGE_PRESETS;
+    return CARD_IMAGE_PRESETS.filter(
+      (preset) =>
+        preset.label.toLowerCase().includes(q) || preset.imageUrl.toLowerCase().includes(q)
+    );
+  }, [presetQuery]);
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setUploading(true);
+    try {
+      const dataUrl = await compressImageFileToDataUrl(file);
+      onChange(dataUrl);
+      toast.success("Imagen optimizada y cargada correctamente");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudo subir la imagen");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className={`rounded-xl border border-white/10 bg-slate-950/75 p-2.5 space-y-2.5 ${compact ? "w-full" : ""}`}>
+      <div className="flex items-center gap-3">
+        <div className="w-12 h-16 rounded-lg bg-slate-900 border border-white/15 flex items-center justify-center overflow-hidden shrink-0">
+          {value.trim() ? (
+            <img
+              src={value}
+              alt="Vista previa"
+              className="w-full h-full object-contain p-0.5"
+            />
+          ) : (
+            <ImageIcon className="w-4 h-4 text-slate-500" />
+          )}
+        </div>
+
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <select
+              value={CARD_IMAGE_PRESETS.some((p) => p.imageUrl === value) ? value : ""}
+              onChange={(e) => {
+                if (e.target.value) onChange(e.target.value);
+              }}
+              className="rounded-lg bg-slate-900 border border-white/15 px-2 py-1 text-[11px] text-white focus:border-sky-400 focus:outline-none"
+            >
+              <option value="">Elegir diseño de tienda…</option>
+              {CARD_IMAGE_PRESETS.map((preset) => (
+                <option key={preset.imageUrl} value={preset.imageUrl}>
+                  {preset.label}
+                </option>
+              ))}
+            </select>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              onChange={(e) => void handleFile(e)}
+              className="hidden"
+            />
+            <button
+              type="button"
+              disabled={uploading}
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-sky-300 font-semibold text-[11px] transition-colors"
+            >
+              <Upload className="w-3 h-3" />
+              <span>{uploading ? "Procesando…" : "Subir imagen"}</span>
+            </button>
+          </div>
+
+          <input
+            type="text"
+            value={value.startsWith("data:image/") ? "" : value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={
+              value.startsWith("data:image/")
+                ? "✓ Imagen personalizada subida (escribe URL aquí si deseas cambiarla)"
+                : "O pega URL https://... o ruta /cards/playstation.png"
+            }
+            className="w-full rounded-lg bg-slate-900 border border-white/10 px-2.5 py-1 text-[11px] font-mono text-slate-200 placeholder-slate-500 focus:border-sky-400 focus:outline-none"
+          />
+        </div>
+      </div>
+
+      <div className="border-t border-white/[0.06] pt-2 space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] font-medium text-slate-400">
+            Galería rápida ({filteredPresets.length} diseños)
+          </span>
+          <div className="relative w-40 sm:w-48">
+            <Search className="w-3 h-3 text-slate-500 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={presetQuery}
+              onChange={(e) => setPresetQuery(e.target.value)}
+              placeholder="Filtrar marca…"
+              className="w-full rounded-md bg-slate-900 border border-white/10 pl-6 pr-2 py-0.5 text-[10px] text-white placeholder-slate-500 focus:border-sky-400 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="max-h-40 overflow-y-auto grid grid-cols-4 sm:grid-cols-6 gap-1.5 pr-1">
+          {filteredPresets.map((preset) => {
+            const active = value === preset.imageUrl;
+            return (
+              <button
+                key={preset.imageUrl}
+                type="button"
+                title={preset.label}
+                onClick={() => onChange(preset.imageUrl)}
+                className={`group relative rounded-lg p-1 border text-left transition-all ${
+                  active
+                    ? "border-sky-400 bg-sky-500/15 ring-1 ring-sky-400/50"
+                    : "border-white/10 bg-slate-900/70 hover:border-white/30 hover:bg-slate-900"
+                }`}
+              >
+                <div className="w-full aspect-[3/4] rounded overflow-hidden bg-slate-950/70 flex items-center justify-center">
+                  <img
+                    src={preset.imageUrl}
+                    alt={preset.label}
+                    loading="lazy"
+                    className="w-full h-full object-contain p-0.5"
+                  />
+                </div>
+                <p className="mt-1 text-[9px] leading-tight text-slate-300 truncate font-medium">
+                  {preset.label}
+                </p>
+                {active && (
+                  <span className="absolute top-1.5 right-1.5 w-3.5 h-3.5 rounded-full bg-sky-400 text-slate-950 flex items-center justify-center">
+                    <Check className="w-2.5 h-2.5 stroke-[3]" />
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          {filteredPresets.length === 0 && (
+            <div className="col-span-full py-3 text-center text-[11px] text-slate-500">
+              Sin coincidencias para &ldquo;{presetQuery}&rdquo;
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function formatCostDisplay(
@@ -71,6 +351,7 @@ function formatMarginUsd(diffUsd: number, showFourDecimals: boolean): string {
 
 function VariantRow({
   productName,
+  productRegion,
   variant,
   pricingMeta,
   liveC1Item,
@@ -79,10 +360,12 @@ function VariantRow({
   centralOneBalanceCents,
   fazerCardsEnabled,
   fazerCardsBalanceCents,
+  bsRateCents,
   onOpenCentralOnePicker,
   onSaved,
 }: {
   productName: string;
+  productRegion?: Region;
   variant: ProductVariantDTO;
   pricingMeta?: VariantPricingMeta;
   liveC1Item?: CentralOneCatalogItem;
@@ -91,6 +374,7 @@ function VariantRow({
   centralOneBalanceCents: number | null;
   fazerCardsEnabled: boolean;
   fazerCardsBalanceCents: number | null;
+  bsRateCents?: number | null;
   onOpenCentralOnePicker: (
     applySelection: (item: CentralOneCatalogItem) => void,
     initialQuery?: string
@@ -310,7 +594,7 @@ function VariantRow({
     }
   };
 
-  const suggestedSearch = productName.split(/[(:·]/)[0]?.trim() || "";
+  const suggestedSearch = buildSupplierSearchHint(productName, productRegion);
 
   return (
     <div className={`px-5 py-4 space-y-3 text-xs transition-opacity ${!active ? "opacity-60" : ""}`}>
@@ -562,6 +846,14 @@ function VariantRow({
                 className="w-full rounded-xl bg-slate-950 border border-white/15 focus:border-sky-400 focus:outline-none pl-6 pr-2 py-2 text-white font-mono font-semibold tabular-nums"
               />
             </div>
+            {bsRateCents &&
+              bsRateCents > 0 &&
+              Number.isFinite(parsedPriceFloat) &&
+              parsedPriceFloat > 0 && (
+                <div className="text-[10px] font-mono text-sky-300 mt-1 truncate">
+                  ≈ {formatBsCents(Math.round(parsedPriceFloat * bsRateCents))}
+                </div>
+              )}
           </div>
 
           <div className="min-w-0 text-right pb-1">
@@ -652,6 +944,8 @@ export function ProductsConsole({
   centralOneBalanceCents = null,
   fazerCardsEnabled = true,
   fazerCardsBalanceCents = null,
+  bsRateCents = null,
+  initialProductId = null,
 }: {
   catalog: ProductDTO[];
   pricingMetaMap?: Record<string, VariantPricingMeta>;
@@ -660,10 +954,19 @@ export function ProductsConsole({
   centralOneBalanceCents?: number | null;
   fazerCardsEnabled?: boolean;
   fazerCardsBalanceCents?: number | null;
+  bsRateCents?: number | null;
+  initialProductId?: string | null;
 }) {
   const router = useRouter();
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(
+    initialProductId
+  );
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "hidden">(
+    "all"
+  );
+  const [variantSearch, setVariantSearch] = useState("");
   const [togglingProductId, setTogglingProductId] = useState<string | null>(null);
   const [confirmDeleteProduct, setConfirmDeleteProduct] = useState<ProductDTO | null>(null);
   const [deletingProductId, setDeletingProductId] = useState<string | null>(null);
@@ -687,6 +990,7 @@ export function ProductsConsole({
   const [editProductName, setEditProductName] = useState("");
   const [editProductRegion, setEditProductRegion] = useState<Region>("USA");
   const [editProductCategory, setEditProductCategory] = useState<Category>("gaming");
+  const [editProductImageUrl, setEditProductImageUrl] = useState("");
   const [savingProductMeta, setSavingProductMeta] = useState(false);
 
   // New Gift Card modal state
@@ -695,6 +999,8 @@ export function ProductsConsole({
   const [ncName, setNcName] = useState("");
   const [ncCategory, setNcCategory] = useState<Category>("gaming");
   const [ncRegion, setNcRegion] = useState<Region>("USA");
+  const [ncImageUrl, setNcImageUrl] = useState("/cards/playstation.png");
+  const [ncImageTouched, setNcImageTouched] = useState(false);
   const [ncDenom, setNcDenom] = useState("$10");
   const [ncFaceUsd, setNcFaceUsd] = useState("10.00");
   const [ncCostUsd, setNcCostUsd] = useState("9.20");
@@ -724,13 +1030,48 @@ export function ProductsConsole({
       if (categoryFilter !== "all" && product.category !== categoryFilter) {
         return false;
       }
+      if (statusFilter === "active" && !product.active) return false;
+      if (statusFilter === "hidden" && product.active) return false;
       if (!q) return true;
       const haystack = `${product.name} ${product.brand} ${product.region} ${product.variants
         .map((v) => v.denominationLabel)
         .join(" ")}`.toLowerCase();
       return haystack.includes(q);
     });
-  }, [catalog, search, categoryFilter]);
+  }, [catalog, search, categoryFilter, statusFilter]);
+
+  const selectProduct = (id: string | null) => {
+    setSelectedProductId(id);
+    setEditingProductId(null);
+    setVariantSearch("");
+    if (typeof window !== "undefined") {
+      const targetUrl = id
+        ? `/admin/products?product=${encodeURIComponent(id)}`
+        : "/admin/products";
+      window.history.replaceState(null, "", targetUrl);
+    }
+  };
+
+  const selectedProduct = useMemo(
+    () =>
+      selectedProductId
+        ? catalog.find((p) => p.id === selectedProductId) ?? null
+        : null,
+    [catalog, selectedProductId]
+  );
+
+  const selectedProductVariants = useMemo(() => {
+    if (!selectedProduct) return [];
+    const q = variantSearch.trim().toLowerCase();
+    if (!q) return selectedProduct.variants;
+    return selectedProduct.variants.filter((v) => {
+      const meta = pricingMetaMap[v.id];
+      const hay = `${v.denominationLabel} ${v.centraloneProductId ?? ""} ${
+        meta?.centraloneSku ?? ""
+      } ${meta?.centraloneProductName ?? ""}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [selectedProduct, variantSearch, pricingMetaMap]);
 
   const activeSupplierItems = supplierTab === "fazercards" ? fazerItems : c1Items;
 
@@ -740,16 +1081,10 @@ export function ProductsConsole({
       if (!item.available) return false;
       return c1ShowAllTypes ? true : !item.requiresTarget;
     });
-    const q = c1Search.trim().toLowerCase();
-    if (!q) return availableItems;
-    return availableItems.filter((item) =>
-      `${item.name} ${item.sku ?? ""} ${item.region ?? ""} ${item.id}`
-        .toLowerCase()
-        .includes(q)
-    );
+    return availableItems.filter((item) => matchesSupplierTokens(item, c1Search));
   }, [activeSupplierItems, c1Search, c1ShowAllTypes]);
 
-  const visibleC1Items = useMemo(() => filteredC1Items.slice(0, 80), [filteredC1Items]);
+  const visibleC1Items = useMemo(() => filteredC1Items.slice(0, 150), [filteredC1Items]);
 
   const c1Map = useMemo(() => {
     const map = new Map<string, CentralOneCatalogItem>();
@@ -761,6 +1096,8 @@ export function ProductsConsole({
     }
     return map;
   }, [c1Items, fazerItems]);
+
+  const lastFazerFetchedRef = useRef<string | null>(null);
 
   const loadFazerCatalog = async (queryText?: string) => {
     setLoadingFazer(true);
@@ -775,6 +1112,17 @@ export function ProductsConsole({
       setLoadingFazer(false);
     }
   };
+
+  useEffect(() => {
+    if (!c1ModalOpen || supplierTab !== "fazercards") return;
+    const cleanQ = c1Search.trim();
+    if (lastFazerFetchedRef.current === cleanQ) return;
+    const timer = window.setTimeout(() => {
+      lastFazerFetchedRef.current = cleanQ;
+      void loadFazerCatalog(cleanQ);
+    }, 320);
+    return () => window.clearTimeout(timer);
+  }, [c1ModalOpen, supplierTab, c1Search]);
 
   const loadCentralOneCatalog = async () => {
     setLoadingC1(true);
@@ -801,8 +1149,10 @@ export function ProductsConsole({
     }
     setC1ModalOpen(true);
 
+    const targetQuery = (cleanQ || c1Search).trim();
     if (supplierTab === "fazercards") {
-      await loadFazerCatalog(cleanQ || c1Search);
+      lastFazerFetchedRef.current = targetQuery;
+      await loadFazerCatalog(targetQuery);
     } else if (!c1Items) {
       await loadCentralOneCatalog();
     }
@@ -811,9 +1161,25 @@ export function ProductsConsole({
   const handleAuditLinkedSkus = async () => {
     setAuditingC1(true);
     try {
-      const items = c1Items ?? (await fetchCentralOneCatalogAdminAction());
-      if (!c1Items) setC1Items(items);
-      const map = new Map(items.map((item) => [item.id, item]));
+      const hasFazerVariants = catalog.some((p) =>
+        p.variants.some((v) => v.centraloneProductId?.trim().toLowerCase().startsWith("fazer:"))
+      );
+      const [c1List, fazerList] = await Promise.all([
+        c1Items ? Promise.resolve(c1Items) : fetchCentralOneCatalogAdminAction(),
+        hasFazerVariants
+          ? fazerItems
+            ? Promise.resolve(fazerItems)
+            : fetchFazerCardsCatalogAdminAction()
+          : Promise.resolve<CentralOneCatalogItem[]>([]),
+      ]);
+      if (!c1Items) setC1Items(c1List);
+      if (hasFazerVariants && !fazerItems && fazerList.length > 0) {
+        setFazerItems(fazerList);
+      }
+      const map = new Map<string, CentralOneCatalogItem>([
+        ...c1List.map((item): [string, CentralOneCatalogItem] => [item.id, item]),
+        ...fazerList.map((item): [string, CentralOneCatalogItem] => [item.id, item]),
+      ]);
 
       let linkedCount = 0;
       let alertCount = 0;
@@ -869,6 +1235,7 @@ export function ProductsConsole({
         name: editProductName,
         region: editProductRegion,
         category: editProductCategory,
+        imageUrl: editProductImageUrl.trim() || undefined,
       });
       toast.success(`Gift Card actualizada: ${editProductName}`);
       setEditingProductId(null);
@@ -908,6 +1275,9 @@ export function ProductsConsole({
         );
       } else {
         toast.success(`Gift Card eliminada: ${product.name}`);
+        if (selectedProductId === product.id) {
+          selectProduct(null);
+        }
       }
       setConfirmDeleteProduct(null);
       router.refresh();
@@ -942,6 +1312,7 @@ export function ProductsConsole({
         name: ncName,
         category: ncCategory,
         region: ncRegion,
+        imageUrl: ncImageUrl.trim() || suggestProductImageUrl(ncName),
         denominationLabel: ncDenom,
         faceValueCents: faceCents,
         salePriceCents: priceCents,
@@ -956,6 +1327,8 @@ export function ProductsConsole({
       toast.success(`Gift Card creada: ${ncName}`);
       setNewCardOpen(false);
       setNcName("");
+      setNcImageUrl("/cards/playstation.png");
+      setNcImageTouched(false);
       setNcC1Id("");
       setNcC1Name("");
       setNcC1Sku("");
@@ -1018,216 +1391,568 @@ export function ProductsConsole({
     }
   };
 
+  const totalVariantsCount = useMemo(
+    () => catalog.reduce((sum, p) => sum + p.variants.length, 0),
+    [catalog]
+  );
+
+  const summarizeProductCard = (product: ProductDTO) => {
+    let minSaleCents: number | null = null;
+    let minCostUsd: number | null = null;
+    let marginSum = 0;
+    let marginCount = 0;
+    const linkedProviders = new Set<string>();
+
+    for (const v of product.variants) {
+      if (minSaleCents === null || v.salePriceCents < minSaleCents) {
+        minSaleCents = v.salePriceCents;
+      }
+      const meta = pricingMetaMap[v.id];
+      const costRaw = meta?.exactCostUsd ? Number.parseFloat(meta.exactCostUsd) : null;
+      const costNum =
+        costRaw !== null && Number.isFinite(costRaw)
+          ? costRaw
+          : typeof v.unitCostCents === "number"
+            ? v.unitCostCents / 100
+            : null;
+      if (costNum !== null && costNum > 0) {
+        if (minCostUsd === null || costNum < minCostUsd) {
+          minCostUsd = costNum;
+        }
+        if (v.salePriceCents > 0) {
+          const saleUsd = v.salePriceCents / 100;
+          marginSum += ((saleUsd - costNum) / saleUsd) * 100;
+          marginCount += 1;
+        }
+      }
+      if (v.sourcePriority === "manual_only") {
+        linkedProviders.add("CSV");
+      } else if (v.sourcePriority === "reloadly_only" || v.sourcePriority === "manual_then_reloadly") {
+        linkedProviders.add("Reloadly");
+      } else if (v.centraloneProductId?.toLowerCase().startsWith("fazer:")) {
+        linkedProviders.add("FazerCards");
+      } else if (v.centraloneProductId) {
+        linkedProviders.add("Central One");
+      } else {
+        linkedProviders.add("CSV");
+      }
+    }
+
+    return {
+      minSaleCents,
+      minCostUsd,
+      avgMarginPct: marginCount > 0 ? marginSum / marginCount : null,
+      providers: Array.from(linkedProviders),
+    };
+  };
+
   return (
-    <div className="space-y-5">
-      {/* Clean Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="relative w-64">
-            <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Buscar Gift Card..."
-              className="w-full rounded-xl bg-slate-900/90 border border-white/10 pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-white/25"
-            />
-          </div>
-
-          <select
-            value={categoryFilter}
-            onChange={(e) => setCategoryFilter(e.target.value)}
-            className="rounded-xl bg-slate-900/90 border border-white/10 px-3 py-2 text-xs font-medium text-slate-200 focus:outline-none"
-          >
-            <option value="all">Todas las categorías</option>
-            <option value="gaming">Gaming</option>
-            <option value="streaming">Streaming</option>
-            <option value="shopping">Shopping</option>
-            <option value="crypto">Crypto</option>
-          </select>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            type="button"
-            disabled={auditingC1}
-            onClick={() => void handleAuditLinkedSkus()}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-white/15 bg-white/[0.05] hover:bg-white/[0.1] text-slate-200 font-semibold text-xs transition-colors"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${auditingC1 ? "animate-spin" : ""}`} />
-            <span>{auditingC1 ? "Auditando…" : "Auditar SKUs Central One"}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setNewCardOpen(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-sky-300 text-slate-950 font-semibold text-xs transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Nueva Gift Card</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Clean Brand Cards */}
-      <div className="space-y-4">
-        {filteredCatalog.map((product) => (
-          <div
-            key={product.id}
-            className={`rounded-2xl bg-slate-900/75 border border-white/[0.08] overflow-hidden ${
-              !product.active ? "opacity-65" : ""
-            }`}
-          >
-            <div className="px-5 py-3.5 bg-white/[0.02] border-b border-white/[0.06] flex flex-wrap items-center justify-between gap-3">
-              {editingProductId === product.id ? (
-                <form
-                  onSubmit={(e) => void handleSaveProductMeta(e)}
-                  className="flex flex-wrap items-center gap-2 flex-1"
-                >
-                  <input
-                    required
-                    type="text"
-                    value={editProductName}
-                    onChange={(e) => setEditProductName(e.target.value)}
-                    className="rounded-lg bg-slate-950 border border-sky-400/50 px-2.5 py-1.5 text-xs font-bold text-white min-w-[220px]"
-                  />
-                  <select
-                    value={editProductRegion}
-                    onChange={(e) => setEditProductRegion(e.target.value as Region)}
-                    className="rounded-lg bg-slate-950 border border-white/15 px-2.5 py-1.5 text-xs text-white"
-                  >
-                    <option value="USA">USA</option>
-                    <option value="Global">Global</option>
-                    <option value="Latam">Latam</option>
-                    <option value="Europa">Europa</option>
-                  </select>
-                  <select
-                    value={editProductCategory}
-                    onChange={(e) => setEditProductCategory(e.target.value as Category)}
-                    className="rounded-lg bg-slate-950 border border-white/15 px-2.5 py-1.5 text-xs text-white"
-                  >
-                    <option value="gaming">Gaming</option>
-                    <option value="streaming">Streaming</option>
-                    <option value="shopping">Shopping</option>
-                    <option value="crypto">Crypto</option>
-                  </select>
-                  <button
-                    type="submit"
-                    disabled={savingProductMeta}
-                    className="px-3 py-1.5 rounded-lg bg-white text-slate-950 font-semibold text-xs hover:bg-sky-300"
-                  >
-                    {savingProductMeta ? "…" : "Guardar"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditingProductId(null)}
-                    className="px-2.5 py-1.5 rounded-lg bg-white/[0.06] text-slate-300 text-xs"
-                  >
-                    Cancelar
-                  </button>
-                </form>
-              ) : (
-                <div className="flex items-center gap-3">
-                  <span className="text-sm font-bold text-white">{product.name}</span>
-                  <span className="px-2 py-0.5 rounded-md bg-white/[0.07] text-xs font-medium text-slate-300">
-                    {product.region}
-                  </span>
-                  <span className="text-xs text-slate-500 capitalize">
-                    {product.category}
-                  </span>
-                  <button
-                    type="button"
-                    title="Editar nombre, región o categoría"
-                    onClick={() => {
-                      setEditingProductId(product.id);
-                      setEditProductName(product.name);
-                      setEditProductRegion(product.region);
-                      setEditProductCategory(product.category);
-                    }}
-                    className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-white/[0.08]"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              )}
-
-              <div className="flex items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setVariantModalProduct(product);
-                    setNvC1Id("");
-                    setNvC1Name("");
-                    setNvC1Sku("");
-                    setNvC1Region("");
-                  }}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-xs font-medium text-slate-200"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Denominación</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={togglingProductId === product.id}
-                  onClick={() => void handleToggleProduct(product)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                    product.active
-                      ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
-                      : "bg-rose-500/15 text-rose-300 hover:bg-rose-500/25"
-                  }`}
-                >
-                  <Power className="w-3.5 h-3.5" />
-                  <span>{product.active ? "Activa" : "Desactivada"}</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={deletingProductId === product.id}
-                  onClick={() => setConfirmDeleteProduct(product)}
-                  title="Eliminar Gift Card completa"
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/25 border border-rose-500/20 text-rose-300 text-xs font-medium transition-colors"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>Eliminar</span>
-                </button>
+    <div className="space-y-6">
+      {!selectedProduct ? (
+        <>
+          {/* Level 1: Gift Cards Directory Header */}
+          <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-6 flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-400">
+                Catálogo y Márgenes
               </div>
+              <h1 className="text-2xl font-bold tracking-tight text-white mt-0.5">
+                Gift Cards Studio
+              </h1>
+              <p className="text-xs text-slate-400 mt-1">
+                {catalog.length} marcas registradas · {totalVariantsCount} denominaciones. Selecciona una marca para editar su imagen, vincular SKUs y ajustar precios.
+              </p>
             </div>
 
-            <div className="divide-y divide-white/[0.05]">
-              {product.variants.map((variant) => (
-                <VariantRow
-                  key={variant.id}
-                  productName={product.name}
-                  variant={variant}
-                  pricingMeta={pricingMetaMap[variant.id]}
-                  liveC1Item={
-                    variant.centraloneProductId
-                      ? c1Map.get(variant.centraloneProductId)
-                      : undefined
-                  }
-                  reloadlyEnabled={reloadlyEnabled}
-                  centralOneEnabled={centralOneEnabled}
-                  centralOneBalanceCents={centralOneBalanceCents}
-                  fazerCardsEnabled={fazerCardsEnabled}
-                  fazerCardsBalanceCents={fazerCardsBalanceCents}
-                  onOpenCentralOnePicker={(applySelection, initialQuery) =>
-                    void openCentralOneCatalogModal(applySelection, initialQuery)
-                  }
-                  onSaved={() => router.refresh()}
+            <div className="flex flex-wrap items-center gap-2.5">
+              {fazerCardsBalanceCents !== null && (
+                <span className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-400/20 text-[11px] font-mono text-amber-200">
+                  FazerCards: <strong>{formatCents(fazerCardsBalanceCents)}</strong>
+                </span>
+              )}
+              {centralOneBalanceCents !== null && (
+                <span className="px-3 py-2 rounded-xl bg-sky-500/10 border border-sky-400/20 text-[11px] font-mono text-sky-200">
+                  Central One: <strong>{formatCents(centralOneBalanceCents)}</strong>
+                </span>
+              )}
+              <button
+                type="button"
+                disabled={auditingC1}
+                onClick={() => void handleAuditLinkedSkus()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-white/10 bg-white/[0.04] hover:bg-white/[0.09] text-slate-200 font-semibold text-xs transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${auditingC1 ? "animate-spin" : ""}`} />
+                <span>{auditingC1 ? "Auditando…" : "Auditar SKUs API"}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setNcImageUrl("/cards/playstation.png");
+                  setNcImageTouched(false);
+                  setNewCardOpen(true);
+                }}
+                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs shadow-[0_6px_22px_rgba(99,102,241,0.3)] transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Nueva Gift Card</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Filter & Search Strip */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2.5 flex-1 min-w-[260px]">
+              <div className="relative flex-1 min-w-[220px] max-w-md">
+                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Buscar plataforma, región o denominación (ej. PlayStation, Netflix)..."
+                  className="w-full rounded-xl bg-[#0d101b] border border-white/10 pl-9 pr-3 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-400"
                 />
+              </div>
+
+              <select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+                className="rounded-xl bg-[#0d101b] border border-white/10 px-3 py-2.5 text-xs font-medium text-slate-200 focus:outline-none"
+              >
+                <option value="all">Todas las categorías</option>
+                <option value="gaming">Gaming</option>
+                <option value="streaming">Streaming</option>
+                <option value="shopping">Shopping</option>
+                <option value="crypto">Crypto</option>
+              </select>
+            </div>
+
+            <div className="inline-flex rounded-xl bg-[#0d101b] border border-white/10 p-1 gap-1">
+              {(
+                [
+                  { id: "all", label: "Todas" },
+                  { id: "active", label: "Activas" },
+                  { id: "hidden", label: "Ocultas" },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setStatusFilter(tab.id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                    statusFilter === tab.id
+                      ? "bg-indigo-500 text-white"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {tab.label}
+                </button>
               ))}
             </div>
           </div>
-        ))}
-      </div>
+
+          {/* Brand Cards Directory Grid */}
+          {filteredCatalog.length === 0 ? (
+            <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-12 text-center text-xs text-slate-400">
+              No se encontraron Gift Cards con este filtro.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+              {filteredCatalog.map((product) => {
+                const summary = summarizeProductCard(product);
+                return (
+                  <button
+                    key={product.id}
+                    type="button"
+                    onClick={() => selectProduct(product.id)}
+                    className={`group text-left rounded-2xl bg-[#0d101b] hover:bg-[#121626] border border-white/[0.08] hover:border-indigo-400/40 p-4 flex flex-col justify-between gap-4 transition-all ${
+                      !product.active ? "opacity-65" : ""
+                    }`}
+                  >
+                    <div className="flex items-start gap-3.5">
+                      <div className="w-16 h-16 rounded-2xl bg-slate-950 border border-white/10 flex items-center justify-center overflow-hidden shrink-0">
+                        <img
+                          src={product.imageUrl}
+                          alt={product.name}
+                          className="w-full h-full object-contain p-1 group-hover:scale-105 transition-transform"
+                        />
+                      </div>
+
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase border ${
+                              product.active
+                                ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/25"
+                                : "bg-slate-800 text-slate-400 border-slate-700"
+                            }`}
+                          >
+                            {product.active ? "Activa" : "Oculta"}
+                          </span>
+                          <span className="text-[10px] font-semibold text-slate-400 capitalize">
+                            {product.region}
+                          </span>
+                        </div>
+
+                        <h3 className="text-sm font-bold text-white truncate mt-1.5 group-hover:text-indigo-200 transition-colors">
+                          {product.name}
+                        </h3>
+
+                        <div className="mt-1 flex flex-wrap items-baseline gap-2">
+                          <span className="text-xs font-black font-mono text-white">
+                            {summary.minSaleCents !== null
+                              ? `Desde ${formatCents(summary.minSaleCents)}`
+                              : "Sin precio"}
+                          </span>
+                          {summary.avgMarginPct !== null && (
+                            <span
+                              className={`text-[10px] font-mono font-bold ${
+                                summary.avgMarginPct >= 0
+                                  ? "text-emerald-300"
+                                  : "text-rose-300"
+                              }`}
+                            >
+                              {summary.avgMarginPct >= 0 ? "+" : ""}
+                              {summary.avgMarginPct.toFixed(1)}% prom.
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-white/[0.06] flex items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                        <span className="text-[11px] font-semibold text-slate-400">
+                          {product.variants.length}{" "}
+                          {product.variants.length === 1 ? "opción" : "opciones"}
+                        </span>
+                        {summary.providers.slice(0, 2).map((prov) => (
+                          <span
+                            key={prov}
+                            className="px-1.5 py-0.5 rounded bg-white/[0.05] text-[9px] font-bold text-slate-300"
+                          >
+                            {prov}
+                          </span>
+                        ))}
+                      </div>
+                      <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-300 group-hover:text-indigo-200 shrink-0">
+                        <span>Precios</span>
+                        <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </>
+      ) : (
+        /* Level 2: Focused Brand Studio View */
+        (() => {
+          const summary = summarizeProductCard(selectedProduct);
+          return (
+            <div className="space-y-5">
+              {/* Breadcrumb */}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => selectProduct(null)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.09] border border-white/10 text-slate-200 font-semibold transition-colors"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Todas las Gift Cards</span>
+                  </button>
+                  <span className="text-slate-600">/</span>
+                  <span className="font-bold text-white">{selectedProduct.name}</span>
+                </div>
+
+                {bsRateCents && bsRateCents > 0 && (
+                  <span className="px-3 py-1.5 rounded-xl bg-sky-500/10 border border-sky-400/20 text-[11px] font-mono text-sky-200">
+                    Tasa tienda activa: Bs {(bsRateCents / 100).toFixed(2)}/$
+                  </span>
+                )}
+              </div>
+
+              {/* Brand Hero Card */}
+              <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-6">
+                {editingProductId === selectedProduct.id ? (
+                  <form
+                    onSubmit={(e) => void handleSaveProductMeta(e)}
+                    className="space-y-4"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="text-sm font-bold text-white">
+                        Editar Imagen y Datos de la Marca
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setEditingProductId(null)}
+                          className="px-3 py-1.5 rounded-xl bg-white/[0.06] text-slate-300 text-xs font-semibold"
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={savingProductMeta}
+                          className="px-4 py-1.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs"
+                        >
+                          {savingProductMeta ? "Guardando…" : "Guardar cambios"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">
+                          Nombre visible
+                        </label>
+                        <input
+                          required
+                          type="text"
+                          value={editProductName}
+                          onChange={(e) => setEditProductName(e.target.value)}
+                          className="w-full rounded-xl bg-slate-950 border border-indigo-400/40 px-3 py-2 text-xs font-bold text-white focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">
+                          Región
+                        </label>
+                        <select
+                          value={editProductRegion}
+                          onChange={(e) => setEditProductRegion(e.target.value as Region)}
+                          className="w-full rounded-xl bg-slate-950 border border-white/15 px-3 py-2 text-xs text-white"
+                        >
+                          <option value="USA">USA</option>
+                          <option value="Global">Global</option>
+                          <option value="Latam">Latam</option>
+                          <option value="Europa">Europa</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">
+                          Categoría
+                        </label>
+                        <select
+                          value={editProductCategory}
+                          onChange={(e) =>
+                            setEditProductCategory(e.target.value as Category)
+                          }
+                          className="w-full rounded-xl bg-slate-950 border border-white/15 px-3 py-2 text-xs text-white"
+                        >
+                          <option value="gaming">Gaming</option>
+                          <option value="streaming">Streaming</option>
+                          <option value="shopping">Shopping</option>
+                          <option value="crypto">Crypto</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1.5">
+                        Arte / Portada de la Gift Card (sube archivo, pega URL o usa preset)
+                      </label>
+                      <ProductImagePicker
+                        value={editProductImageUrl}
+                        onChange={setEditProductImageUrl}
+                      />
+                    </div>
+                  </form>
+                ) : (
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+                    <div className="flex items-start sm:items-center gap-4 min-w-0">
+                      <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl bg-slate-950 border border-white/15 flex items-center justify-center overflow-hidden shrink-0">
+                        <img
+                          src={selectedProduct.imageUrl}
+                          alt={selectedProduct.name}
+                          className="w-full h-full object-contain p-1.5"
+                        />
+                      </div>
+
+                      <div className="min-w-0 space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h1 className="text-xl sm:text-2xl font-bold text-white truncate">
+                            {selectedProduct.name}
+                          </h1>
+                          <span className="px-2.5 py-0.5 rounded-full bg-white/[0.06] border border-white/10 text-[11px] font-semibold text-slate-200">
+                            {selectedProduct.region}
+                          </span>
+                          <span
+                            className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase border ${
+                              selectedProduct.active
+                                ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/25"
+                                : "bg-rose-500/15 text-rose-300 border-rose-400/30"
+                            }`}
+                          >
+                            {selectedProduct.active ? "Activa en tienda" : "Oculta"}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-4 text-xs text-slate-400">
+                          <span>
+                            Categoría:{" "}
+                            <strong className="text-slate-200 capitalize">
+                              {selectedProduct.category}
+                            </strong>
+                          </span>
+                          <span>
+                            Opciones:{" "}
+                            <strong className="text-white">
+                              {selectedProduct.variants.length}
+                            </strong>
+                          </span>
+                          {summary.minSaleCents !== null && (
+                            <span>
+                              Desde:{" "}
+                              <strong className="text-white font-mono">
+                                {formatCents(summary.minSaleCents)}
+                              </strong>
+                            </span>
+                          )}
+                          {summary.avgMarginPct !== null && (
+                            <span>
+                              Margen prom.:{" "}
+                              <strong className="text-emerald-300 font-mono">
+                                +{summary.avgMarginPct.toFixed(1)}%
+                              </strong>
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingProductId(selectedProduct.id);
+                          setEditProductName(selectedProduct.name);
+                          setEditProductRegion(selectedProduct.region);
+                          setEditProductCategory(selectedProduct.category);
+                          setEditProductImageUrl(selectedProduct.imageUrl);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-xs font-semibold text-slate-200 transition-colors"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                        <span>Editar imagen y datos</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setVariantModalProduct(selectedProduct);
+                          setNvC1Id("");
+                          setNvC1Name("");
+                          setNvC1Sku("");
+                          setNvC1Region("");
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-xs font-bold text-white transition-colors"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Agregar denominación</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={togglingProductId === selectedProduct.id}
+                        onClick={() => void handleToggleProduct(selectedProduct)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-colors ${
+                          selectedProduct.active
+                            ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/25 hover:bg-emerald-500/25"
+                            : "bg-rose-500/15 text-rose-300 border-rose-400/25 hover:bg-rose-500/25"
+                        }`}
+                      >
+                        <Power className="w-3.5 h-3.5" />
+                        <span>{selectedProduct.active ? "Activa" : "Oculta"}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={deletingProductId === selectedProduct.id}
+                        onClick={() => setConfirmDeleteProduct(selectedProduct)}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/25 border border-rose-500/25 text-rose-300 text-xs font-semibold transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Eliminar</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Denominations Pricing Studio */}
+              <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] overflow-hidden">
+                <div className="px-5 py-4 border-b border-white/[0.07] flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-bold text-white">
+                      Denominaciones, Costo de Proveedor y Ganancia Neta (
+                      {selectedProductVariants.length})
+                    </h2>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Compara el costo exacto por API, fija tu precio final al cliente (USD + Bs) y verifica el margen neto por opción.
+                    </p>
+                  </div>
+
+                  {selectedProduct.variants.length > 2 && (
+                    <div className="relative w-full sm:w-64">
+                      <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={variantSearch}
+                        onChange={(e) => setVariantSearch(e.target.value)}
+                        placeholder="Filtrar denominación o SKU..."
+                        className="w-full rounded-xl bg-white/[0.04] border border-white/10 pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-400"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {selectedProductVariants.length === 0 ? (
+                  <div className="p-10 text-center text-xs text-slate-400">
+                    No hay denominaciones registradas que coincidan con este filtro.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-white/[0.06]">
+                    {selectedProductVariants.map((variant) => (
+                      <VariantRow
+                        key={variant.id}
+                        productName={selectedProduct.name}
+                        productRegion={selectedProduct.region}
+                        variant={variant}
+                        pricingMeta={pricingMetaMap[variant.id]}
+                        liveC1Item={
+                          variant.centraloneProductId
+                            ? c1Map.get(variant.centraloneProductId)
+                            : undefined
+                        }
+                        reloadlyEnabled={reloadlyEnabled}
+                        centralOneEnabled={centralOneEnabled}
+                        centralOneBalanceCents={centralOneBalanceCents}
+                        fazerCardsEnabled={fazerCardsEnabled}
+                        fazerCardsBalanceCents={fazerCardsBalanceCents}
+                        bsRateCents={bsRateCents}
+                        onOpenCentralOnePicker={(applySelection, initialQuery) =>
+                          void openCentralOneCatalogModal(applySelection, initialQuery)
+                        }
+                        onSaved={() => router.refresh()}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()
+      )}
 
       {/* Modal: Nueva Gift Card */}
       {newCardOpen && (
         <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
           <form
             onSubmit={(e) => void handleCreateProduct(e)}
-            className="rounded-2xl bg-slate-900 border border-white/15 max-w-lg w-full p-6 space-y-4 text-xs shadow-2xl"
+            className="rounded-2xl bg-slate-900 border border-white/15 max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 space-y-4 text-xs shadow-2xl"
           >
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold text-white">Nueva Gift Card</h3>
@@ -1247,9 +1972,28 @@ export function ProductsConsole({
                   required
                   type="text"
                   value={ncName}
-                  onChange={(e) => setNcName(e.target.value)}
-                  placeholder="Ej. Nintendo eShop USA"
+                  onChange={(e) => {
+                    const nextName = e.target.value;
+                    setNcName(nextName);
+                    if (!ncImageTouched && nextName.trim()) {
+                      setNcImageUrl(suggestProductImageUrl(nextName));
+                    }
+                  }}
+                  placeholder="Ej. PlayStation Store (USA)"
                   className="w-full rounded-xl bg-slate-950 border border-white/10 px-3 py-2 text-white"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block font-medium text-slate-300 mb-1">
+                  Imagen de la Gift Card
+                </label>
+                <ProductImagePicker
+                  value={ncImageUrl}
+                  onChange={(url) => {
+                    setNcImageUrl(url);
+                    setNcImageTouched(true);
+                  }}
                 />
               </div>
 
@@ -1336,8 +2080,16 @@ export function ProductsConsole({
                   className="w-full rounded-xl bg-slate-950 border border-white/10 px-3 py-2 text-white"
                 >
                   <option value="manual_only">Stock CSV</option>
-                  <option value="centralone_only">Central One</option>
-                  <option value="manual_then_centralone">CSV → Central One</option>
+                  <option value="centralone_only">
+                    {ncC1Id.trim().toLowerCase().startsWith("fazer:")
+                      ? "FazerCards API"
+                      : "FazerCards / Central One API"}
+                  </option>
+                  <option value="manual_then_centralone">
+                    {ncC1Id.trim().toLowerCase().startsWith("fazer:")
+                      ? "CSV → FazerCards API"
+                      : "CSV → FazerCards / Central One"}
+                  </option>
                 </select>
               </div>
 
@@ -1345,7 +2097,7 @@ export function ProductsConsole({
                 <div className="sm:col-span-2 rounded-xl border border-sky-500/25 bg-sky-500/[0.06] p-3 space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-semibold text-sky-300">
-                      Vincular SKU de Central One (auto-rellena etiqueta y costo)
+                      Vincular SKU de FazerCards / Central One
                     </span>
                     <button
                       type="button"
@@ -1356,7 +2108,11 @@ export function ProductsConsole({
                           setNcC1Sku(item.sku ?? "");
                           setNcC1Region(item.region ?? "");
                           if (!ncName.trim()) {
-                            setNcName(item.name.replace(/\s*·\s*PIN\b/gi, "").trim());
+                            const suggestedName = item.name.replace(/\s*·\s*PIN\b/gi, "").split("—")[0]?.trim() || item.name;
+                            setNcName(suggestedName);
+                          }
+                          if (!ncImageTouched) {
+                            setNcImageUrl(suggestProductImageUrl(item.name, item.id));
                           }
                           const suggested = suggestDenominationLabel(item.name, ncName);
                           if (suggested) setNcDenom(suggested);
@@ -1368,7 +2124,7 @@ export function ProductsConsole({
                           const suggestedSale = Math.max(0.5, (item.resellerPriceCents / 100) * 1.08);
                           setNcPriceUsd(suggestedSale.toFixed(2));
                           setNcFaceUsd(Math.max(1, Math.round(item.resellerPriceCents / 100)).toFixed(2));
-                        }, ncName.trim() || undefined)
+                        }, ncName.trim() ? buildSupplierSearchHint(ncName, ncRegion) : undefined)
                       }
                       className="px-3 py-1.5 rounded-lg bg-white text-slate-950 hover:bg-sky-300 font-semibold shrink-0"
                     >
@@ -1486,15 +2242,23 @@ export function ProductsConsole({
                   className="w-full rounded-xl bg-slate-950 border border-white/10 px-3 py-2 text-white"
                 >
                   <option value="manual_only">Stock CSV</option>
-                  <option value="centralone_only">Central One</option>
-                  <option value="manual_then_centralone">CSV → Central One</option>
+                  <option value="centralone_only">
+                    {nvC1Id.trim().toLowerCase().startsWith("fazer:")
+                      ? "FazerCards API"
+                      : "FazerCards / Central One API"}
+                  </option>
+                  <option value="manual_then_centralone">
+                    {nvC1Id.trim().toLowerCase().startsWith("fazer:")
+                      ? "CSV → FazerCards API"
+                      : "CSV → FazerCards / Central One"}
+                  </option>
                 </select>
               </div>
               {(nvSource === "centralone_only" || nvSource === "manual_then_centralone") && (
                 <div className="col-span-2 rounded-xl border border-sky-500/25 bg-sky-500/[0.06] p-3 space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-semibold text-sky-300">
-                      SKU Central One (auto-rellena etiqueta y costo exacto)
+                      SKU FazerCards / Central One (auto-rellena etiqueta y costo)
                     </span>
                     <button
                       type="button"
@@ -1520,7 +2284,7 @@ export function ProductsConsole({
                           setNvFaceUsd(
                             Math.max(1, Math.round(item.resellerPriceCents / 100)).toFixed(2)
                           );
-                        }, variantModalProduct?.name.split(/[(:·]/)[0]?.trim())
+                        }, variantModalProduct ? buildSupplierSearchHint(variantModalProduct.name, variantModalProduct.region) : undefined)
                       }
                       className="px-3 py-1.5 rounded-lg bg-white text-slate-950 hover:bg-sky-300 font-semibold shrink-0"
                     >
@@ -1595,7 +2359,10 @@ export function ProductsConsole({
                   type="button"
                   onClick={() => {
                     setSupplierTab("fazercards");
-                    if (!fazerItems) void loadFazerCatalog(c1Search);
+                    if (lastFazerFetchedRef.current !== c1Search.trim()) {
+                      lastFazerFetchedRef.current = c1Search.trim();
+                      void loadFazerCatalog(c1Search);
+                    }
                   }}
                   className={`px-3 py-1.5 rounded-lg font-semibold transition-colors ${
                     supplierTab === "fazercards"
@@ -1625,7 +2392,10 @@ export function ProductsConsole({
                 <button
                   type="button"
                   disabled={loadingFazer}
-                  onClick={() => void loadFazerCatalog(c1Search)}
+                  onClick={() => {
+                    lastFazerFetchedRef.current = c1Search.trim();
+                    void loadFazerCatalog(c1Search);
+                  }}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/15 border border-rose-500/30 hover:bg-rose-500/25 text-rose-200 font-semibold"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${loadingFazer ? "animate-spin" : ""}`} />
@@ -1644,12 +2414,13 @@ export function ProductsConsole({
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && supplierTab === "fazercards") {
                       e.preventDefault();
+                      lastFazerFetchedRef.current = c1Search.trim();
                       void loadFazerCatalog(c1Search);
                     }
                   }}
                   placeholder={
                     supplierTab === "fazercards"
-                      ? "Escribe ej. netflix, playstation, steam y pulsa Enter o 'Buscar en FazerCards'..."
+                      ? "Ej. playstation us, netflix us, nintendo 25, steam..."
                       : "Buscar por nombre, SKU (ej. FF-110), región o UUID..."
                   }
                   className="w-full rounded-xl bg-slate-950 border border-white/10 pl-8 pr-3 py-2 text-white focus:border-sky-400 focus:outline-none"
@@ -1708,6 +2479,14 @@ export function ProductsConsole({
                       key={item.id}
                       className="py-3 flex flex-wrap items-center justify-between gap-3"
                     >
+                      <div className="w-10 h-[52px] rounded-lg bg-slate-900 border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                        <img
+                          src={suggestProductImageUrl(item.name, item.id)}
+                          alt={item.name}
+                          loading="lazy"
+                          className="w-full h-full object-contain p-0.5"
+                        />
+                      </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-semibold text-white">{item.name}</span>

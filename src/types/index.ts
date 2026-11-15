@@ -150,6 +150,8 @@ export interface OrderDTO {
   expiresAt: string | null;
   needsAttention: boolean;
   attentionReason: string | null;
+  isTest?: boolean;
+  testNote?: string | null;
   createdAt: string;
   updatedAt: string;
   items: OrderItemDTO[];
@@ -310,3 +312,114 @@ export interface SessionUser {
   aal: "aal1" | "aal2";
   isSandbox: boolean;
 }
+
+export type TreasuryMovementType =
+  | "CAPITAL_IN"
+  | "SUPPLIER_TOPUP"
+  | "INTERNAL_TRANSFER"
+  | "PROFIT_WITHDRAWAL"
+  | "EXPENSE_FEE"
+  | "RECONCILIATION_ADJUSTMENT";
+
+export type TreasuryAccountId =
+  | "external"
+  | "zenobank"
+  | "pagomovil"
+  | "fazercards"
+  | "centralone"
+  | "manual"
+  | "reloadly"
+  | "partner_payout"
+  | "expense"
+  | "adjustment"
+  | (string & {});
+
+export interface TreasuryMovementDTO {
+  id: string;
+  occurredAt: string;
+  movementType: TreasuryMovementType;
+  sourceAccount: TreasuryAccountId;
+  targetAccount: TreasuryAccountId;
+  amountUsdCents: number;
+  amountBsCents: number | null;
+  exchangeRateCents: number | null;
+  partnerName: string | null;
+  reference: string | null;
+  notes: string;
+  relatedOrderId: string | null;
+  voidedAt: string | null;
+  voidReason: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export interface SupplierPortfolioRow {
+  id: string;
+  label: string;
+  subtitle: string;
+  kind: "api" | "inventory";
+  accentColor: string;
+  enabled: boolean;
+  configured: boolean;
+  healthy: boolean;
+  errorMessage?: string;
+  balanceCents: number | null;
+  exactBalanceUsd?: string | null;
+  minBalanceAlertCents: number;
+  needsTopup: boolean;
+  fundedCents: number;
+  apiSpentAllTimeCents: number | null;
+  apiOrdersCount: number | null;
+  periodConsumedCents: number;
+  periodProfitCents: number;
+  periodCodesCount: number;
+  allTimeConsumedCents: number;
+  allTimeProfitCents: number;
+  allTimeCodesCount: number;
+  codesAvailableCount?: number;
+}
+
+export interface TreasuryPositionSummary {
+  /** Efectivo real calculado hoy en ZenoBank / Binance (ventas + aportes + entradas - recargas - retiros - gastos +/- ajustes) */
+  zenobankBalanceUsdCents: number;
+  /** Efectivo real calculado hoy en Bancamiga / Pago Móvil */
+  pagomovilBalanceUsdCents: number;
+  pagomovilBalanceBsCents: number;
+  /** Total líquido disponible hoy en cuentas receptoras */
+  totalReceiversUsdCents: number;
+  /** Total capital de trabajo en distribuidores activos (APIs + CSV al costo) */
+  totalSuppliersUsdCents: number;
+  /** Patrimonio operativo hoy dentro del negocio = Receptoras + Distribuidores */
+  totalBusinessEquityUsdCents: number;
+  /** Capital aportado neto desde afuera (CAPITAL_IN - retornos de capital) */
+  netContributedCapitalUsdCents: number;
+  /** Ganancia bruta histórica generada por ventas (según toggle real/pruebas) */
+  salesGrossProfitUsdCents: number;
+  /** Total acumulado retirado por socios / utilidades */
+  withdrawnProfitUsdCents: number;
+  /** Total comisiones / gastos operativos */
+  expensesUsdCents: number;
+  /** Ajustes manuales de conciliación / pruebas */
+  reconciliationNetUsdCents: number;
+  /** Diferencial cambiario real (P2P Bs->USDT vs tasa congelada) */
+  exchangeDiffUsdCents: number;
+  /** Ganancia dentro del negocio sin retirar = Equity + Retiros - Capital Aportado (o ventas netas sin retirar) */
+  netBusinessProfitUsdCents: number;
+  undistributedProfitUsdCents: number;
+  /** Saldo teórico esperado en proveedores vs saldo real en vivo (alerta si falta registrar un fondeo o reembolso) */
+  theoreticalSuppliersUsdCents: number;
+  suppliersDiscrepancyUsdCents: number;
+  /** Pasivo por saldo a favor vigente de clientes */
+  creditLiabilityUsdCents: number;
+  /** Capital neto descontando pasivo de créditos de clientes */
+  netEquityAfterCreditsUsdCents: number;
+  /** Ventas y desgloses por período */
+  allTimeSalesUsdCents: number;
+  allTimeSalesCostUsdCents: number;
+  zenobankSalesGrossUsdCents: number;
+  pagomovilSalesGrossUsdCents: number;
+  pagomovilSalesGrossBsCents: number;
+  creditAppliedSalesUsdCents: number;
+  fundedBySupplierUsdCents: Record<string, number>;
+}
+

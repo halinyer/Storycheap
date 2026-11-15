@@ -68,5 +68,12 @@ describe("SKU denomination & margin guardrails", () => {
         "Free Fire PIN Diamantes (Latam)"
       )
     ).toBe("110 Diamantes (100 + 10% de bono)");
+
+    expect(
+      suggestDenominationLabel(
+        "PlayStation (US) — 10 USD",
+        "PlayStation Store Gift Card (USA)"
+      )
+    ).toBe("10 USD");
   });
 });

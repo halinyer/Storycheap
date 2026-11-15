@@ -5,92 +5,169 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity,
+  ChevronRight,
   FileKey2,
+  Landmark,
   LayoutDashboard,
   PackageSearch,
   PlugZap,
-  Smartphone,
   Receipt,
-  ShieldAlert,
+  Smartphone,
   Users,
+  type LucideIcon,
 } from "lucide-react";
 
 interface AdminSidebarProps {
   needsAttentionCount: number;
   lowStockCount: number;
+  unhealthySuppliersCount?: number;
+}
+
+interface SidebarNavItem {
+  href: string;
+  label: string;
+  icon: LucideIcon;
+  exact?: boolean;
+  badge?: number;
+  badgeTone?: string;
+}
+
+interface SidebarGroup {
+  title: string;
+  items: SidebarNavItem[];
 }
 
 export function AdminSidebar({
   needsAttentionCount,
   lowStockCount,
+  unhealthySuppliersCount = 0,
 }: AdminSidebarProps) {
   const pathname = usePathname();
 
-  const items = [
-    { href: "/admin", label: "Resumen", icon: LayoutDashboard, exact: true },
+  const groups: SidebarGroup[] = [
     {
-      href: "/admin/orders",
-      label: "Órdenes",
-      icon: Receipt,
-      badge: needsAttentionCount > 0 ? needsAttentionCount : undefined,
-      badgeTone: "bg-rose-500 text-white",
+      title: "Principal",
+      items: [
+        { href: "/admin", label: "Inicio", icon: LayoutDashboard, exact: true },
+      ],
     },
     {
-      href: "/admin/inventory",
-      label: "Inventario CSV",
-      icon: FileKey2,
-      badge: lowStockCount > 0 ? lowStockCount : undefined,
-      badgeTone: "bg-amber-400 text-slate-950",
+      title: "Finanzas y Caja",
+      items: [
+        { href: "/admin/treasury", label: "Tesorería y Cuadre", icon: Landmark },
+        { href: "/admin/customers", label: "Clientes y Saldos", icon: Users },
+      ],
     },
-    { href: "/admin/products", label: "Gift Cards", icon: PackageSearch },
-    { href: "/admin/customers", label: "Clientes y Saldo", icon: Users },
-    { href: "/admin/providers", label: "Pasarelas y Webhooks", icon: PlugZap },
-    { href: "/admin/pagomovil", label: "Pago Móvil (Bs)", icon: Smartphone },
-    { href: "/admin/audit", label: "Auditoría", icon: Activity },
+    {
+      title: "Operación y Catálogo",
+      items: [
+        {
+          href: "/admin/orders",
+          label: "Órdenes",
+          icon: Receipt,
+          badge: needsAttentionCount > 0 ? needsAttentionCount : undefined,
+          badgeTone: "bg-rose-500 text-white",
+        },
+        {
+          href: "/admin/products",
+          label: "Gift Cards",
+          icon: PackageSearch,
+        },
+        {
+          href: "/admin/inventory",
+          label: "Inventario CSV",
+          icon: FileKey2,
+          badge: lowStockCount > 0 ? lowStockCount : undefined,
+          badgeTone: "bg-amber-400 text-slate-950",
+        },
+      ],
+    },
+    {
+      title: "Canales y Sistema",
+      items: [
+        {
+          href: "/admin/providers",
+          label: "Distribuidores y APIs",
+          icon: PlugZap,
+          badge: unhealthySuppliersCount > 0 ? unhealthySuppliersCount : undefined,
+          badgeTone: "bg-amber-500 text-slate-950",
+        },
+        {
+          href: "/admin/pagomovil",
+          label: "Pago Móvil (Bs)",
+          icon: Smartphone,
+        },
+        {
+          href: "/admin/audit",
+          label: "Auditoría y Logs",
+          icon: Activity,
+        },
+      ],
+    },
   ];
 
   return (
-    <aside className="w-full lg:w-64 shrink-0">
-      <div className="rounded-3xl apple-glass p-4 space-y-2 lg:sticky lg:top-24">
-        <div className="px-3 py-2 border-b border-white/[0.08] mb-2 flex items-center gap-2">
-          <ShieldAlert className="w-4 h-4 text-amber-400" />
-          <span className="text-xs font-black uppercase tracking-wider text-white">
-            Consola Operativa
-          </span>
+    <aside className="w-full lg:w-[260px] shrink-0">
+      <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-3 lg:sticky lg:top-[84px] shadow-[0_12px_40px_rgba(0,0,0,0.35)]">
+        <div className="flex lg:flex-col gap-4 overflow-x-auto lg:overflow-visible pb-1 lg:pb-0">
+          {groups.map((group) => (
+            <div key={group.title} className="min-w-max lg:min-w-0">
+              <div className="hidden lg:block px-3 pb-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">
+                {group.title}
+              </div>
+              <nav className="flex lg:flex-col gap-1">
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  const active = item.exact
+                    ? pathname === item.href
+                    : pathname.startsWith(item.href);
+
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={`group flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all border ${
+                        active
+                          ? "bg-indigo-500/[0.14] text-white border-indigo-400/30 shadow-[0_4px_18px_rgba(99,102,241,0.14)]"
+                          : "border-transparent text-slate-300 hover:text-white hover:bg-white/[0.04]"
+                      }`}
+                    >
+                      <span className="flex items-center gap-2.5 min-w-0">
+                        <span
+                          className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+                            active
+                              ? "bg-indigo-500/25 text-indigo-300"
+                              : "bg-white/[0.04] text-slate-400 group-hover:text-slate-200"
+                          }`}
+                        >
+                          <Icon className="w-3.5 h-3.5" />
+                        </span>
+                        <span className="truncate">{item.label}</span>
+                      </span>
+
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        {item.badge !== undefined && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded-full text-[10px] font-black leading-none ${item.badgeTone}`}
+                          >
+                            {item.badge}
+                          </span>
+                        )}
+                        <ChevronRight
+                          className={`hidden lg:block w-3.5 h-3.5 transition-transform ${
+                            active
+                              ? "text-indigo-300 translate-x-0.5"
+                              : "text-slate-600 group-hover:text-slate-400"
+                          }`}
+                        />
+                      </span>
+                    </Link>
+                  );
+                })}
+              </nav>
+            </div>
+          ))}
         </div>
-
-        <nav className="flex lg:flex-col gap-1 overflow-x-auto pb-1 lg:pb-0">
-          {items.map((item) => {
-            const Icon = item.icon;
-            const active = item.exact
-              ? pathname === item.href
-              : pathname.startsWith(item.href);
-
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-2xl text-xs font-bold whitespace-nowrap transition-all ${
-                  active
-                    ? "bg-white text-slate-950 shadow-md"
-                    : "text-slate-300 hover:text-white hover:bg-white/[0.06]"
-                }`}
-              >
-                <span className="flex items-center gap-2.5">
-                  <Icon className="w-4 h-4 shrink-0" />
-                  <span>{item.label}</span>
-                </span>
-                {item.badge !== undefined && (
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-black ${item.badgeTone}`}
-                  >
-                    {item.badge}
-                  </span>
-                )}
-              </Link>
-            );
-          })}
-        </nav>
       </div>
     </aside>
   );

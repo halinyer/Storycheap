@@ -10,7 +10,7 @@ import {
   parseCentralOneDecimalToCents,
   type CentralOneCatalogItem,
 } from "./centralone";
-import type { SupplierBalanceStatus } from "./types";
+import { normalizeExactUsdString, type SupplierBalanceStatus } from "./types";
 
 export const FAZERCARDS_PRODUCT_PREFIX = "fazer:";
 
@@ -165,6 +165,7 @@ export async function getFazerCardsBalance(): Promise<SupplierBalanceStatus> {
       configured: true,
       sandbox: false,
       balanceCents: cents ?? 0,
+      exactBalanceUsd: normalizeExactUsdString(data.balance),
       currency: data.currency || "USD",
       healthy: true,
     };
@@ -239,6 +240,212 @@ export async function getFazerCardsCategoryOffers(categoryId: string): Promise<{
   };
 }
 
+const FAZER_SEARCH_FILLER_TOKENS = new Set([
+  "gift",
+  "card",
+  "cards",
+  "tarjeta",
+  "tarjetas",
+  "store",
+  "tienda",
+  "pin",
+  "pins",
+  "voucher",
+  "digital",
+  "codigo",
+  "codigos",
+  "code",
+  "codes",
+  "wallet",
+  "eshop",
+  "network",
+  "usd",
+]);
+
+const FAZER_PRIORITY_KEYWORDS = [
+  "netflix",
+  "disney",
+  "playstation",
+  "psn",
+  "nintendo",
+  "xbox",
+  "steam",
+  "spotify",
+  "apple",
+  "itunes",
+  "roblox",
+  "free fire",
+  "razer",
+  "amazon",
+  "google play",
+];
+
+const FAZER_ALIAS_MAP: Record<string, string[]> = {
+  usa: ["us", "usa"],
+  eeuu: ["us", "usa"],
+  psn: ["playstation", "psn"],
+  ps4: ["playstation"],
+  ps5: ["playstation"],
+  spain: ["es", "spain"],
+  espana: ["es"],
+  europa: ["eu", "es", "fr", "de", "it", "pt"],
+  uk: ["uk", "gb"],
+  gb: ["uk", "gb"],
+  latam: ["latam", "ar", "br", "cl", "co", "mx", "pe", "uy"],
+};
+
+function normalizeFazerSearchText(raw: string): string {
+  return raw
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+export function splitFazerCardsSearchQuery(query?: string): {
+  categoryTokens: string[];
+  offerTokens: string[];
+  numericTokens: string[];
+} {
+  const normalized = normalizeFazerSearchText(query ?? "");
+  const rawTokens = normalized
+    .replace(/[()[\]{}·:_/\\|,-]+/g, " ")
+    .split(/\s+/)
+    .map((t) => t.replace(/^\$/, "").trim())
+    .filter(Boolean);
+
+  const numericTokens: string[] = [];
+  const textTokens: string[] = [];
+  for (const token of rawTokens) {
+    if (/^\d+(?:\.\d+)?$/.test(token)) {
+      numericTokens.push(token);
+    } else {
+      textTokens.push(token);
+    }
+  }
+
+  const nonFiller = textTokens.filter((t) => !FAZER_SEARCH_FILLER_TOKENS.has(t));
+  const categoryTokens = nonFiller.length > 0 ? nonFiller : textTokens;
+  const offerTokens = [...categoryTokens, ...numericTokens];
+  return { categoryTokens, offerTokens, numericTokens };
+}
+
+function getFazerRegionPriorityBoost(cat: FazerCardsGiftCardCategory): number {
+  const hay = normalizeFazerSearchText(`${cat.category_id} ${cat.name}`);
+  if (/(?:^|[_\s(])us(?:$|[_\s)])/i.test(hay) || /\busa\b/i.test(hay)) {
+    return 90;
+  }
+  if (/(?:^|[_\s(])global(?:$|[_\s)])/i.test(hay)) {
+    return 70;
+  }
+  if (/(?:^|[_\s(])(?:es|mx|co|cl|ar|br|latam)(?:$|[_\s)])/i.test(hay)) {
+    return 40;
+  }
+  if (/(?:^|[_\s(])(?:uk|gb|ca|eu)(?:$|[_\s)])/i.test(hay)) {
+    return 25;
+  }
+  return 0;
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function scoreTokenAgainstCategory(
+  token: string,
+  idAndNameNorm: string,
+  noteNorm: string
+): number {
+  const candidates = FAZER_ALIAS_MAP[token] ?? [token];
+  let best = 0;
+
+  for (const cand of candidates) {
+    const wordBoundary = new RegExp(`(?:^|[\\s_()\\[\\]·:-])${escapeRegex(cand)}(?:$|[\\s_()\\[\\]·:-])`, "i");
+    if (wordBoundary.test(idAndNameNorm)) {
+      best = Math.max(best, cand.length <= 2 ? 120 : 100);
+    } else if (idAndNameNorm.includes(cand)) {
+      // Short 2-letter tokens (like "us") match inside "austria"/"music"/"russia"; keep low unless bounded
+      best = Math.max(best, cand.length <= 2 ? 4 : 60);
+    } else if (wordBoundary.test(noteNorm)) {
+      best = Math.max(best, 30);
+    } else if (cand.length > 2 && noteNorm.includes(cand)) {
+      best = Math.max(best, 15);
+    }
+  }
+
+  return best;
+}
+
+export function selectFazerCardsCategoriesForQuery(
+  allCategories: FazerCardsGiftCardCategory[],
+  query?: string,
+  limit = 48
+): Array<{ category: FazerCardsGiftCardCategory; score: number }> {
+  const { categoryTokens } = splitFazerCardsSearchQuery(query);
+
+  if (categoryTokens.length === 0) {
+    const prioritized = allCategories
+      .map((cat) => {
+        const hay = normalizeFazerSearchText(`${cat.name} ${cat.category_id}`);
+        const isPopular = FAZER_PRIORITY_KEYWORDS.some((kw) => hay.includes(kw));
+        if (!isPopular) return null;
+        return {
+          category: cat,
+          score: 100 + getFazerRegionPriorityBoost(cat),
+        };
+      })
+      .filter((entry): entry is { category: FazerCardsGiftCardCategory; score: number } => Boolean(entry))
+      .sort((a, b) => b.score - a.score || a.category.name.localeCompare(b.category.name));
+
+    const source =
+      prioritized.length > 0
+        ? prioritized
+        : allCategories.map((category) => ({
+            category,
+            score: getFazerRegionPriorityBoost(category),
+          }));
+    return source.slice(0, limit);
+  }
+
+  const strictMatches: Array<{ category: FazerCardsGiftCardCategory; score: number }> = [];
+  const partialMatches: Array<{ category: FazerCardsGiftCardCategory; score: number }> = [];
+
+  for (const cat of allCategories) {
+    const idAndNameNorm = normalizeFazerSearchText(`${cat.name} ${cat.category_id}`);
+    const noteNorm = normalizeFazerSearchText(cat.note ?? "");
+    let matchedCount = 0;
+    let totalScore = 0;
+
+    for (const token of categoryTokens) {
+      const tokenScore = scoreTokenAgainstCategory(token, idAndNameNorm, noteNorm);
+      if (tokenScore > 0) {
+        matchedCount += 1;
+        totalScore += tokenScore;
+      }
+    }
+
+    if (matchedCount === 0) continue;
+    const regionBoost = getFazerRegionPriorityBoost(cat);
+    const entry = { category: cat, score: totalScore + regionBoost };
+    if (matchedCount === categoryTokens.length) {
+      strictMatches.push(entry);
+    } else {
+      partialMatches.push(entry);
+    }
+  }
+
+  const chosen = strictMatches.length > 0 ? strictMatches : partialMatches;
+  if (chosen.length === 0) {
+    return allCategories
+      .map((category) => ({ category, score: getFazerRegionPriorityBoost(category) }))
+      .sort((a, b) => b.score - a.score || a.category.name.localeCompare(b.category.name))
+      .slice(0, Math.min(limit, 24));
+  }
+
+  return chosen
+    .sort((a, b) => b.score - a.score || a.category.name.localeCompare(b.category.name))
+    .slice(0, limit);
+}
+
 /**
  * Fetches FazerCards Gift Card categories & offers and maps them into the unified
  * `CentralOneCatalogItem` shape so the Admin SKU selector works seamlessly with 1 click.
@@ -267,70 +474,67 @@ export async function getFazerCardsCatalog(query?: string): Promise<CentralOneCa
     }
   }
 
-  const q = (query || "").trim().toLowerCase();
-  const priorityKeywords = [
-    "netflix",
-    "disney",
-    "playstation",
-    "psn",
-    "nintendo",
-    "xbox",
-    "steam",
-    "spotify",
-    "apple",
-    "itunes",
-    "roblox",
-    "free fire",
-    "razer",
-    "amazon",
-    "google play",
-  ];
+  const selectedCategories = selectFazerCardsCategoriesForQuery(allCategories, query, 48);
+  const { numericTokens } = splitFazerCardsSearchQuery(query);
 
-  const matchingCategories = q
-    ? allCategories.filter((c) =>
-        `${c.name} ${c.category_id} ${c.note ?? ""}`.toLowerCase().includes(q)
-      )
-    : allCategories.filter((c) => {
-        const hay = `${c.name} ${c.category_id}`.toLowerCase();
-        return priorityKeywords.some((kw) => hay.includes(kw));
-      });
+  const rankedItems: Array<{
+    item: CentralOneCatalogItem;
+    catScore: number;
+    offerMatchBoost: number;
+  }> = [];
 
-  const targetCategories = (
-    matchingCategories.length > 0 ? matchingCategories : allCategories
-  ).slice(0, 24);
-
-  const items: CentralOneCatalogItem[] = [];
-  const batchSize = 6;
-  for (let i = 0; i < targetCategories.length; i += batchSize) {
-    const slice = targetCategories.slice(i, i + batchSize);
+  const batchSize = 8;
+  for (let i = 0; i < selectedCategories.length; i += batchSize) {
+    const slice = selectedCategories.slice(i, i + batchSize);
     const offerResults = await Promise.allSettled(
-      slice.map((cat) => getFazerCardsCategoryOffers(cat.category_id))
+      slice.map(({ category }) => getFazerCardsCategoryOffers(category.category_id))
     );
     for (let j = 0; j < offerResults.length; j++) {
       const result = offerResults[j];
-      const cat = slice[j];
-      if (result.status !== "fulfilled" || !cat) continue;
+      const entry = slice[j];
+      if (result.status !== "fulfilled" || !entry) continue;
+      const cat = entry.category;
       for (const offer of result.value.offers) {
         if (!offer.card_id) continue;
         const priceCents = parseCentralOneDecimalToCents(offer.price_usd) ?? 0;
         if (priceCents <= 0) continue;
         const compositeId = formatFazerCardsProductId(cat.category_id, offer.card_id);
-        items.push({
-          id: compositeId,
-          sku: `FZR:${cat.category_id}:${offer.card_id}`,
-          name: `${cat.name} — ${offer.name}`,
-          region: `FazerCards · Stock: ${offer.stock}`,
-          resellerPriceRaw: String(offer.price_usd),
-          resellerPriceCents: priceCents,
-          currency: "USD",
-          requiresTarget: false,
-          available: offer.stock > 0,
+        const offerHay = normalizeFazerSearchText(`${offer.name} ${offer.card_id}`);
+        const offerMatchBoost =
+          numericTokens.length > 0 &&
+          numericTokens.some((num) =>
+            new RegExp(`(?:^|[^0-9])${escapeRegex(num)}(?:$|[^0-9])`).test(offerHay)
+          )
+            ? 200
+            : 0;
+
+        rankedItems.push({
+          catScore: entry.score,
+          offerMatchBoost,
+          item: {
+            id: compositeId,
+            sku: `FZR:${cat.category_id}:${offer.card_id}`,
+            name: `${cat.name} — ${offer.name}`,
+            region: `FazerCards · Stock: ${offer.stock}`,
+            resellerPriceRaw: String(offer.price_usd),
+            resellerPriceCents: priceCents,
+            currency: "USD",
+            requiresTarget: false,
+            available: offer.stock > 0,
+          },
         });
       }
     }
   }
 
-  return items;
+  rankedItems.sort((a, b) => {
+    if (b.offerMatchBoost !== a.offerMatchBoost) return b.offerMatchBoost - a.offerMatchBoost;
+    if (b.catScore !== a.catScore) return b.catScore - a.catScore;
+    if (a.item.available !== b.item.available) return a.item.available ? -1 : 1;
+    return a.item.resellerPriceCents - b.item.resellerPriceCents;
+  });
+
+  return rankedItems.map((entry) => entry.item);
 }
 
 function extractCodesFromOrder(order: FazerCardsOrderResource | null | undefined): string[] {

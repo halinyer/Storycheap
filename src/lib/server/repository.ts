@@ -19,9 +19,13 @@ import type {
   Region,
   RevealedCodeDTO,
   SourcePriority,
+  TreasuryAccountId,
+  TreasuryMovementDTO,
+  TreasuryMovementType,
   WebhookEventDTO,
 } from "@/types";
 import { decryptCode, encryptCode, extractLast4, sha256CodeHash } from "./crypto";
+import { suggestProductImageUrl } from "@/lib/brand-theme";
 import { CATALOG_SEED } from "@/lib/catalog-seed";
 import { isDemoSandboxEnabled, isStorePreviewMode } from "./env";
 import {
@@ -335,7 +339,7 @@ export async function updateVariantAdmin(
 
 export async function updateProductAdmin(
   productId: string,
-  patch: Partial<{ name: string; region: Region; category: Category }>
+  patch: Partial<{ name: string; region: Region; category: Category; imageUrl: string }>
 ): Promise<void> {
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") {
@@ -344,6 +348,7 @@ export async function updateProductAdmin(
     if (patch.name !== undefined) target.name = patch.name;
     if (patch.region !== undefined) target.region = patch.region;
     if (patch.category !== undefined) target.category = patch.category;
+    if (patch.imageUrl !== undefined) target.imageUrl = patch.imageUrl;
     return;
   }
 
@@ -351,6 +356,7 @@ export async function updateProductAdmin(
   if (patch.name !== undefined) dbPatch.name = patch.name;
   if (patch.region !== undefined) dbPatch.region = patch.region;
   if (patch.category !== undefined) dbPatch.category = patch.category;
+  if (patch.imageUrl !== undefined) dbPatch.image_url = patch.imageUrl;
 
   const { error } = await ctx.admin
     .from("products")
@@ -603,7 +609,7 @@ export async function createProductWithVariantAdmin(input: {
   const cleanBrand = (input.brand || cleanName.split(" ")[0] || cleanName).trim();
   const slug = buildProductSlug(cleanName, input.region);
   const style = CATEGORY_DEFAULT_GRADIENTS[input.category] ?? CATEGORY_DEFAULT_GRADIENTS.gaming;
-  const imageUrl = input.imageUrl?.trim() || "/cards/steam.png";
+  const imageUrl = input.imageUrl?.trim() || suggestProductImageUrl(cleanName, slug);
   const description =
     input.description?.trim() ||
     `Tarjeta digital oficial ${cleanName} (${input.region}) con entrega inmediata.`;
@@ -1805,7 +1811,10 @@ export async function setOrderPaidCentsForManualReview(
   if (error) throw error;
 }
 
-export async function getOrderById(orderId: string): Promise<OrderDTO | null> {
+export async function getOrderById(
+  orderId: string,
+  options?: { preloadedFallbackFlags?: Record<string, TestOrderFlagRecord> }
+): Promise<OrderDTO | null> {
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") {
     const order = getSandboxState().orders.find((o) => o.id === orderId);
@@ -1843,6 +1852,21 @@ export async function getOrderById(orderId: string): Promise<OrderDTO | null> {
     });
   }
 
+  const rawHasNativeTestCol = Object.prototype.hasOwnProperty.call(o, "is_test");
+  let resolvedIsTest = Boolean((o as { is_test?: unknown }).is_test);
+  let resolvedTestNote =
+    ((o as { test_note?: string | null }).test_note ?? null) as string | null;
+
+  if (!rawHasNativeTestCol) {
+    const flags =
+      options?.preloadedFallbackFlags ?? (await getFallbackTestOrderFlags(ctx.admin));
+    const entry = flags[o.id];
+    if (entry) {
+      resolvedIsTest = Boolean(entry.isTest);
+      resolvedTestNote = entry.testNote ?? null;
+    }
+  }
+
   return {
     id: o.id,
     orderNumber: o.order_number,
@@ -1861,6 +1885,8 @@ export async function getOrderById(orderId: string): Promise<OrderDTO | null> {
     expiresAt: o.expires_at,
     needsAttention: Boolean(o.needs_attention),
     attentionReason: o.attention_reason ?? null,
+    isTest: resolvedIsTest,
+    testNote: resolvedTestNote,
     createdAt: o.created_at,
     updatedAt: o.updated_at,
     items: (items ?? []).map((it) => ({
@@ -1967,9 +1993,16 @@ export async function listOrdersAdmin(filter?: {
   if (filter?.needsAttentionOnly) q = q.eq("needs_attention", true);
   if (filter?.status) q = q.eq("status", filter.status);
 
-  const { data, error } = await q;
+  const [{ data, error }, fallbackFlags] = await Promise.all([
+    q,
+    getFallbackTestOrderFlags(ctx.admin),
+  ]);
   if (error) throw error;
-  const results = await Promise.all((data ?? []).map((r) => getOrderById(r.id)));
+  const results = await Promise.all(
+    (data ?? []).map((r) =>
+      getOrderById(r.id, { preloadedFallbackFlags: fallbackFlags })
+    )
+  );
   return results.filter((o): o is OrderDTO => Boolean(o));
 }
 
@@ -3018,4 +3051,342 @@ export async function updateSupplierOrderState(
     .update(dbPatch)
     .eq("id", id);
   if (error) throw error;
+}
+
+// ============================================================================
+// TREASURY MOVEMENTS & TEST ORDER FLAGS (CON COMPATIBILIDAD PRE-MIGRACIÓN)
+// ============================================================================
+
+const TREASURY_MOVEMENTS_SETTINGS_KEY = "treasury_movements_ledger";
+const TEST_ORDER_FLAGS_SETTINGS_KEY = "test_order_flags";
+
+type TestOrderFlagRecord = { isTest: boolean; testNote: string | null; updatedAt: string };
+
+function isMissingSchemaObjectError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const rec = err as { code?: unknown; message?: unknown };
+  const code = typeof rec.code === "string" ? rec.code : "";
+  const msg = typeof rec.message === "string" ? rec.message : "";
+  return (
+    code === "42P01" ||
+    code === "42703" ||
+    code === "PGRST204" ||
+    code === "PGRST205" ||
+    /does not exist|Could not find the table|Could not find the '.*' column/i.test(msg)
+  );
+}
+
+type AdminDbClient = NonNullable<
+  ReturnType<typeof import("./supabase-admin").getSupabaseAdmin>
+>;
+
+async function getFallbackTestOrderFlags(
+  admin: AdminDbClient
+): Promise<Record<string, TestOrderFlagRecord>> {
+  const { data, error } = await admin
+    .from("store_settings")
+    .select("value")
+    .eq("key", TEST_ORDER_FLAGS_SETTINGS_KEY)
+    .maybeSingle();
+  if (error || !data) return {};
+  const raw = (data.value as { flags?: unknown } | null)?.flags;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  return raw as Record<string, TestOrderFlagRecord>;
+}
+
+function mapTreasuryRow(r: Record<string, unknown>): TreasuryMovementDTO {
+  return {
+    id: String(r.id),
+    occurredAt: String(r.occurred_at),
+    movementType: r.movement_type as TreasuryMovementType,
+    sourceAccount: String(r.source_account) as TreasuryAccountId,
+    targetAccount: String(r.target_account) as TreasuryAccountId,
+    amountUsdCents: Number(r.amount_usd_cents ?? 0),
+    amountBsCents: r.amount_bs_cents !== null && r.amount_bs_cents !== undefined ? Number(r.amount_bs_cents) : null,
+    exchangeRateCents:
+      r.exchange_rate_cents !== null && r.exchange_rate_cents !== undefined
+        ? Number(r.exchange_rate_cents)
+        : null,
+    partnerName: (r.partner_name as string | null) ?? null,
+    reference: (r.reference as string | null) ?? null,
+    notes: String(r.notes ?? ""),
+    relatedOrderId: (r.related_order_id as string | null) ?? null,
+    voidedAt: (r.voided_at as string | null) ?? null,
+    voidReason: (r.void_reason as string | null) ?? null,
+    createdBy: (r.created_by as string | null) ?? null,
+    createdAt: String(r.created_at),
+  };
+}
+
+export async function getTreasurySchemaStatus(): Promise<{
+  sqlMigrationApplied: boolean;
+}> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") return { sqlMigrationApplied: true };
+
+  const [movRes, ordRes] = await Promise.all([
+    ctx.admin.from("treasury_movements").select("id").limit(1),
+    ctx.admin.from("orders").select("is_test").limit(1),
+  ]);
+  const applied =
+    !isMissingSchemaObjectError(movRes.error) &&
+    !isMissingSchemaObjectError(ordRes.error);
+  return { sqlMigrationApplied: applied };
+}
+
+async function listFallbackTreasuryMovements(
+  admin: AdminDbClient
+): Promise<TreasuryMovementDTO[]> {
+  const { data, error } = await admin
+    .from("store_settings")
+    .select("value")
+    .eq("key", TREASURY_MOVEMENTS_SETTINGS_KEY)
+    .maybeSingle();
+  if (error || !data) return [];
+  const rawList = (data.value as { movements?: unknown } | null)?.movements;
+  if (!Array.isArray(rawList)) return [];
+  return (rawList as TreasuryMovementDTO[]).sort((a, b) =>
+    b.occurredAt.localeCompare(a.occurredAt)
+  );
+}
+
+export async function listTreasuryMovementsAdmin(): Promise<TreasuryMovementDTO[]> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    return [...getSandboxState().treasuryMovements].sort((a, b) =>
+      b.occurredAt.localeCompare(a.occurredAt)
+    );
+  }
+
+  const { data, error } = await ctx.admin
+    .from("treasury_movements")
+    .select("*")
+    .order("occurred_at", { ascending: false })
+    .limit(500);
+
+  if (error) {
+    if (isMissingSchemaObjectError(error)) {
+      return listFallbackTreasuryMovements(ctx.admin);
+    }
+    throw error;
+  }
+
+  return (data ?? []).map((row) => mapTreasuryRow(row as Record<string, unknown>));
+}
+
+export async function createTreasuryMovementAdmin(input: {
+  occurredAt?: string;
+  movementType: TreasuryMovementType;
+  sourceAccount: TreasuryAccountId;
+  targetAccount: TreasuryAccountId;
+  amountUsdCents: number;
+  amountBsCents?: number | null;
+  exchangeRateCents?: number | null;
+  partnerName?: string | null;
+  reference?: string | null;
+  notes?: string;
+  relatedOrderId?: string | null;
+  createdBy?: string | null;
+}): Promise<TreasuryMovementDTO> {
+  const ctx = assertDbOrSandbox();
+  const now = new Date().toISOString();
+  const occurredAt = input.occurredAt || now;
+  const roundedUsd = Math.max(0, Math.round(input.amountUsdCents));
+  const roundedBs =
+    typeof input.amountBsCents === "number" && Number.isFinite(input.amountBsCents)
+      ? Math.max(0, Math.round(input.amountBsCents))
+      : null;
+  const roundedRate =
+    typeof input.exchangeRateCents === "number" &&
+    Number.isFinite(input.exchangeRateCents) &&
+    input.exchangeRateCents > 0
+      ? Math.round(input.exchangeRateCents)
+      : null;
+
+  if (ctx.mode === "sandbox") {
+    const entry: TreasuryMovementDTO = {
+      id: crypto.randomUUID(),
+      occurredAt,
+      movementType: input.movementType,
+      sourceAccount: input.sourceAccount,
+      targetAccount: input.targetAccount,
+      amountUsdCents: roundedUsd,
+      amountBsCents: roundedBs,
+      exchangeRateCents: roundedRate,
+      partnerName: input.partnerName ?? null,
+      reference: input.reference ?? null,
+      notes: input.notes ?? "",
+      relatedOrderId: input.relatedOrderId ?? null,
+      voidedAt: null,
+      voidReason: null,
+      createdBy: input.createdBy ?? null,
+      createdAt: now,
+    };
+    getSandboxState().treasuryMovements.unshift(entry);
+    return entry;
+  }
+
+  const { data, error } = await ctx.admin
+    .from("treasury_movements")
+    .insert({
+      occurred_at: occurredAt,
+      movement_type: input.movementType,
+      source_account: input.sourceAccount,
+      target_account: input.targetAccount,
+      amount_usd_cents: roundedUsd,
+      amount_bs_cents: roundedBs,
+      exchange_rate_cents: roundedRate,
+      partner_name: input.partnerName ?? null,
+      reference: input.reference ?? null,
+      notes: input.notes ?? "",
+      related_order_id: input.relatedOrderId ?? null,
+      created_by: input.createdBy ?? null,
+    })
+    .select("*")
+    .single();
+
+  if (error) {
+    if (isMissingSchemaObjectError(error)) {
+      const existing = await listFallbackTreasuryMovements(ctx.admin);
+      const entry: TreasuryMovementDTO = {
+        id: crypto.randomUUID(),
+        occurredAt,
+        movementType: input.movementType,
+        sourceAccount: input.sourceAccount,
+        targetAccount: input.targetAccount,
+        amountUsdCents: roundedUsd,
+        amountBsCents: roundedBs,
+        exchangeRateCents: roundedRate,
+        partnerName: input.partnerName ?? null,
+        reference: input.reference ?? null,
+        notes: input.notes ?? "",
+        relatedOrderId: input.relatedOrderId ?? null,
+        voidedAt: null,
+        voidReason: null,
+        createdBy: input.createdBy ?? null,
+        createdAt: now,
+      };
+      const next = [entry, ...existing];
+      const { error: upsertErr } = await ctx.admin.from("store_settings").upsert({
+        key: TREASURY_MOVEMENTS_SETTINGS_KEY,
+        value: { movements: next },
+        updated_by: input.createdBy ?? null,
+      });
+      if (upsertErr) throw upsertErr;
+      return entry;
+    }
+    throw error;
+  }
+
+  return mapTreasuryRow(data as Record<string, unknown>);
+}
+
+export async function voidTreasuryMovementAdmin(
+  movementId: string,
+  voidReason: string,
+  updatedBy?: string | null
+): Promise<TreasuryMovementDTO> {
+  const ctx = assertDbOrSandbox();
+  const now = new Date().toISOString();
+
+  if (ctx.mode === "sandbox") {
+    const found = getSandboxState().treasuryMovements.find(
+      (m) => m.id === movementId
+    );
+    if (!found) throw new Error("Movimiento no encontrado");
+    found.voidedAt = now;
+    found.voidReason = voidReason;
+    return { ...found };
+  }
+
+  const { data, error } = await ctx.admin
+    .from("treasury_movements")
+    .update({ voided_at: now, void_reason: voidReason })
+    .eq("id", movementId)
+    .is("voided_at", null)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingSchemaObjectError(error)) {
+      const existing = await listFallbackTreasuryMovements(ctx.admin);
+      let updated: TreasuryMovementDTO | null = null;
+      const next = existing.map((m) => {
+        if (m.id === movementId && !m.voidedAt) {
+          updated = { ...m, voidedAt: now, voidReason };
+          return updated;
+        }
+        return m;
+      });
+      if (!updated) throw new Error("Movimiento no encontrado o ya anulado");
+      const { error: upsertErr } = await ctx.admin.from("store_settings").upsert({
+        key: TREASURY_MOVEMENTS_SETTINGS_KEY,
+        value: { movements: next },
+        updated_by: updatedBy ?? null,
+      });
+      if (upsertErr) throw upsertErr;
+      return updated;
+    }
+    throw error;
+  }
+
+  if (!data) throw new Error("Movimiento no encontrado o ya anulado");
+  return mapTreasuryRow(data as Record<string, unknown>);
+}
+
+export async function setOrdersTestFlagAdmin(
+  orderIds: string[],
+  isTest: boolean,
+  testNote: string | null,
+  updatedBy?: string | null
+): Promise<{ updatedCount: number; usedCompatibilityStore: boolean }> {
+  const cleanIds = Array.from(new Set(orderIds.filter(Boolean)));
+  if (cleanIds.length === 0) {
+    return { updatedCount: 0, usedCompatibilityStore: false };
+  }
+
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const now = new Date().toISOString();
+    let count = 0;
+    for (const o of getSandboxState().orders) {
+      if (cleanIds.includes(o.id)) {
+        o.isTest = isTest;
+        o.testNote = testNote;
+        o.updatedAt = now;
+        count += 1;
+      }
+    }
+    return { updatedCount: count, usedCompatibilityStore: false };
+  }
+
+  const { error } = await ctx.admin
+    .from("orders")
+    .update({ is_test: isTest, test_note: testNote })
+    .in("id", cleanIds);
+
+  if (error) {
+    if (isMissingSchemaObjectError(error)) {
+      const existing = await getFallbackTestOrderFlags(ctx.admin);
+      const next = { ...existing };
+      const now = new Date().toISOString();
+      for (const id of cleanIds) {
+        if (isTest) {
+          next[id] = { isTest: true, testNote, updatedAt: now };
+        } else {
+          delete next[id];
+        }
+      }
+      const { error: upsertErr } = await ctx.admin.from("store_settings").upsert({
+        key: TEST_ORDER_FLAGS_SETTINGS_KEY,
+        value: { flags: next },
+        updated_by: updatedBy ?? null,
+      });
+      if (upsertErr) throw upsertErr;
+      return { updatedCount: cleanIds.length, usedCompatibilityStore: true };
+    }
+    throw error;
+  }
+
+  return { updatedCount: cleanIds.length, usedCompatibilityStore: false };
 }

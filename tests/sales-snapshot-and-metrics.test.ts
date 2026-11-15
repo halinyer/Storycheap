@@ -318,7 +318,10 @@ describe("FazerCards vs Central One provider separation", () => {
       "item-c1-3": 69,
     };
 
-    const byProvider = {
+    const byProvider: Record<
+      string,
+      { orders: number; revenueCents: number; costCents: number; profitCents: number }
+    > = {
       fazercards: { orders: 0, revenueCents: 0, costCents: 0, profitCents: 0 },
       centralone: { orders: 0, revenueCents: 0, costCents: 0, profitCents: 0 },
     };

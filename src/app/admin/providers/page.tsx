@@ -1,49 +1,35 @@
 import React, { Suspense } from "react";
 import { connection } from "next/server";
 import { ProvidersConsole } from "@/components/admin/providers-console";
-import {
-  listProviderConfigs,
-  listWebhookEventsAdmin,
-} from "@/lib/server/repository";
-import { getCentralOneBalance } from "@/lib/server/suppliers/centralone";
-import { getFazerCardsBalance } from "@/lib/server/suppliers/fazercards";
-import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
+import { loadAdminPortfolioSnapshot } from "@/lib/server/admin-portfolio";
+import { listWebhookEventsAdmin } from "@/lib/server/repository";
 
 async function AdminProvidersContent() {
   await connection();
-  const [providers, reloadlyStatus, centralOneStatus, fazerCardsStatus, webhooks] =
-    await Promise.all([
-      listProviderConfigs(),
-      getReloadlyBalance(),
-      getCentralOneBalance(),
-      getFazerCardsBalance(),
-      listWebhookEventsAdmin(),
-    ]);
+  const [snap, webhooks] = await Promise.all([
+    loadAdminPortfolioSnapshot({ includeOrdersReports: true }),
+    listWebhookEventsAdmin(),
+  ]);
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-black text-white">
-          Pasarelas, Kill Switches y Webhooks
-        </h1>
-        <p className="text-xs text-slate-400 mt-1">
-          Detén el checkout o una pasarela al instante ante cualquier anomalía, e inspecciona las firmas recibidas de ZenoBank, Pago Móvil, FazerCards y Central One.
-        </p>
-      </div>
-      <ProvidersConsole
-        providers={providers}
-        reloadlyStatus={reloadlyStatus}
-        centralOneStatus={centralOneStatus}
-        fazerCardsStatus={fazerCardsStatus}
-        webhooks={webhooks}
-      />
-    </div>
+    <ProvidersConsole
+      initialProviders={snap.providers}
+      webhooks={webhooks}
+      suppliers={snap.suppliers}
+      totalSuppliersUsdCents={snap.position.totalSuppliersUsdCents}
+    />
   );
 }
 
 export default function AdminProvidersPage() {
   return (
-    <Suspense fallback={<div className="text-xs text-slate-400">Cargando pasarelas...</div>}>
+    <Suspense
+      fallback={
+        <div className="text-xs text-slate-400 py-8">
+          Cargando distribuidores y proveedores...
+        </div>
+      }
+    >
       <AdminProvidersContent />
     </Suspense>
   );

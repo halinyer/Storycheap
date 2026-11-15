@@ -2,713 +2,523 @@
 
 import React, { useMemo, useState } from "react";
 import Link from "next/link";
-import { captureMonthlyCapitalSnapshotAction } from "@/app/admin/actions";
-import { ApiAuditSection } from "@/components/admin/api-audit-section";
-import { BsRateCard } from "@/components/admin/bs-rate-card";
+import { SupplierPortfolioList } from "@/components/admin/supplier-portfolio-list";
 import {
-  ReceiverLedgersSection,
-  type MatchedPagoMovilSummary,
-} from "@/components/admin/receiver-ledgers-section";
+  TreasuryMovementModal,
+  type TreasuryMovementModalPreset,
+} from "@/components/admin/treasury-movement-modal";
 import { formatCents } from "@/lib/catalog-seed";
-import type {
-  CapitalSnapshotRecord,
-  ZenoBinanceReceiverDTO,
-  ZenoPaymentProofDTO,
-} from "@/lib/server/repository";
 import {
   formatBsCents,
+  getOrderCashPaidCents,
   getOrderSnapshot,
-  resolveFulfillmentProvider,
-  type EffectiveProviderId,
+  summarizeOrdersMetrics,
 } from "@/lib/server/sales-metrics";
-import type { CentralOneOrdersReport } from "@/lib/server/suppliers/centralone";
 import type {
-  FazerCardsApiOrderSummary,
-  SupplierOrdersReport,
-} from "@/lib/server/suppliers/fazercards";
-import type { OrderDTO, ReceiverBankAccountDTO } from "@/types";
+  OrderDTO,
+  SupplierPortfolioRow,
+  TreasuryMovementDTO,
+  TreasuryMovementType,
+  TreasuryPositionSummary,
+} from "@/types";
 import {
   AlertTriangle,
+  ArrowRightLeft,
   ArrowUpRight,
+  Banknote,
   Bitcoin,
-  Camera,
   CheckCircle2,
-  Clock3,
-  Landmark,
-  Layers,
-  Package,
+  CreditCard,
+  FlaskConical,
+  Plus,
   Receipt,
-  Search,
-  ShieldCheck,
+  RefreshCw,
+  ShoppingBag,
   Smartphone,
   TrendingDown,
   TrendingUp,
   Wallet,
 } from "lucide-react";
-import { toast } from "sonner";
 
-export interface ProviderCapitalCardData {
-  id: "centralone" | "fazercards" | "manual" | "reloadly";
-  label: string;
-  subtitle: string;
-  enabled: boolean;
-  configured: boolean;
-  healthy?: boolean;
-  errorMessage?: string;
-  balanceCents: number | null;
-  previousBalanceCents: number | null;
-  codesAvailableCount?: number;
-  apiSpentCents?: number | null;
-  apiOrdersCount?: number | null;
-}
+type PeriodKey = "today" | "7d" | "30d" | "all";
 
-export interface LowStockVariantAlert {
-  productName: string;
-  variantId: string;
-  denominationLabel: string;
-  availableStock: number;
-  threshold: number;
-}
+const PERIOD_OPTIONS: Array<{ key: PeriodKey; label: string; short: string }> = [
+  { key: "today", label: "Hoy", short: "hoy" },
+  { key: "7d", label: "7 días", short: "7 días" },
+  { key: "30d", label: "30 días", short: "30 días" },
+  { key: "all", label: "Histórico", short: "histórico" },
+];
 
-export interface CreditHolderSummary {
-  id: string;
-  email: string;
-  creditBalanceCents: number;
-  ordersCount: number;
-}
-
-type PeriodKey = "today" | "7d" | "month" | "all";
-type ProviderFilterKey = "all" | "fazercards" | "centralone" | "manual" | "reloadly";
-type StatusFilterKey = "all" | "settled" | "pending" | "attention";
-type WorkspaceTabKey = "sales" | "receivers" | "credits" | "audit";
-
-const EMPTY_COST_MAP: Record<string, number> = {};
-
-const ORDER_STATUS_META: Record<
-  OrderDTO["status"],
-  { label: string; cls: string }
-> = {
-  DELIVERED: {
-    label: "Entregado",
-    cls: "bg-emerald-500/15 text-emerald-300",
-  },
-  FULFILLING: {
-    label: "Procesando",
-    cls: "bg-sky-500/15 text-sky-300",
-  },
-  PAID: {
-    label: "Pagado",
-    cls: "bg-sky-500/15 text-sky-300",
-  },
-  PARTIAL: {
-    label: "Parcial",
-    cls: "bg-amber-500/15 text-amber-300",
-  },
-  MANUAL_REVIEW: {
-    label: "Revisión",
-    cls: "bg-rose-500/15 text-rose-300",
-  },
-  PENDING_PAYMENT: {
-    label: "Esperando pago",
-    cls: "bg-white/10 text-slate-300",
-  },
-  CREATED: {
-    label: "Creada",
-    cls: "bg-white/10 text-slate-300",
-  },
-  EXPIRED: {
-    label: "Expirada",
-    cls: "bg-white/5 text-slate-400",
-  },
-  CANCELLED: {
-    label: "Cancelada",
-    cls: "bg-white/5 text-slate-400",
-  },
-  REFUNDED_CREDIT: {
-    label: "Reembolsada",
-    cls: "bg-violet-500/15 text-violet-300",
-  },
-};
-
-const PROVIDER_LABELS: Record<EffectiveProviderId, string> = {
+const ACCOUNT_LABELS: Record<string, string> = {
+  external: "Externo",
+  zenobank: "Binance / Zeno",
+  pagomovil: "Pago Móvil",
   fazercards: "FazerCards",
   centralone: "Central One",
-  reloadly: "Reloadly",
   manual: "Stock CSV",
+  reloadly: "Reloadly",
+  partner_payout: "Retiro Socio",
+  expense: "Gasto",
+  adjustment: "Ajuste",
 };
 
-export function getOrderEffectiveProviders(
-  order: OrderDTO,
-  fallbackProviders?: EffectiveProviderId[]
-): EffectiveProviderId[] {
-  const seen = new Set<EffectiveProviderId>();
-  for (const f of order.fulfillments) {
-    seen.add(resolveFulfillmentProvider(f));
+const MOVEMENT_BADGES: Record<
+  TreasuryMovementType,
+  { label: string; tone: string }
+> = {
+  CAPITAL_IN: {
+    label: "Aporte Capital",
+    tone: "bg-sky-500/15 text-sky-300 border-sky-400/25",
+  },
+  SUPPLIER_TOPUP: {
+    label: "Recarga Prov.",
+    tone: "bg-indigo-500/15 text-indigo-300 border-indigo-400/25",
+  },
+  INTERNAL_TRANSFER: {
+    label: "Cambio P2P",
+    tone: "bg-cyan-500/15 text-cyan-300 border-cyan-400/25",
+  },
+  PROFIT_WITHDRAWAL: {
+    label: "Retiro Ganancia",
+    tone: "bg-emerald-500/15 text-emerald-300 border-emerald-400/25",
+  },
+  EXPENSE_FEE: {
+    label: "Gasto / Fee",
+    tone: "bg-amber-500/15 text-amber-300 border-amber-400/25",
+  },
+  RECONCILIATION_ADJUSTMENT: {
+    label: "Ajuste Cuadre",
+    tone: "bg-purple-500/15 text-purple-300 border-purple-400/25",
+  },
+};
+
+function startOfPeriod(period: PeriodKey): number | null {
+  if (period === "all") return null;
+  const now = new Date();
+  if (period === "today") {
+    now.setHours(0, 0, 0, 0);
+    return now.getTime();
   }
-  if (seen.size === 0 && fallbackProviders) {
-    for (const provider of fallbackProviders) {
-      seen.add(provider);
-    }
-  }
-  return Array.from(seen);
+  const days = period === "7d" ? 7 : 30;
+  return now.getTime() - days * 86_400_000;
 }
-
-function summarizeOrdersMetrics(
-  list: OrderDTO[],
-  costOverrides: Record<string, number>
-) {
-  let ordersCount = 0;
-  let revenueCents = 0;
-  let costCents = 0;
-  let totalBsCents = 0;
-  let bsCovered = 0;
-  let zenobankCents = 0;
-  let zenobankCount = 0;
-  let pagomovilCents = 0;
-  let pagomovilBsCents = 0;
-  let pagomovilCount = 0;
-  let creditAppliedCents = 0;
-  let creditAppliedCount = 0;
-  let pendingCents = 0;
-  let pendingCount = 0;
-
-  const byProvider: Record<
-    EffectiveProviderId,
-    { consumedCents: number; profitCents: number; deliveredCodes: number }
-  > = {
-    fazercards: { consumedCents: 0, profitCents: 0, deliveredCodes: 0 },
-    centralone: { consumedCents: 0, profitCents: 0, deliveredCodes: 0 },
-    manual: { consumedCents: 0, profitCents: 0, deliveredCodes: 0 },
-    reloadly: { consumedCents: 0, profitCents: 0, deliveredCodes: 0 },
-  };
-
-  for (const order of list) {
-    if (order.status === "PENDING_PAYMENT" || order.status === "CREATED") {
-      pendingCount += 1;
-      pendingCents += order.amountDueCents;
-    }
-
-    const snap = getOrderSnapshot(order, costOverrides);
-    if (!snap.isSettledSale) continue;
-
-    ordersCount += 1;
-    revenueCents += snap.revenueCents;
-    if (snap.costCents !== null) costCents += snap.costCents;
-    if (snap.actualBsCents !== null) {
-      totalBsCents += snap.actualBsCents;
-      bsCovered += 1;
-    }
-
-    if (order.creditAppliedCents > 0) {
-      creditAppliedCents += order.creditAppliedCents;
-      creditAppliedCount += 1;
-    }
-
-    const cashPaidCents =
-      order.paidCents > 0
-        ? order.paidCents
-        : Math.max(0, snap.revenueCents - order.creditAppliedCents);
-
-    if (cashPaidCents > 0) {
-      if (order.paymentGateway === "pagomovil" || order.paymentGateway === "pablito") {
-        pagomovilCount += 1;
-        pagomovilCents += cashPaidCents;
-        if (snap.actualBsCents !== null) pagomovilBsCents += snap.actualBsCents;
-      } else {
-        zenobankCount += 1;
-        zenobankCents += cashPaidCents;
-      }
-    }
-
-    const itemById = new Map(order.items.map((it) => [it.id, it]));
-    for (const f of order.fulfillments) {
-      const providerKey = resolveFulfillmentProvider(f);
-      const bucket = byProvider[providerKey];
-      if (!bucket) continue;
-      bucket.deliveredCodes += 1;
-      const item = itemById.get(f.orderItemId);
-      const realUnitCost =
-        costOverrides[f.orderItemId] ??
-        (item && typeof item.unitCostCents === "number" ? item.unitCostCents : null);
-      if (item && realUnitCost !== null) {
-        bucket.consumedCents += realUnitCost;
-        bucket.profitCents += item.unitPriceCents - realUnitCost;
-      }
-    }
-  }
-
-  const profitCents = revenueCents - costCents;
-  const marginPct =
-    revenueCents > 0 ? ((profitCents / revenueCents) * 100).toFixed(1) : "0.0";
-
-  return {
-    ordersCount,
-    revenueCents,
-    costCents,
-    profitCents,
-    marginPct,
-    totalBsCents,
-    bsCovered,
-    zenobankCents,
-    zenobankCount,
-    pagomovilCents,
-    pagomovilBsCents,
-    pagomovilCount,
-    creditAppliedCents,
-    creditAppliedCount,
-    pendingCents,
-    pendingCount,
-    byProvider,
-  };
-}
-
-const EMPTY_FALLBACK_PROVIDERS: Record<string, EffectiveProviderId[]> = {};
 
 export function OverviewConsole({
   orders,
-  attentionCount,
-  lowStockVariants,
-  providerStatuses,
-  initialSnapshots,
+  movements,
+  suppliers,
+  position,
+  actualItemCostCents,
+  matchedBsByOrder,
   bsRateCents,
-  creditHolders = [],
-  zenoConfigured = false,
-  initialZenoReceiver = null,
-  zenoProofs = {},
-  activePagoMovilAccount = null,
-  matchedPagoMovilByOrder = {},
-  actualItemCostCents = EMPTY_COST_MAP,
-  fazerOrdersReport = null,
-  centralOneOrdersReport = null,
-  fallbackProvidersByOrder = EMPTY_FALLBACK_PROVIDERS,
+  includeTestOrders,
+  unreviewedPagoMovilCount,
+  historicalTestCandidateCount,
 }: {
   orders: OrderDTO[];
-  attentionCount: number;
-  lowStockVariants: LowStockVariantAlert[];
-  providerStatuses: ProviderCapitalCardData[];
-  initialSnapshots: CapitalSnapshotRecord[];
+  movements: TreasuryMovementDTO[];
+  suppliers: SupplierPortfolioRow[];
+  position: TreasuryPositionSummary;
+  actualItemCostCents: Record<string, number>;
+  matchedBsByOrder: Record<string, number | null>;
   bsRateCents: number | null;
-  creditHolders?: CreditHolderSummary[];
-  zenoConfigured?: boolean;
-  initialZenoReceiver?: ZenoBinanceReceiverDTO | null;
-  zenoProofs?: Record<string, ZenoPaymentProofDTO>;
-  activePagoMovilAccount?: ReceiverBankAccountDTO | null;
-  matchedPagoMovilByOrder?: Record<string, MatchedPagoMovilSummary>;
-  actualItemCostCents?: Record<string, number>;
-  fazerOrdersReport?: SupplierOrdersReport<FazerCardsApiOrderSummary> | null;
-  centralOneOrdersReport?: CentralOneOrdersReport | null;
-  fallbackProvidersByOrder?: Record<string, EffectiveProviderId[]>;
+  includeTestOrders: boolean;
+  unreviewedPagoMovilCount: number;
+  historicalTestCandidateCount: number;
 }) {
-  const [period, setPeriod] = useState<PeriodKey>("month");
-  const [providerFilter, setProviderFilter] = useState<ProviderFilterKey>("all");
-  const [statusFilter, setStatusFilter] = useState<StatusFilterKey>("all");
-  const [activeTab, setActiveTab] = useState<WorkspaceTabKey>("sales");
-  const [search, setSearch] = useState("");
-  const [snapshots, setSnapshots] = useState<CapitalSnapshotRecord[]>(initialSnapshots);
-  const [capturing, setCapturing] = useState(false);
+  const [period, setPeriod] = useState<PeriodKey>("30d");
+  const [activityTab, setActivityTab] = useState<"orders" | "movements">(
+    "orders"
+  );
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalPreset, setModalPreset] = useState<
+    TreasuryMovementModalPreset | undefined
+  >(undefined);
 
-  const now = useMemo(() => new Date(), []);
-  const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const openModal = (preset?: TreasuryMovementModalPreset) => {
+    setModalPreset(preset);
+    setModalOpen(true);
+  };
 
-  // Never fall back to a same-month or $0 placeholder snapshot
-  const previousSnapshot = useMemo(() => {
-    return (
-      snapshots.find((s) => s.month < currentMonthKey && s.totalCents > 0) ?? null
-    );
-  }, [snapshots, currentMonthKey]);
-
-  const periodSinceMs = useMemo(() => {
-    const d = new Date(now);
-    if (period === "today") {
-      d.setHours(0, 0, 0, 0);
-      return d.getTime();
-    }
-    if (period === "7d") {
-      return d.getTime() - 7 * 24 * 60 * 60 * 1000;
-    }
-    if (period === "month") {
-      return new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0).getTime();
-    }
-    return 0;
-  }, [now, period]);
+  const periodCutoff = useMemo(() => startOfPeriod(period), [period]);
 
   const periodOrders = useMemo(() => {
-    if (periodSinceMs <= 0) return orders;
-    return orders.filter((order) => {
-      const ts = Date.parse(order.createdAt);
-      return Number.isFinite(ts) && ts >= periodSinceMs;
-    });
-  }, [orders, periodSinceMs]);
-
-  const filteredOrders = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return periodOrders.filter((order) => {
-      if (providerFilter !== "all") {
-        const effectiveSources = getOrderEffectiveProviders(
-          order,
-          fallbackProvidersByOrder[order.id]
-        );
-        if (!effectiveSources.includes(providerFilter)) return false;
-      }
-      if (statusFilter === "settled") {
-        if (!getOrderSnapshot(order, actualItemCostCents).isSettledSale) return false;
-      } else if (statusFilter === "pending") {
-        if (order.status !== "PENDING_PAYMENT" && order.status !== "CREATED") {
-          return false;
-        }
-      } else if (statusFilter === "attention") {
-        if (!order.needsAttention) return false;
-      }
-      if (q) {
-        const itemsText = order.items
-          .map((i) => `${i.productName} ${i.denominationLabel}`)
-          .join(" ");
-        const haystack = `${order.orderNumber} ${order.email} ${itemsText}`.toLowerCase();
-        if (!haystack.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [
-    periodOrders,
-    providerFilter,
-    statusFilter,
-    search,
-    actualItemCostCents,
-    fallbackProvidersByOrder,
-  ]);
-
-  const periodMetrics = useMemo(
-    () => summarizeOrdersMetrics(periodOrders, actualItemCostCents),
-    [periodOrders, actualItemCostCents]
-  );
-
-  const metrics = useMemo(
-    () => summarizeOrdersMetrics(filteredOrders, actualItemCostCents),
-    [filteredOrders, actualItemCostCents]
-  );
-
-  const allTimeMetrics = useMemo(
-    () => summarizeOrdersMetrics(orders, actualItemCostCents),
-    [orders, actualItemCostCents]
-  );
-
-  const detectedZenoReceiver = useMemo(() => {
-    const proofs = Object.values(zenoProofs).sort((a, b) =>
-      b.processedAt.localeCompare(a.processedAt)
+    if (!periodCutoff) return orders;
+    return orders.filter(
+      (o) => new Date(o.createdAt).getTime() >= periodCutoff
     );
-    for (const p of proofs) {
-      for (const tx of p.transactions) {
-        const dest = (tx.to || tx.toLabel || "").trim();
-        if (dest) return dest;
-      }
-    }
-    return null;
-  }, [zenoProofs]);
+  }, [orders, periodCutoff]);
 
-  const totalCreditLiabilityCents = useMemo(
-    () => creditHolders.reduce((sum, h) => sum + h.creditBalanceCents, 0),
-    [creditHolders]
-  );
-
-  const visibleProviders = useMemo(
+  const periodSummary = useMemo(
     () =>
-      providerStatuses.filter((p) => {
-        if (p.id === "manual") {
-          return p.enabled || (p.balanceCents ?? 0) > 0 || (p.codesAvailableCount ?? 0) > 0;
-        }
-        return p.enabled || p.configured;
+      summarizeOrdersMetrics(periodOrders, actualItemCostCents, {
+        includeTestOrders,
+        matchedBsByOrder,
       }),
-    [providerStatuses]
+    [periodOrders, actualItemCostCents, includeTestOrders, matchedBsByOrder]
   );
 
-  const totalLiveCapitalCents = useMemo(
+  const periodSuppliers = useMemo(() => {
+    return suppliers.map((s) => {
+      const bucket = periodSummary.byProvider[s.id];
+      return {
+        ...s,
+        periodConsumedCents: bucket?.consumedCents ?? 0,
+        periodProfitCents: bucket?.profitCents ?? 0,
+        periodCodesCount: bucket?.deliveredCodes ?? 0,
+      };
+    });
+  }, [suppliers, periodSummary]);
+
+  const recentOrders = useMemo(() => {
+    return orders
+      .filter((o) => includeTestOrders || !o.isTest)
+      .slice(0, 7);
+  }, [orders, includeTestOrders]);
+
+  const recentMovements = useMemo(
+    () => movements.filter((m) => !m.voidedAt).slice(0, 7),
+    [movements]
+  );
+
+  const needsAttentionCount = useMemo(
+    () => orders.filter((o) => o.needsAttention).length,
+    [orders]
+  );
+
+  const activeSuppliersCount = useMemo(
+    () => suppliers.filter((s) => s.enabled && s.configured).length,
+    [suppliers]
+  );
+
+  const discrepancyAbs = Math.abs(position.suppliersDiscrepancyUsdCents);
+  const isBalanced = discrepancyAbs <= 5;
+  const periodMeta =
+    PERIOD_OPTIONS.find((p) => p.key === period) ?? PERIOD_OPTIONS[2];
+  const periodDeliveredCodes = useMemo(
     () =>
-      visibleProviders.reduce(
-        (sum, p) => sum + (typeof p.balanceCents === "number" ? p.balanceCents : 0),
+      Object.values(periodSummary.byProvider).reduce(
+        (sum, b) => sum + b.deliveredCodes,
         0
       ),
-    [visibleProviders]
+    [periodSummary]
   );
-
-  const fazerCard = providerStatuses.find((p) => p.id === "fazercards");
-  const centralOneCard = providerStatuses.find((p) => p.id === "centralone");
-  const manualCard = providerStatuses.find((p) => p.id === "manual");
-
-  const capitalDiffCents = previousSnapshot
-    ? totalLiveCapitalCents - previousSnapshot.totalCents
-    : null;
-  const capitalGrowthPct =
-    previousSnapshot && previousSnapshot.totalCents > 0 && capitalDiffCents !== null
-      ? ((capitalDiffCents / previousSnapshot.totalCents) * 100).toFixed(1)
-      : null;
-
-  const handleCaptureSnapshot = async () => {
-    setCapturing(true);
-    try {
-      const updated = await captureMonthlyCapitalSnapshotAction(currentMonthKey);
-      setSnapshots(updated);
-      toast.success(
-        `Foto guardada (${currentMonthKey}): ${formatCents(updated[0]?.totalCents ?? totalLiveCapitalCents)}`
-      );
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "No se pudo guardar la foto de capital"
-      );
-    } finally {
-      setCapturing(false);
-    }
-  };
-
-  const renderPlatformCard = (
-    card: ProviderCapitalCardData | undefined,
-    accentBorder: string,
-    accentDot: string
-  ) => {
-    if (!card) return null;
-    const periodPerf = periodMetrics.byProvider[card.id];
-    const allTimePerf = allTimeMetrics.byProvider[card.id];
-    const isHealthy = card.healthy ?? card.balanceCents !== null;
-
-    return (
-      <div
-        className={`rounded-2xl bg-slate-900/80 border ${accentBorder} p-5 flex flex-col justify-between gap-4`}
-      >
-        <div className="space-y-2">
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${accentDot}`} />
-                <h2 className="text-sm font-bold text-white">{card.label}</h2>
-              </div>
-              <p className="text-[11px] text-slate-400 mt-0.5">{card.subtitle}</p>
-            </div>
-            <span
-              className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
-                !card.configured
-                  ? "bg-white/10 text-slate-400"
-                  : isHealthy
-                    ? "bg-emerald-500/15 text-emerald-300"
-                    : "bg-rose-500/15 text-rose-300"
-              }`}
-            >
-              {!card.configured
-                ? "No configurada"
-                : isHealthy
-                  ? "Saldo en vivo"
-                  : "Error API"}
-            </span>
-          </div>
-
-          <div className="pt-1">
-            <div className="text-[11px] uppercase tracking-wider text-slate-400">
-              Saldo disponible
-            </div>
-            <div className="text-3xl font-black tracking-tight text-white mt-0.5">
-              {card.balanceCents !== null ? formatCents(card.balanceCents) : "Sin respuesta"}
-            </div>
-          </div>
-
-          {!isHealthy && card.errorMessage && (
-            <div className="rounded-lg bg-rose-500/10 border border-rose-500/25 px-2.5 py-1.5 text-[11px] text-rose-200">
-              {card.errorMessage}
-            </div>
-          )}
-        </div>
-
-        <div className="grid grid-cols-2 gap-2.5 pt-3 border-t border-white/[0.06] text-xs">
-          <div>
-            <div className="text-[11px] text-slate-400">Consumido real (API)</div>
-            <div className="font-bold text-slate-100 mt-0.5">
-              {typeof card.apiSpentCents === "number"
-                ? formatCents(card.apiSpentCents)
-                : formatCents(allTimePerf.consumedCents)}
-            </div>
-            <div className="text-[10px] text-slate-500">
-              {typeof card.apiOrdersCount === "number"
-                ? `${card.apiOrdersCount} órd. en proveedor`
-                : `${allTimePerf.deliveredCodes} cód. histórico`}
-            </div>
-          </div>
-          <div className="text-right">
-            <div className="text-[11px] text-slate-400">En periodo / Ganancia</div>
-            <div className="font-bold text-white mt-0.5">
-              {formatCents(periodPerf.consumedCents)}
-            </div>
-            <div
-              className={`text-[10px] font-semibold ${
-                periodPerf.profitCents >= 0 ? "text-emerald-400" : "text-rose-400"
-              }`}
-            >
-              {periodPerf.profitCents >= 0 ? "+" : ""}
-              {formatCents(periodPerf.profitCents)} · {periodPerf.deliveredCodes} cód.
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  };
+  const periodAttentionCount = useMemo(
+    () => periodOrders.filter((o) => o.needsAttention).length,
+    [periodOrders]
+  );
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
+      {/* Enterprise Hero Header */}
+      <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-6 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-white">
-            Centro Financiero y Saldos
+          <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-indigo-400">
+            Panel Ejecutivo · Reseller Control
+          </div>
+          <h1 className="text-2xl font-bold tracking-tight text-white mt-0.5">
+            Resumen del Negocio
           </h1>
-          <p className="text-sm text-slate-400 mt-0.5">
-            Saldos reales de FazerCards, Central One, Binance/ZenoBank y Pago Móvil sin datos mezclados.
+          <p className="text-xs text-slate-400 mt-1">
+            Liquidez neta en receptoras, saldo vivo en distribuidores, ganancias
+            realizadas vs retiradas y actividad reciente.
           </p>
         </div>
-        <BsRateCard initialRateCents={bsRateCents} />
-      </div>
 
-      {/* Urgent Action Pills */}
-      {(attentionCount > 0 || lowStockVariants.length > 0) && (
-        <div className="flex flex-wrap gap-2.5">
-          {attentionCount > 0 && (
-            <Link
-              href="/admin/orders?attention=1"
-              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-rose-500/10 border border-rose-500/25 text-xs font-semibold text-rose-200 hover:bg-rose-500/20"
-            >
-              <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-              <span>{attentionCount} orden(es) por revisar</span>
-            </Link>
-          )}
-          {lowStockVariants.length > 0 && (
-            <Link
-              href="/admin/inventory"
-              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/25 text-xs font-semibold text-amber-200 hover:bg-amber-500/20"
-            >
-              <Package className="w-3.5 h-3.5 text-amber-400" />
-              <span>{lowStockVariants.length} producto(s) con poco stock CSV</span>
-            </Link>
-          )}
-        </div>
-      )}
-
-      {/* TOP LIVE STRIP: Both Platforms + Net Cash & Receivers side by side */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {renderPlatformCard(
-          fazerCard,
-          "border-amber-500/25",
-          "bg-amber-400"
-        )}
-        {renderPlatformCard(
-          centralOneCard,
-          "border-sky-500/25",
-          "bg-sky-400"
-        )}
-
-        {/* Card 3: Total Plataformas + Receptoras + Créditos */}
-        <div className="rounded-2xl bg-slate-900/80 border border-emerald-500/25 p-5 flex flex-col justify-between gap-4">
-          <div className="space-y-2">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <div className="flex items-center gap-2">
-                  <Wallet className="w-4 h-4 text-emerald-400" />
-                  <h2 className="text-sm font-bold text-white">
-                    Capital en APIs y Receptoras
-                  </h2>
-                </div>
-                <p className="text-[11px] text-slate-400 mt-0.5">
-                  Suma en vivo de distribuidores activos
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={capturing}
-                onClick={() => void handleCaptureSnapshot()}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-[11px] font-semibold text-white disabled:opacity-50 shrink-0"
-              >
-                <Camera className="w-3 h-3 text-sky-400" />
-                <span>{capturing ? "..." : "Foto mes"}</span>
-              </button>
-            </div>
-
-            <div className="pt-1 flex items-baseline justify-between gap-2">
-              <div>
-                <div className="text-[11px] uppercase tracking-wider text-slate-400">
-                  Saldo total disponible
-                </div>
-                <div className="text-3xl font-black tracking-tight text-emerald-400 mt-0.5">
-                  {formatCents(totalLiveCapitalCents)}
-                </div>
-              </div>
-              {manualCard &&
-                (manualCard.enabled ||
-                  (manualCard.balanceCents ?? 0) > 0 ||
-                  (manualCard.codesAvailableCount ?? 0) > 0) && (
-                  <span className="text-[11px] text-slate-400">
-                    CSV: {formatCents(manualCard.balanceCents ?? 0)}
-                  </span>
-                )}
-            </div>
-          </div>
-
-          <div className="space-y-1.5 pt-3 border-t border-white/[0.06] text-xs">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-slate-400 truncate flex items-center gap-1.5">
-                <Bitcoin className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span className="truncate">
-                  Binance Pay{" "}
-                  {initialZenoReceiver?.binanceAccount || detectedZenoReceiver
-                    ? `(${initialZenoReceiver?.binanceAccount || detectedZenoReceiver})`
-                    : "(ZenoBank)"}
-                </span>
-              </span>
-              <span className="font-bold text-white shrink-0">
-                {formatCents(allTimeMetrics.zenobankCents)} ({allTimeMetrics.zenobankCount})
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-slate-400 truncate flex items-center gap-1.5">
-                <Smartphone className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                <span>
-                  {activePagoMovilAccount
-                    ? `Pago Móvil (${activePagoMovilAccount.bankName})`
-                    : "Pago Móvil (Bs)"}
-                </span>
-              </span>
-              <span className="font-bold text-sky-300 shrink-0">
-                {formatBsCents(allTimeMetrics.pagomovilBsCents)} ·{" "}
-                {formatCents(allTimeMetrics.pagomovilCents)}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-slate-400 flex items-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-violet-400 shrink-0" />
-                <span>Créditos clientes</span>
-              </span>
-              <span className="font-bold text-violet-300 shrink-0">
-                {formatCents(totalCreditLiabilityCents)} ({creditHolders.length})
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Period + Filters Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5">
-          <div className="inline-flex items-center rounded-xl bg-slate-900/90 border border-white/10 p-1">
-            {(
-              [
-                { id: "today", label: "Hoy" },
-                { id: "7d", label: "7 días" },
-                { id: "month", label: "Este mes" },
-                { id: "all", label: "Todo" },
-              ] as const
-            ).map((opt) => (
+          <button
+            type="button"
+            onClick={() =>
+              openModal({
+                movementType: "SUPPLIER_TOPUP",
+                sourceAccount: "zenobank",
+                targetAccount: "fazercards",
+              })
+            }
+            className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs shadow-[0_6px_22px_rgba(99,102,241,0.35)] transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Reinvertir / Fondear</span>
+          </button>
+
+          <Link
+            href="/admin/treasury"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.09] border border-white/10 text-slate-200 font-semibold text-xs transition-colors"
+          >
+            <Wallet className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Tesorería y Cuadre</span>
+            <ArrowUpRight className="w-3.5 h-3.5" />
+          </Link>
+        </div>
+      </div>
+
+      {/* Asymmetrical Top Row: At a Glance (8 cols) + Quick Actions (4 cols) */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
+        {/* Left: At a Glance Card */}
+        <div className="xl:col-span-8 rounded-2xl bg-gradient-to-br from-[#121526] via-[#0d101b] to-[#0b0e18] border border-white/[0.09] p-6 flex flex-col justify-between gap-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-lg font-black tracking-tight text-white">
+                  StoryCheap
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                    includeTestOrders
+                      ? "bg-amber-500/15 text-amber-200 border-amber-400/30"
+                      : "bg-white/[0.05] text-slate-300 border-white/10"
+                  }`}
+                >
+                  <FlaskConical className="w-2.5 h-2.5" />
+                  <span>
+                    {includeTestOrders
+                      ? "Incluye órdenes de prueba"
+                      : "Solo órdenes reales"}
+                  </span>
+                </span>
+              </div>
+              <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-slate-400 mt-1">
+                Vista General de Caja (En Vivo)
+              </div>
+            </div>
+
+            {historicalTestCandidateCount > 0 && movements.length === 0 && (
+              <Link
+                href="/admin/treasury#cuadre-historico"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/30 text-amber-200 text-[11px] font-bold transition-colors"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {historicalTestCandidateCount} órdenes sin conciliar en caja →
+                </span>
+              </Link>
+            )}
+          </div>
+
+          {/* 3 Primary At-a-Glance Metric Tiles */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+            <div className="rounded-xl bg-white/[0.03] border border-white/[0.07] p-4">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                En Receptoras Netas
+              </div>
+              <div className="text-2xl font-black font-mono text-white mt-1.5">
+                {formatCents(position.totalReceiversUsdCents)}
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1.5">
+                Binance {formatCents(position.zenobankBalanceUsdCents)} · PM{" "}
+                {formatCents(position.pagomovilBalanceUsdCents)}
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-white/[0.03] border border-white/[0.07] p-4">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                En Distribuidores
+              </div>
+              <div className="text-2xl font-black font-mono text-indigo-200 mt-1.5">
+                {formatCents(position.totalSuppliersUsdCents)}
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1.5">
+                {activeSuppliersCount} proveedores activos · Patrimonio{" "}
+                {formatCents(position.totalBusinessEquityUsdCents)}
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-white/[0.03] border border-white/[0.07] p-4">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                Ganancia Neta Real
+              </div>
+              <div
+                className={`text-2xl font-black font-mono mt-1.5 ${
+                  position.netBusinessProfitUsdCents >= 0
+                    ? "text-emerald-300"
+                    : "text-rose-300"
+                }`}
+              >
+                {formatCents(position.netBusinessProfitUsdCents)}
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1.5">
+                Sin retirar {formatCents(position.undistributedProfitUsdCents)} ·
+                Retirada {formatCents(position.withdrawnProfitUsdCents)}
+              </div>
+            </div>
+          </div>
+
+          {/* Bottom Reconciliation Status Strip */}
+          <div
+            className={`rounded-xl border px-4 py-3 flex flex-wrap items-center justify-between gap-3 ${
+              isBalanced
+                ? "bg-emerald-500/[0.08] border-emerald-400/25"
+                : "bg-amber-500/[0.09] border-amber-400/30"
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              {isBalanced ? (
+                <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+              )}
+              <div>
+                <div
+                  className={`text-xs font-bold ${
+                    isBalanced ? "text-emerald-200" : "text-amber-200"
+                  }`}
+                >
+                  {isBalanced
+                    ? "Caja Cuadrada"
+                    : `Descuadre en distribuidores: ${formatCents(position.suppliersDiscrepancyUsdCents)}`}
+                </div>
+                <div className="text-[11px] text-slate-300 mt-0.5">
+                  Capital aportado {formatCents(position.netContributedCapitalUsdCents)} ·
+                  Pasivo saldo a favor {formatCents(position.creditLiabilityUsdCents)} ·
+                  Patrimonio neto {formatCents(position.netEquityAfterCreditsUsdCents)}
+                </div>
+              </div>
+            </div>
+
+            <Link
+              href="/admin/treasury"
+              className="px-3.5 py-1.5 rounded-lg bg-white/[0.07] hover:bg-white/[0.14] border border-white/15 text-xs font-bold text-white transition-colors"
+            >
+              Auditar / Cuadrar →
+            </Link>
+          </div>
+        </div>
+
+        {/* Right: Quick Actions Stack */}
+        <div className="xl:col-span-4 rounded-2xl bg-[#0d101b] border border-white/[0.08] p-5 flex flex-col justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold text-white">Acciones Rápidas</h2>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              Registra movimientos reales sin salir del panel
+            </p>
+          </div>
+
+          <div className="space-y-2.5 flex-1 flex flex-col justify-center">
+            <button
+              type="button"
+              onClick={() =>
+                openModal({
+                  movementType: "SUPPLIER_TOPUP",
+                  sourceAccount: "zenobank",
+                  targetAccount: "fazercards",
+                })
+              }
+              className="w-full text-left rounded-xl bg-white/[0.03] hover:bg-indigo-500/15 border border-white/[0.07] hover:border-indigo-400/35 px-4 py-3 flex items-center justify-between gap-3 transition-colors group"
+            >
+              <div>
+                <div className="text-xs font-bold text-white">
+                  Reinvertir en Distribuidor
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Mueve Binance / PM hacia FazerCards o Central One
+                </div>
+              </div>
+              <ArrowUpRight className="w-4 h-4 text-indigo-400 group-hover:translate-x-0.5 transition-transform shrink-0" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                openModal({
+                  movementType: "INTERNAL_TRANSFER",
+                  sourceAccount: "pagomovil",
+                  targetAccount: "zenobank",
+                })
+              }
+              className="w-full text-left rounded-xl bg-white/[0.03] hover:bg-sky-500/15 border border-white/[0.07] hover:border-sky-400/35 px-4 py-3 flex items-center justify-between gap-3 transition-colors group"
+            >
+              <div>
+                <div className="text-xs font-bold text-white">
+                  Registrar Cambio P2P (Bs → USDT)
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Registra bolívares y diferencial cambiario real
+                </div>
+              </div>
+              <ArrowRightLeft className="w-4 h-4 text-sky-400 group-hover:translate-x-0.5 transition-transform shrink-0" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                openModal({
+                  movementType: "PROFIT_WITHDRAWAL",
+                  sourceAccount: "zenobank",
+                  targetAccount: "partner_payout",
+                })
+              }
+              className="w-full text-left rounded-xl bg-white/[0.03] hover:bg-emerald-500/15 border border-white/[0.07] hover:border-emerald-400/35 px-4 py-3 flex items-center justify-between gap-3 transition-colors group"
+            >
+              <div>
+                <div className="text-xs font-bold text-white">
+                  Retirar Ganancias / Socios
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Retira utilidad manteniendo $400+ en operación
+                </div>
+              </div>
+              <Banknote className="w-4 h-4 text-emerald-400 group-hover:translate-x-0.5 transition-transform shrink-0" />
+            </button>
+
+            <div className="grid grid-cols-2 gap-2.5 pt-0.5">
+              <Link
+                href="/admin/products"
+                className="rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.07] px-3.5 py-2.5 flex items-center justify-between gap-2 transition-colors"
+              >
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-white truncate">
+                    Gift Cards
+                  </div>
+                  <div className="text-[10px] text-slate-400 truncate">
+                    Precios y SKUs
+                  </div>
+                </div>
+                <CreditCard className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              </Link>
+
+              <Link
+                href="/admin/orders"
+                className="rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.07] px-3.5 py-2.5 flex items-center justify-between gap-2 transition-colors"
+              >
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-white truncate">
+                    Órdenes
+                  </div>
+                  <div className="text-[10px] text-slate-400 truncate">
+                    {needsAttentionCount > 0
+                      ? `${needsAttentionCount} con alerta`
+                      : "Ver historial"}
+                  </div>
+                </div>
+                <ShoppingBag className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Period Performance Bar */}
+      <section className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold text-white">
+              Rendimiento Comercial
+            </h2>
+            <p className="text-[11px] text-slate-400">
+              Ventas, costo de códigos consumidos y margen neto en el período
+              seleccionado.
+            </p>
+          </div>
+
+          <div className="inline-flex items-center rounded-xl bg-white/[0.04] border border-white/[0.08] p-1 gap-1">
+            {PERIOD_OPTIONS.map((opt) => (
               <button
-                key={opt.id}
+                key={opt.key}
                 type="button"
-                onClick={() => setPeriod(opt.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                  period === opt.id
-                    ? "bg-white text-slate-950"
+                onClick={() => setPeriod(opt.key)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                  period === opt.key
+                    ? "bg-indigo-500 text-white shadow-sm"
                     : "text-slate-400 hover:text-white"
                 }`}
               >
@@ -716,493 +526,364 @@ export function OverviewConsole({
               </button>
             ))}
           </div>
-
-          <select
-            value={providerFilter}
-            onChange={(e) => setProviderFilter(e.target.value as ProviderFilterKey)}
-            className="rounded-xl bg-slate-900/90 border border-white/10 px-3 py-2 text-xs font-medium text-slate-200 focus:outline-none"
-          >
-            <option value="all">Todos los distribuidores</option>
-            <option value="fazercards">FazerCards</option>
-            <option value="centralone">Central One</option>
-            <option value="manual">Stock CSV</option>
-            <option value="reloadly">Reloadly</option>
-          </select>
-
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as StatusFilterKey)}
-            className="rounded-xl bg-slate-900/90 border border-white/10 px-3 py-2 text-xs font-medium text-slate-200 focus:outline-none"
-          >
-            <option value="all">Todos los estados</option>
-            <option value="settled">Solo cobradas</option>
-            <option value="pending">Abiertas / Esperando pago</option>
-            <option value="attention">Requieren atención</option>
-          </select>
         </div>
 
-        <div className="relative w-full sm:w-64">
-          <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Buscar orden, cliente o card..."
-            className="w-full rounded-xl bg-slate-900/90 border border-white/10 pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-white/25"
-          />
-        </div>
-      </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+          <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] p-4">
+            <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              <span>Órdenes Contabilizadas</span>
+              <Receipt className="w-3.5 h-3.5 text-slate-500" />
+            </div>
+            <div className="text-xl font-black font-mono text-white mt-1.5">
+              {periodSummary.ordersCount}
+            </div>
+            <div className="text-[11px] text-slate-400 mt-1">
+              {periodDeliveredCodes} códigos entregados ·{" "}
+              {periodAttentionCount} en atención
+            </div>
+          </div>
 
-      {/* 4 Accurate KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-1">
-          <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Ventas cobradas</span>
-            <span className="text-slate-300 font-medium">{metrics.ordersCount} ventas</span>
+          <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] p-4">
+            <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              <span>Ventas Cobradas</span>
+              <TrendingUp className="w-3.5 h-3.5 text-sky-400" />
+            </div>
+            <div className="text-xl font-black font-mono text-white mt-1.5">
+              {formatCents(periodSummary.revenueCents)}
+            </div>
+            <div className="text-[11px] text-slate-400 mt-1">
+              PM {formatBsCents(periodSummary.pagomovilBsCents)} · Zeno{" "}
+              {formatCents(periodSummary.zenobankCents)}
+            </div>
           </div>
-          <div className="text-2xl font-bold tracking-tight text-white">
-            {formatCents(metrics.revenueCents)}
+
+          <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] p-4">
+            <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              <span>Costo Stock / APIs</span>
+              <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+            </div>
+            <div className="text-xl font-black font-mono text-amber-200 mt-1.5">
+              {formatCents(periodSummary.costCents)}
+            </div>
+            <div className="text-[11px] text-slate-400 mt-1">
+              Costo real descontado de distribuidores
+            </div>
           </div>
-          <div className="text-xs text-slate-400">
-            {metrics.bsCovered > 0
-              ? `${formatBsCents(metrics.totalBsCents)} cobrados en Bs`
-              : "100% cobrado en USD / USDT"}
+
+          <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] p-4">
+            <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              <span>Utilidad Bruta</span>
+              {periodSummary.profitCents >= 0 ? (
+                <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+              ) : (
+                <TrendingDown className="w-3.5 h-3.5 text-rose-400" />
+              )}
+            </div>
+            <div
+              className={`text-xl font-black font-mono mt-1.5 ${
+                periodSummary.profitCents >= 0
+                  ? "text-emerald-300"
+                  : "text-rose-300"
+              }`}
+            >
+              {formatCents(periodSummary.profitCents)}
+            </div>
+            <div className="text-[11px] text-slate-400 mt-1">
+              Margen promedio {periodSummary.marginPct}% ({periodMeta.short})
+            </div>
           </div>
         </div>
+      </section>
 
-        <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-1">
-          <div className="text-xs text-slate-400">Costo real en APIs</div>
-          <div className="text-2xl font-bold tracking-tight text-white">
-            {formatCents(metrics.costCents)}
-          </div>
-          <div className="text-xs text-slate-400">
-            Fazer {formatCents(metrics.byProvider.fazercards.consumedCents)} · C1{" "}
-            {formatCents(metrics.byProvider.centralone.consumedCents)}
-          </div>
-        </div>
+      {/* Scalable Distributors List ("hacia abajo") */}
+      <SupplierPortfolioList
+        suppliers={periodSuppliers}
+        totalSuppliersUsdCents={position.totalSuppliersUsdCents}
+        periodLabel={periodMeta.short}
+        mode="compact"
+        onTopup={(s) =>
+          openModal({
+            movementType: "SUPPLIER_TOPUP",
+            sourceAccount: "zenobank",
+            targetAccount: s.id,
+          })
+        }
+      />
 
-        <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-1">
-          <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Ganancia limpia real</span>
-            <span className="text-emerald-400 font-semibold">{metrics.marginPct}%</span>
+      {/* Bottom 2-Column Split: Net Receivers + Recent Activity */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+        {/* Left: Net Receivers Snapshot */}
+        <section className="lg:col-span-5 rounded-2xl bg-[#0d101b] border border-white/[0.08] p-5 flex flex-col justify-between gap-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-white">
+                Receptoras Netas (Hoy)
+              </h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Efectivo disponible después de recargas P2P y retiros.
+              </p>
+            </div>
+            <Link
+              href="/admin/treasury"
+              className="text-xs font-bold text-indigo-300 hover:text-indigo-200 transition-colors shrink-0"
+            >
+              Conciliar →
+            </Link>
           </div>
-          <div
-            className={`text-2xl font-bold tracking-tight ${
-              metrics.profitCents >= 0 ? "text-emerald-400" : "text-rose-400"
-            }`}
-          >
-            {metrics.profitCents >= 0 ? "+" : ""}
-            {formatCents(metrics.profitCents)}
-          </div>
-          <div className="text-xs text-slate-400">Sobre ventas liquidadas</div>
-        </div>
 
-        <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-1">
-          <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Capital neto operativo</span>
-            {capitalGrowthPct !== null && capitalDiffCents !== null && (
-              <span
-                className={`inline-flex items-center gap-1 font-semibold ${
-                  capitalDiffCents >= 0 ? "text-emerald-400" : "text-rose-400"
-                }`}
+          <div className="space-y-3">
+            <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] p-4 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-400/25 flex items-center justify-center shrink-0">
+                  <Bitcoin className="w-4 h-4 text-amber-300" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-white truncate">
+                    ZenoBank / Binance (USDT)
+                  </div>
+                  <div className="text-[11px] text-slate-400 truncate">
+                    Cobros USDT {formatCents(position.zenobankSalesGrossUsdCents)}
+                  </div>
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="text-sm font-black font-mono text-white">
+                  {formatCents(position.zenobankBalanceUsdCents)}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] p-4 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-sky-500/15 border border-sky-400/25 flex items-center justify-center shrink-0">
+                  <Smartphone className="w-4 h-4 text-sky-300" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-white truncate">
+                    Pago Móvil (Bancamiga Bs)
+                  </div>
+                  <div className="text-[11px] text-slate-400 truncate">
+                    {bsRateCents
+                      ? `Tasa ${(bsRateCents / 100).toFixed(2)} Bs/$`
+                      : "Sin tasa activa"}
+                  </div>
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="text-sm font-black font-mono text-white">
+                  {formatCents(position.pagomovilBalanceUsdCents)}
+                </div>
+                <div className="text-[11px] font-mono text-sky-300">
+                  {formatBsCents(position.pagomovilBalanceBsCents)}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-2 border-t border-white/[0.07] flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <span className="text-slate-400">
+              Diferencial cambiario P2P:{" "}
+              <strong
+                className={
+                  position.exchangeDiffUsdCents >= 0
+                    ? "text-emerald-300 font-mono"
+                    : "text-amber-300 font-mono"
+                }
               >
-                {capitalDiffCents >= 0 ? (
-                  <TrendingUp className="w-3 h-3" />
-                ) : (
-                  <TrendingDown className="w-3 h-3" />
-                )}
-                {capitalDiffCents >= 0 ? "+" : ""}
-                {capitalGrowthPct}%
+                {formatCents(position.exchangeDiffUsdCents)}
+              </strong>
+            </span>
+            {unreviewedPagoMovilCount > 0 ? (
+              <Link
+                href="/admin/pagomovil"
+                className="px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-200 border border-amber-400/25 font-bold"
+              >
+                {unreviewedPagoMovilCount} PM sin asignar
+              </Link>
+            ) : (
+              <span className="text-emerald-400 font-semibold">
+                Notificaciones PM al día
               </span>
             )}
           </div>
-          <div className="text-2xl font-bold tracking-tight text-white">
-            {formatCents(totalLiveCapitalCents - totalCreditLiabilityCents)}
-          </div>
-          <div className="text-xs text-slate-400">
-            {totalCreditLiabilityCents > 0
-              ? `APIs ${formatCents(totalLiveCapitalCents)} − Créditos ${formatCents(totalCreditLiabilityCents)}`
-              : previousSnapshot
-                ? `Cierre ${previousSnapshot.month}: ${formatCents(previousSnapshot.totalCents)}`
-                : `APIs ${formatCents(totalLiveCapitalCents)} · Sin pasivo en créditos`}
-          </div>
-        </div>
-      </div>
+        </section>
 
-      {/* Clean Tabbed Workspace */}
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.08] pb-3">
-          {(
-            [
-              {
-                id: "sales",
-                label: `Ventas y Márgenes (${filteredOrders.length})`,
-                icon: Receipt,
-              },
-              {
-                id: "receivers",
-                label: "Receptoras: Binance / Bs",
-                icon: Landmark,
-              },
-              {
-                id: "credits",
-                label: `Créditos y Pendientes (${creditHolders.length})`,
-                icon: Wallet,
-              },
-              {
-                id: "audit",
-                label: "Auditoría APIs",
-                icon: Layers,
-              },
-            ] as const
-          ).map((tab) => {
-            const Icon = tab.icon;
-            const active = activeTab === tab.id;
-            return (
+        {/* Right: Recent Orders or Treasury Movements */}
+        <section className="lg:col-span-7 rounded-2xl bg-[#0d101b] border border-white/[0.08] overflow-hidden flex flex-col">
+          <div className="px-5 py-4 border-b border-white/[0.07] flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-white">
+                Actividad Reciente
+              </h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Últimas ventas y asientos de caja registrados
+              </p>
+            </div>
+
+            <div className="inline-flex rounded-xl bg-white/[0.04] border border-white/[0.08] p-1 gap-1">
               <button
-                key={tab.id}
                 type="button"
-                onClick={() => setActiveTab(tab.id)}
-                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-colors ${
-                  active
-                    ? "bg-white text-slate-950"
-                    : "bg-slate-900/80 text-slate-300 border border-white/10 hover:text-white hover:bg-slate-800/80"
+                onClick={() => setActivityTab("orders")}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors ${
+                  activityTab === "orders"
+                    ? "bg-indigo-500 text-white"
+                    : "text-slate-400 hover:text-white"
                 }`}
               >
-                <Icon className="w-3.5 h-3.5" />
-                <span>{tab.label}</span>
+                Últimas Ventas
               </button>
-            );
-          })}
-        </div>
-
-        {/* TAB 1: Ventas y Margenes */}
-        {activeTab === "sales" && (
-          <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] overflow-hidden">
-            <div className="px-5 py-4 border-b border-white/[0.08] flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-white">
-                Detalle de ventas, proveedor real y margen neto
-              </h2>
-              <Link
-                href="/admin/orders"
-                className="text-xs font-medium text-sky-400 hover:text-sky-300"
+              <button
+                type="button"
+                onClick={() => setActivityTab("movements")}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-colors ${
+                  activityTab === "movements"
+                    ? "bg-indigo-500 text-white"
+                    : "text-slate-400 hover:text-white"
+                }`}
               >
-                Ir a Órdenes →
-              </Link>
+                Movimientos de Caja
+              </button>
             </div>
-
-            {filteredOrders.length === 0 ? (
-              <div className="p-10 flex items-center justify-center gap-3 text-xs text-slate-400">
-                <Receipt className="w-4 h-4 text-slate-500" />
-                <span>No hay órdenes con estos filtros.</span>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="text-slate-400 border-b border-white/[0.06] bg-white/[0.02]">
-                    <tr>
-                      <th className="px-5 py-3 font-medium">Orden</th>
-                      <th className="px-5 py-3 font-medium">Gift Card</th>
-                      <th className="px-5 py-3 font-medium">Cliente</th>
-                      <th className="px-5 py-3 font-medium">Proveedor real</th>
-                      <th className="px-5 py-3 font-medium text-right">Cobro</th>
-                      <th className="px-5 py-3 font-medium text-right">Costo API</th>
-                      <th className="px-5 py-3 font-medium text-right">Ganancia</th>
-                      <th className="px-5 py-3 font-medium text-right">Estado</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/[0.05]">
-                    {filteredOrders.slice(0, 40).map((order) => {
-                      const snap = getOrderSnapshot(order, actualItemCostCents);
-                      const statusMeta = ORDER_STATUS_META[order.status];
-                      const sources = getOrderEffectiveProviders(
-                        order,
-                        fallbackProvidersByOrder[order.id]
-                      );
-                      const zenoTx = zenoProofs[order.id]?.transactions?.[0];
-                      const isBsOrder =
-                        order.paymentGateway === "pagomovil" ||
-                        order.paymentGateway === "pablito";
-
-                      return (
-                        <tr key={order.id} className="hover:bg-white/[0.02]">
-                          <td className="px-5 py-3.5">
-                            <Link
-                              href={`/admin/orders/${order.id}`}
-                              className="font-mono font-semibold text-white hover:text-sky-300"
-                            >
-                              {order.orderNumber}
-                            </Link>
-                            <div className="text-slate-500 mt-0.5">
-                              {new Date(order.createdAt).toLocaleDateString()}
-                            </div>
-                          </td>
-
-                          <td className="px-5 py-3.5">
-                            {order.items.map((it) => (
-                              <div key={it.id} className="text-slate-200 font-medium">
-                                {it.productName} {it.denominationLabel}
-                                {it.quantity > 1 ? ` ×${it.quantity}` : ""}
-                              </div>
-                            ))}
-                          </td>
-
-                          <td className="px-5 py-3.5 text-slate-300">{order.email}</td>
-
-                          <td className="px-5 py-3.5">
-                            {sources.length === 0 ? (
-                              <span className="text-slate-500">—</span>
-                            ) : (
-                              sources.map((src) => (
-                                <span
-                                  key={src}
-                                  className={`inline-block mr-1 px-2 py-0.5 rounded-md font-semibold ${
-                                    src === "fazercards"
-                                      ? "bg-amber-500/15 text-amber-300"
-                                      : src === "centralone"
-                                        ? "bg-sky-500/15 text-sky-300"
-                                        : "bg-white/[0.06] text-slate-200"
-                                  }`}
-                                >
-                                  {PROVIDER_LABELS[src]}
-                                </span>
-                              ))
-                            )}
-                          </td>
-
-                          <td className="px-5 py-3.5 text-right">
-                            <div className="font-semibold text-white">
-                              {formatCents(snap.revenueCents)}
-                            </div>
-                            <div className="text-[11px] text-slate-400 mt-0.5">
-                              {order.creditAppliedCents > 0 && order.amountDueCents === 0
-                                ? "Créditos"
-                                : isBsOrder
-                                  ? snap.actualBsCents !== null
-                                    ? `Pago Móvil · ${formatBsCents(snap.actualBsCents)}`
-                                    : "Pago Móvil"
-                                  : zenoTx?.to
-                                    ? `ZenoBank · Pay ${zenoTx.to}`
-                                    : "ZenoBank USDT"}
-                              {order.creditAppliedCents > 0 && order.amountDueCents > 0
-                                ? ` + ${formatCents(order.creditAppliedCents)} créd.`
-                                : ""}
-                            </div>
-                          </td>
-
-                          <td className="px-5 py-3.5 text-right text-slate-300">
-                            {snap.costCents !== null && snap.hasAllCosts
-                              ? formatCents(snap.costCents)
-                              : "—"}
-                          </td>
-
-                          <td className="px-5 py-3.5 text-right font-semibold">
-                            {snap.profitCents !== null && snap.hasAllCosts ? (
-                              <span
-                                className={
-                                  snap.profitCents >= 0 ? "text-emerald-400" : "text-rose-400"
-                                }
-                              >
-                                {snap.profitCents >= 0 ? "+" : ""}
-                                {formatCents(snap.profitCents)}
-                              </span>
-                            ) : (
-                              <span className="text-slate-500 font-normal">—</span>
-                            )}
-                          </td>
-
-                          <td className="px-5 py-3.5 text-right">
-                            <span
-                              className={`inline-flex px-2.5 py-0.5 rounded-full font-medium ${statusMeta.cls}`}
-                            >
-                              {statusMeta.label}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </div>
-        )}
 
-        {/* TAB 2: Receptoras Binance / Pago Movil */}
-        {activeTab === "receivers" && (
-          <ReceiverLedgersSection
-            allOrders={orders}
-            filteredOrders={filteredOrders}
-            zenoConfigured={zenoConfigured}
-            initialZenoReceiver={initialZenoReceiver}
-            zenoProofs={zenoProofs}
-            activePagoMovilAccount={activePagoMovilAccount}
-            matchedPagoMovilByOrder={matchedPagoMovilByOrder}
-            actualItemCostCents={actualItemCostCents}
-          />
-        )}
-
-        {/* TAB 3: Creditos y Flujo */}
-        {activeTab === "credits" && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                  <Landmark className="w-4 h-4 text-sky-400" />
-                  <span>¿Dónde entró el dinero?</span>
-                </h2>
-                <span className="text-[11px] text-slate-400">Según filtro actual</span>
-              </div>
-
-              <div className="divide-y divide-white/[0.06] text-xs">
-                <div className="py-2.5 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-semibold text-white">
-                      ZenoBank → Binance{" "}
-                      {initialZenoReceiver?.binanceAccount || detectedZenoReceiver
-                        ? `(${initialZenoReceiver?.binanceAccount || detectedZenoReceiver})`
-                        : "(USDT)"}
-                    </div>
-                    <div className="text-slate-400">
-                      {metrics.zenobankCount} órdenes cobradas
-                    </div>
-                  </div>
-                  <div className="text-right font-bold text-white">
-                    {formatCents(metrics.zenobankCents)}
-                  </div>
-                </div>
-
-                <div className="py-2.5 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-semibold text-white">
-                      Bancamiga / Pago Móvil (Bs)
-                    </div>
-                    <div className="text-slate-400">
-                      {metrics.pagomovilCount} órdenes ·{" "}
-                      {metrics.pagomovilBsCents > 0
-                        ? formatBsCents(metrics.pagomovilBsCents)
-                        : "Bs 0,00"}
-                    </div>
-                  </div>
-                  <div className="text-right font-bold text-white">
-                    {formatCents(metrics.pagomovilCents)}
-                  </div>
-                </div>
-
-                <div className="py-2.5 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-semibold text-violet-300">
-                      Créditos de tienda usados
-                    </div>
-                    <div className="text-slate-400">
-                      {metrics.creditAppliedCount} órdenes pagadas con saldo interno
-                    </div>
-                  </div>
-                  <div className="text-right font-bold text-violet-300">
-                    {formatCents(metrics.creditAppliedCents)}
-                  </div>
-                </div>
-
-                <div className="pt-2.5 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <Clock3 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    <div>
-                      <div className="font-medium text-amber-200">
-                        Por cobrar / Abiertas ({metrics.pendingCount})
-                      </div>
-                      <div className="text-slate-500">
-                        En espera en ZenoBank o Pago Móvil
-                      </div>
-                    </div>
-                  </div>
-                  <div className="text-right font-semibold text-amber-300">
-                    {formatCents(metrics.pendingCents)}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-2xl bg-slate-900/75 border border-white/[0.08] p-5 space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                    <Wallet className="w-4 h-4 text-emerald-400" />
-                    <span>¿Quién tiene créditos a favor?</span>
-                  </h2>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
-                    Pasivo total en créditos:{" "}
-                    <span className="font-bold text-emerald-400">
-                      {formatCents(totalCreditLiabilityCents)}
-                    </span>{" "}
-                    en {creditHolders.length} cliente(s)
-                  </p>
-                </div>
-                <Link
-                  href="/admin/customers"
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-white/10 text-[11px] font-semibold text-slate-200 hover:text-white hover:bg-white/[0.06]"
-                >
-                  <span>Ver todos</span>
-                  <ArrowUpRight className="w-3 h-3" />
-                </Link>
-              </div>
-
-              {creditHolders.length === 0 ? (
-                <div className="py-10 flex flex-col items-center justify-center gap-2 text-center text-xs text-slate-400">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                  <span>Ningún cliente tiene saldo a favor pendiente ($0.00).</span>
+          <div className="divide-y divide-white/[0.05] flex-1">
+            {activityTab === "orders" ? (
+              recentOrders.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-500">
+                  No hay órdenes visibles con el filtro actual.
                 </div>
               ) : (
-                <div className="divide-y divide-white/[0.06] max-h-56 overflow-y-auto pr-1 text-xs">
-                  {creditHolders.map((holder) => (
-                    <div
-                      key={holder.id}
-                      className="py-2.5 flex items-center justify-between gap-3"
+                recentOrders.map((o) => {
+                  const snap = getOrderSnapshot(o, actualItemCostCents);
+                  const paidUsd = getOrderCashPaidCents(o, o.subtotalCents);
+                  const firstTitle =
+                    o.items[0]?.productName ?? "Pedido StoryCheap";
+                  const itemExtra =
+                    o.items.length > 1 ? ` +${o.items.length - 1}` : "";
+                  return (
+                    <Link
+                      key={o.id}
+                      href={`/admin/orders/${o.id}`}
+                      className="px-5 py-3 flex items-center justify-between gap-3 hover:bg-white/[0.02] transition-colors"
                     >
                       <div className="min-w-0">
-                        <div className="font-medium text-white truncate">
-                          {holder.email}
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono font-bold text-indigo-300">
+                            #{o.id.slice(0, 8)}
+                          </span>
+                          <span className="text-xs font-semibold text-white truncate">
+                            {firstTitle}
+                            {itemExtra}
+                          </span>
+                          {o.isTest && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-400/30 text-[9px] font-black uppercase">
+                              Prueba
+                            </span>
+                          )}
+                          {o.needsAttention && (
+                            <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-200 border border-rose-400/30 text-[9px] font-black uppercase">
+                              Atención
+                            </span>
+                          )}
                         </div>
-                        <div className="text-slate-500">
-                          {holder.ordersCount} órdenes
+                        <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                          {o.email} · {o.paymentGateway} · {o.status}
                         </div>
                       </div>
-                      <div className="font-bold text-emerald-400 shrink-0">
-                        {formatCents(holder.creditBalanceCents)}
+
+                      <div className="text-right shrink-0">
+                        <div className="text-xs font-black font-mono text-white">
+                          {formatCents(paidUsd)}
+                        </div>
+                        <div
+                          className={`text-[10px] font-mono ${
+                            snap.profitCents !== null && snap.profitCents >= 0
+                              ? "text-emerald-300"
+                              : snap.profitCents !== null
+                                ? "text-rose-300"
+                                : "text-slate-500"
+                          }`}
+                        >
+                          {snap.profitCents !== null
+                            ? `${snap.profitCents >= 0 ? "+" : ""}${formatCents(snap.profitCents)} neto`
+                            : "Sin costo"}
+                        </div>
+                      </div>
+                    </Link>
+                  );
+                })
+              )
+            ) : recentMovements.length === 0 ? (
+              <div className="p-8 text-center text-xs text-slate-500">
+                Aún no has registrado reinversiones, cambios P2P o retiros en la
+                bitácora de tesorería.
+              </div>
+            ) : (
+              recentMovements.map((m) => {
+                const badge = MOVEMENT_BADGES[m.movementType];
+                return (
+                  <div
+                    key={m.id}
+                    className="px-5 py-3 flex items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${badge.tone}`}
+                        >
+                          {badge.label}
+                        </span>
+                        <span className="text-xs font-semibold text-white">
+                          {ACCOUNT_LABELS[m.sourceAccount] ?? m.sourceAccount} →{" "}
+                          {ACCOUNT_LABELS[m.targetAccount] ?? m.targetAccount}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                        {m.notes || m.reference || m.occurredAt.slice(0, 10)}
                       </div>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
 
-        {/* TAB 4: Auditoria APIs */}
-        {activeTab === "audit" && (
-          <ApiAuditSection
-            fazerBalanceCents={fazerCard?.balanceCents ?? null}
-            fazerHealthy={fazerCard?.healthy ?? fazerCard?.balanceCents !== null}
-            fazerError={fazerCard?.errorMessage}
-            fazerOrdersReport={fazerOrdersReport}
-            dbFazerConsumedCents={allTimeMetrics.byProvider.fazercards.consumedCents}
-            dbFazerCodes={allTimeMetrics.byProvider.fazercards.deliveredCodes}
-            centralOneBalanceCents={centralOneCard?.balanceCents ?? null}
-            centralOneHealthy={
-              centralOneCard?.healthy ?? centralOneCard?.balanceCents !== null
-            }
-            centralOneError={centralOneCard?.errorMessage}
-            centralOneOrdersReport={centralOneOrdersReport}
-            dbCentralOneConsumedCents={
-              allTimeMetrics.byProvider.centralone.consumedCents
-            }
-            dbCentralOneCodes={allTimeMetrics.byProvider.centralone.deliveredCodes}
-            snapshots={snapshots}
-            currentMonthKey={currentMonthKey}
-            capturing={capturing}
-            onCaptureSnapshot={() => void handleCaptureSnapshot()}
-          />
-        )}
+                    <div className="text-right shrink-0">
+                      <div className="text-xs font-black font-mono text-white">
+                        {formatCents(m.amountUsdCents)}
+                      </div>
+                      {m.amountBsCents ? (
+                        <div className="text-[10px] font-mono text-sky-300">
+                          {formatBsCents(m.amountBsCents)}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="px-5 py-3 border-t border-white/[0.06] bg-white/[0.015] flex items-center justify-between text-[11px]">
+            <span className="text-slate-500">
+              {activityTab === "orders"
+                ? `Mostrando últimas ${recentOrders.length}`
+                : `Mostrando últimos ${recentMovements.length} asientos activos`}
+            </span>
+            <Link
+              href={activityTab === "orders" ? "/admin/orders" : "/admin/treasury"}
+              className="font-bold text-indigo-300 hover:text-indigo-200 transition-colors"
+            >
+              {activityTab === "orders"
+                ? "Ver todas las órdenes →"
+                : "Ir a Tesorería completa →"}
+            </Link>
+          </div>
+        </section>
       </div>
+
+      {/* Quick Movement Modal */}
+      <TreasuryMovementModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        suppliers={suppliers}
+        preset={modalPreset}
+      />
     </div>
   );
 }
