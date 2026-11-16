@@ -1,5 +1,6 @@
 import React from "react";
 import Link from "next/link";
+import { StoryCheapLogo } from "@/components/brand/storycheap-logo";
 import { ShieldCheck, Mail, Lock } from "lucide-react";
 
 export function Footer() {
@@ -8,7 +9,8 @@ export function Footer() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 pb-10 border-b border-white/[0.06]">
           <div className="space-y-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5">
+              <StoryCheapLogo className="w-8 h-6 shrink-0" />
               <span className="text-base font-black text-white">StoryCheap</span>
               <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/25 text-[10px] font-bold text-emerald-300">
                 storycheap.com

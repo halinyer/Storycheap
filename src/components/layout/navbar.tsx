@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useStore } from "@/context/store-context";
+import { StoryCheapLogo } from "@/components/brand/storycheap-logo";
 import { formatCents } from "@/lib/catalog-seed";
 import type { Category } from "@/types";
 import {
@@ -18,7 +19,6 @@ import {
   Shield,
   ShieldCheck,
   ShoppingBag,
-  Sparkles,
   User,
   Wallet,
   X,
@@ -126,9 +126,7 @@ export function Navbar() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3 sm:gap-6">
         {/* Brand */}
         <Link href="/" className="flex items-center gap-2.5 group shrink-0">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 via-sky-500 to-emerald-400 flex items-center justify-center shadow-lg shadow-indigo-500/20 group-hover:scale-105 transition-transform">
-            <Sparkles className="w-4 h-4 text-slate-950" />
-          </div>
+          <StoryCheapLogo className="w-10 h-[30px] shrink-0 group-hover:scale-105 transition-transform drop-shadow-[0_4px_14px_rgba(0,180,255,0.28)]" />
           <div className="flex items-baseline gap-1.5">
             <span className="text-lg font-black tracking-tight text-white leading-none">
               StoryCheap

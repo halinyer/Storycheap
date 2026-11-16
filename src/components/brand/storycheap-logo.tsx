@@ -1,0 +1,113 @@
+import React, { useId } from "react";
+
+interface StoryCheapLogoProps {
+  className?: string;
+}
+
+export function StoryCheapLogo({ className = "w-9 h-[27px]" }: StoryCheapLogoProps) {
+  const uid = useId().replace(/:/g, "");
+  const leftGradId = `sc-left-${uid}`;
+  const rightGradId = `sc-right-${uid}`;
+  const frameGradId = `sc-frame-${uid}`;
+  const maskId = `sc-mask-${uid}`;
+
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 96 72"
+      fill="none"
+      className={className}
+      role="img"
+      aria-label="StoryCheap"
+    >
+      <defs>
+        <linearGradient
+          id={leftGradId}
+          x1="7"
+          y1="0"
+          x2="50.5"
+          y2="0"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0%" stopColor="#00FCFF" />
+          <stop offset="100%" stopColor="#0080DA" />
+        </linearGradient>
+        <linearGradient
+          id={rightGradId}
+          x1="51.2"
+          y1="0"
+          x2="95.5"
+          y2="0"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0%" stopColor="#149CFF" />
+          <stop offset="100%" stopColor="#0005FF" />
+        </linearGradient>
+        <linearGradient
+          id={frameGradId}
+          x1="0"
+          y1="68"
+          x2="86"
+          y2="68"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0%" stopColor="#0016EB" />
+          <stop offset="100%" stopColor="#003DFF" />
+        </linearGradient>
+        <mask id={maskId} maskUnits="userSpaceOnUse">
+          <rect x="0" y="0" width="96" height="72" fill="white" />
+          <rect x="49.9" y="0" width="1.8" height="63" fill="black" />
+          <rect x="16.7" y="5.8" width="3.2" height="2.8" rx="0.45" fill="black" />
+          <rect x="16.7" y="10.1" width="3.2" height="2.8" rx="0.45" fill="black" />
+          <rect x="16.7" y="14.4" width="3.2" height="2.8" rx="0.45" fill="black" />
+          <rect x="21.7" y="5.8" width="2.1" height="11.4" rx="0.45" fill="black" />
+          <rect x="25.6" y="5.8" width="3.2" height="2.8" rx="0.45" fill="black" />
+          <rect x="25.6" y="10.1" width="3.2" height="2.8" rx="0.45" fill="black" />
+          <rect x="25.6" y="14.4" width="3.2" height="2.8" rx="0.45" fill="black" />
+          <circle cx="22.5" cy="38.5" r="9.6" fill="black" />
+          <path
+            d="M50.8 23.0 C51.6 28.0 54.0 30.8 59.0 31.8 C54.0 32.8 51.6 35.6 50.8 40.6 C50.0 35.6 47.6 32.8 42.6 31.8 C47.6 30.8 50.0 28.0 50.8 23.0 Z"
+            fill="black"
+          />
+          <circle cx="76.5" cy="31.5" r="3.2" fill="black" />
+          <circle cx="76.5" cy="45.8" r="3.2" fill="black" />
+          <circle cx="69.6" cy="38.6" r="3.2" fill="black" />
+          <circle cx="83.4" cy="38.6" r="3.2" fill="black" />
+        </mask>
+      </defs>
+
+      <path
+        d="M8.0 5.4 H3.0 A1.2 1.2 0 0 0 1.8 6.6 V67.8 A1.4 1.4 0 0 0 3.2 69.2 H41.4"
+        stroke={`url(#${frameGradId})`}
+        strokeWidth="3.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M46.2 69.2 H82.6 A1.4 1.4 0 0 0 84.0 67.8 V61.5"
+        stroke={`url(#${frameGradId})`}
+        strokeWidth="3.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <g mask={`url(#${maskId})`}>
+        <rect
+          x="7.2"
+          y="0.3"
+          width="43.8"
+          height="62.1"
+          rx="1.6"
+          fill={`url(#${leftGradId})`}
+        />
+        <rect
+          x="50.6"
+          y="0.3"
+          width="44.9"
+          height="62.1"
+          rx="1.6"
+          fill={`url(#${rightGradId})`}
+        />
+      </g>
+    </svg>
+  );
+}

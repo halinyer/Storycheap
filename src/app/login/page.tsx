@@ -2,8 +2,9 @@
 
 import React, { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { StoryCheapLogo } from "@/components/brand/storycheap-logo";
 import { useStore } from "@/context/store-context";
-import { KeyRound, Lock, Mail, Shield, Sparkles } from "lucide-react";
+import { KeyRound, Mail, Shield, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 type AuthMode = "password" | "register" | "magic-link" | "forgot";
@@ -147,10 +148,8 @@ function LoginFormInner() {
   return (
     <div className="max-w-md mx-auto px-4 sm:px-6 py-16">
       <div className="rounded-3xl apple-glass p-8 space-y-6">
-        <div className="space-y-2 text-center">
-          <div className="w-12 h-12 rounded-2xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center mx-auto text-sky-400">
-            <Lock className="w-5 h-5" />
-          </div>
+        <div className="space-y-3 text-center">
+          <StoryCheapLogo className="w-14 h-[42px] mx-auto drop-shadow-[0_6px_18px_rgba(0,180,255,0.3)]" />
           <h1 className="text-2xl font-black text-white">
             {authMode === "register"
               ? "Crea tu cuenta"

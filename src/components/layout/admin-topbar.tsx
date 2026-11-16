@@ -7,6 +7,7 @@ import {
   setAdminIncludeTestsAction,
   updateBsRateAction,
 } from "@/app/admin/actions";
+import { StoryCheapLogo } from "@/components/brand/storycheap-logo";
 import { formatCents } from "@/lib/catalog-seed";
 import {
   Bell,
@@ -104,11 +105,7 @@ export function AdminTopbar({
         {/* Brand Identity */}
         <div className="flex items-center gap-3 min-w-0">
           <Link href="/admin" className="flex items-center gap-2.5 group">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500/25 via-sky-500/15 to-emerald-500/20 border border-indigo-400/30 flex items-center justify-center shadow-[0_0_20px_rgba(99,102,241,0.18)]">
-              <span className="text-xs font-black tracking-tight text-white">
-                SC
-              </span>
-            </div>
+            <StoryCheapLogo className="w-9 h-[27px] shrink-0 group-hover:scale-105 transition-transform drop-shadow-[0_4px_12px_rgba(0,180,255,0.25)]" />
             <div className="leading-tight">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-bold tracking-tight text-white group-hover:text-indigo-200 transition-colors">
