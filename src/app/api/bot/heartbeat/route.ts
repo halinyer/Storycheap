@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { updateBotDeviceHeartbeat } from "@/lib/server/pagomovil-store";
 import {
   PagoMovilAuthError,
+  parseBotPayloadRaw,
+  sanitizeBotBatteryLevel,
   verifyBotDeviceAuthentication,
 } from "@/lib/server/payments/pagomovil-bot";
 
@@ -12,26 +14,21 @@ export async function POST(request: Request) {
 
     const auth = await verifyBotDeviceAuthentication({ rawBody, headers });
 
-    let meta: {
-      battery_level?: number;
-      network_type?: string;
-      app_version?: string;
-    } = {};
+    let meta: ReturnType<typeof parseBotPayloadRaw> = {};
 
     if (rawBody.trim()) {
       try {
-        meta = JSON.parse(rawBody) as typeof meta;
+        meta = parseBotPayloadRaw(rawBody, request.headers.get("content-type"));
       } catch {
         return NextResponse.json(
-          { error: "Payload JSON inválido en heartbeat." },
+          { error: "Payload inválido en heartbeat." },
           { status: 400 }
         );
       }
     }
 
     await updateBotDeviceHeartbeat(auth.deviceId, {
-      batteryLevel:
-        typeof meta.battery_level === "number" ? meta.battery_level : null,
+      batteryLevel: sanitizeBotBatteryLevel(meta.battery_level),
       networkType:
         typeof meta.network_type === "string" ? meta.network_type : null,
       appVersion:

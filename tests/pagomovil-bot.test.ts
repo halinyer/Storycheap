@@ -694,4 +694,152 @@ describe("StoryPay Pago Móvil Verifier Bot Engine", () => {
       expect(settings.enforceWatchdog).toBe(true);
     });
   });
+
+  describe("6. BDVApp (0102) Push Notifications & MacroDroid Payload Resilience", () => {
+    it("parses BDVApp / PagomóvilBDV push alerts including unlabeled reference and ignores BDV outgoing debits", () => {
+      const bdvWithRef = parseBankNotification({
+        title: "PagomóvilBDV",
+        content:
+          "Has recibido un pago por concepto de PagomovilBDV por Bs. 1.250,45 de 0414-5559988 Banco 0134 Ref: 0004839210",
+        appPackage: "com.bancodevenezuela.bdvdigital",
+        sourceType: "APP_PUSH",
+        preferredBankCode: "0102",
+      });
+      expect(bdvWithRef.matched).toBe(true);
+      expect(bdvWithRef.isIncomingPayment).toBe(true);
+      expect(bdvWithRef.amountBsCents).toBe(125045);
+      expect(bdvWithRef.referenceFull).toBe("0004839210");
+      expect(bdvWithRef.senderBankCode).toBe("0134");
+      expect(bdvWithRef.senderPhone).toBe("04145559988");
+      expect(bdvWithRef.parserUsed).toBe("bdv_app_v1");
+
+      const bdvUnlabeledRef = parseBankNotification({
+        title: "BDVApp · PagomóvilBDV",
+        content:
+          "Abono recibido PagomóvilBDV de 04241112233 Banco 0105 por 865,00 Bs 9988776655",
+        appPackage: "com.bancodevenezuela.bdvdigital",
+        sourceType: "APP_PUSH",
+        preferredBankCode: "0102",
+      });
+      expect(bdvUnlabeledRef.matched).toBe(true);
+      expect(bdvUnlabeledRef.amountBsCents).toBe(86500);
+      expect(bdvUnlabeledRef.referenceFull).toBe("9988776655");
+      expect(bdvUnlabeledRef.senderBankCode).toBe("0105");
+
+      const bdvOutgoing = parseBankNotification({
+        title: "PagomóvilBDV",
+        content:
+          "Realizaste un PagomovilBDV exitoso por Bs. 500,00 Ref: 77441122",
+        appPackage: "com.bancodevenezuela.bdvdigital",
+        sourceType: "APP_PUSH",
+        preferredBankCode: "0102",
+      });
+      expect(bdvOutgoing.matched).toBe(false);
+      expect(bdvOutgoing.isIncomingPayment).toBe(false);
+    });
+
+    it("ingests BDVApp MacroDroid notifications via x-www-form-urlencoded and flags unresolved {notification} literals", async () => {
+      await updateProviderConfig("pagomovil", { enabled: true }, ADMIN_SESSION.id);
+      await setBsRateCents(5000, ADMIN_SESSION.id);
+      await saveReceiverBankAccount(
+        {
+          bankCode: "0102",
+          bankName: "Banco de Venezuela",
+          accountType: "juridical",
+          phone: "04125755101",
+          dni: "J-409236722",
+          holderName: "INVERSIONES HALINYER2327 CA",
+          allowedPackages: [
+            "com.bancodevenezuela.bdvdigital",
+            "com.bdv.personas",
+            "SMS",
+            "EMAIL",
+          ],
+          active: true,
+        },
+        ADMIN_SESSION.id
+      );
+
+      const { device, plainSecret } = await registerBotDevice(
+        {
+          name: "Android BDV Nuevo",
+          channelType: "ANDROID_PUSH",
+          allowPlainBearer: true,
+        },
+        ADMIN_SESSION.id
+      );
+
+      // 1) Unresolved MacroDroid template literal returns explicit warning
+      const badRaw = JSON.stringify({
+        title: "{not_title}",
+        content: "{notification}",
+        app_package: "{not_app_package}",
+        source_type: "APP_PUSH",
+        battery_level: "{battery}",
+      });
+      const badIngest = await ingestBotNotification({
+        rawBody: badRaw,
+        headers: {
+          "x-bot-device-id": device.deviceIdentifier,
+          "x-bot-token": plainSecret,
+        },
+      });
+      expect(badIngest.notification.status).toBe("IGNORED");
+      expect(badIngest.notification.parserUsed).toBe("unresolved_macro_var");
+      expect(badIngest.warning).toContain("corchetes");
+
+      // 2) Form-urlencoded MacroDroid push with BDVApp package and multiline notification
+      const formBody = new URLSearchParams({
+        title: "PagomóvilBDV",
+        content:
+          "Has recibido un pago por concepto de PagomovilBDV\nMonto: Bs 525,00\nRef: 77889900\nDesde 0414-9998877 (0134)",
+        app_package: "com.bancodevenezuela.bdvdigital",
+        source_type: "APP_PUSH",
+        battery_level: "87%",
+      }).toString();
+
+      const goodIngest = await ingestBotNotification({
+        rawBody: formBody,
+        contentType: "application/x-www-form-urlencoded",
+        headers: {
+          "x-bot-device-id": device.deviceIdentifier,
+          "x-bot-token": plainSecret,
+        },
+      });
+
+      expect(goodIngest.notification.status).toBe("UNMATCHED");
+      expect(goodIngest.notification.amountBsCents).toBe(52500);
+      expect(goodIngest.notification.referenceFull).toBe("77889900");
+      expect(goodIngest.notification.senderBankCode).toBe("0134");
+      expect(goodIngest.notification.senderPhone).toBe("04149998877");
+      expect(goodIngest.notification.parserUsed).toBe("bdv_app_v1");
+
+      // 3) Pretty-printed multiline MacroDroid JSON containing raw newlines and unescaped quotes inside content
+      const malformedMacroJson = `{
+  "title": "BDVApp",
+  "content": "PagomóvilBDV "Comercio"
+Has recibido Bs. 1.250,00 del 0412-1112233
+Ref: 00654321",
+  "app_package": "com.bancodevenezuela.bdvdigital",
+  "source_type": "APP_PUSH",
+  "battery_level": "88%",
+  "network_type": "WIFI_DATA"
+}`;
+
+      const recoveredIngest = await ingestBotNotification({
+        rawBody: malformedMacroJson,
+        contentType: "application/json",
+        headers: {
+          "x-bot-device-id": device.deviceIdentifier,
+          "x-bot-token": plainSecret,
+        },
+      });
+
+      expect(recoveredIngest.notification.status).toBe("UNMATCHED");
+      expect(recoveredIngest.notification.amountBsCents).toBe(125000);
+      expect(recoveredIngest.notification.referenceFull).toBe("00654321");
+      expect(recoveredIngest.notification.senderPhone).toBe("04121112233");
+      expect(recoveredIngest.notification.parserUsed).toBe("bdv_app_v1");
+    });
+  });
 });

@@ -1,4 +1,5 @@
 import { parseBancamigaNotification } from "./bancamiga";
+import { parseBdvNotification } from "./bdv";
 import type { ParsedBankNotification, ParseNotificationInput } from "./types";
 import { parseGenericVenezuelanNotification } from "./venezuela-generic";
 
@@ -16,6 +17,18 @@ export function parseBankNotification(
     combined.includes("0172")
   ) {
     return parseBancamigaNotification(input);
+  }
+
+  if (
+    input.preferredBankCode === "0102" ||
+    combined.includes("bancodevenezuela") ||
+    combined.includes("banco de venezuela") ||
+    combined.includes("pagomovilbdv") ||
+    combined.includes("pagomóvilbdv") ||
+    combined.includes("bdv") ||
+    combined.includes("0102")
+  ) {
+    return parseBdvNotification(input);
   }
 
   return parseGenericVenezuelanNotification(input);

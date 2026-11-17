@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   ingestBotNotification,
   PagoMovilAuthError,
+  parseBotPayloadRaw,
 } from "@/lib/server/payments/pagomovil-bot";
 
 export async function POST(request: Request) {
@@ -9,23 +10,23 @@ export async function POST(request: Request) {
     const rawBody = await request.text();
     if (!rawBody.trim()) {
       return NextResponse.json(
-        { error: "El cuerpo JSON de la notificación está vacío." },
+        { error: "El cuerpo de la notificación está vacío." },
         { status: 400 }
       );
     }
 
-    // Validate JSON syntax before HMAC processing
+    const contentType = request.headers.get("content-type");
     try {
-      JSON.parse(rawBody);
+      parseBotPayloadRaw(rawBody, contentType);
     } catch {
       return NextResponse.json(
-        { error: "Formato JSON inválido." },
+        { error: "Formato JSON o formulario inválido." },
         { status: 400 }
       );
     }
 
     const headers = Object.fromEntries(request.headers.entries());
-    const result = await ingestBotNotification({ rawBody, headers });
+    const result = await ingestBotNotification({ rawBody, headers, contentType });
 
     return NextResponse.json({
       ok: true,
@@ -35,6 +36,8 @@ export async function POST(request: Request) {
       amountBsCents: result.notification.amountBsCents,
       referenceFull: result.notification.referenceFull,
       autoMatchedOrderId: result.autoMatchedOrderId,
+      ...(result.warning ? { warning: result.warning } : {}),
+      ...(result.ignoredPackage ? { ignoredPackage: result.ignoredPackage } : {}),
     });
   } catch (err) {
     if (err instanceof PagoMovilAuthError) {

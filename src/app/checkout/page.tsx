@@ -447,7 +447,7 @@ export default function CheckoutPage() {
                       </div>
                       <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
                         {pmAvailability?.available
-                          ? `Transferencia directa a ${pmAvailability.receiverBankName ?? "Bancamiga"} con verificación automática 24/7.${
+                          ? `Transferencia directa a ${pmAvailability.receiverBankName ?? "Pago Móvil"} con verificación automática 24/7.${
                               pmAvailability.bsRateCents
                                 ? ` Estimado: Bs ${(
                                     Math.round(

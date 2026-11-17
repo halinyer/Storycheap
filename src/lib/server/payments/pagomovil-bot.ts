@@ -448,31 +448,184 @@ export async function dispatchPagoMovilConfirmedWebhook(params: {
   });
 }
 
+export interface ParsedBotPayload {
+  title?: string;
+  content?: string;
+  app_package?: string;
+  source_type?: "APP_PUSH" | "SMS" | "EMAIL" | "MANUAL";
+  posted_at?: string;
+  event_id?: string;
+  battery_level?: number | string | null;
+  network_type?: string;
+  app_version?: string;
+}
+
+export function sanitizeBotBatteryLevel(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    const rounded = Math.round(raw);
+    return rounded >= 0 && rounded <= 100 ? rounded : null;
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed || /^[\{\[].*[\}\]]$/.test(trimmed)) return null;
+    const match = trimmed.match(/^(\d{1,3})\s*%?$/);
+    if (!match) return null;
+    const val = Number.parseInt(match[1], 10);
+    return val >= 0 && val <= 100 ? val : null;
+  }
+  return null;
+}
+
+export function isUnresolvedMacroPlaceholder(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim().toLowerCase();
+  return /^[\{\[](not_title|notification|not_text_big|not_app_package|battery|sms_number|sms_message)[\}\]]$/.test(
+    v
+  );
+}
+
+/**
+ * Escapes raw control characters and unescaped double quotes inside JSON string values
+ * so multi-line or quoted notifications from MacroDroid parse without rejecting structural whitespace.
+ */
+function repairMacroDroidJson(raw: string): string {
+  let out = "";
+  let inString = false;
+  let expectingKey = false;
+  let isCurrentStringKey = false;
+  let i = 0;
+
+  while (i < raw.length) {
+    const ch = raw[i];
+
+    if (!inString) {
+      if (ch === "{" || ch === ",") expectingKey = true;
+      else if (ch === ":") expectingKey = false;
+      else if (ch === '"') {
+        inString = true;
+        isCurrentStringKey = expectingKey;
+        expectingKey = false;
+      }
+      out += ch;
+      i += 1;
+      continue;
+    }
+
+    if (ch === "\\") {
+      const next = raw[i + 1];
+      if (next !== undefined && '"\\/bfnrtu'.includes(next)) {
+        out += ch + next;
+        i += 2;
+      } else {
+        out += "\\\\";
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === "\r") {
+      if (raw[i + 1] === "\n") i += 1;
+      out += "\\n";
+      i += 1;
+      continue;
+    }
+    if (ch === "\n") {
+      out += "\\n";
+      i += 1;
+      continue;
+    }
+    if (ch === "\t") {
+      out += "\\t";
+      i += 1;
+      continue;
+    }
+    if (ch.charCodeAt(0) < 0x20) {
+      out += " ";
+      i += 1;
+      continue;
+    }
+
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < raw.length && /\s/.test(raw[j])) j += 1;
+      const afterWs = raw[j];
+
+      let closesString = false;
+      if (isCurrentStringKey) {
+        closesString = afterWs === ":";
+      } else if (afterWs === "}" || afterWs === undefined) {
+        closesString = true;
+      } else if (afterWs === ",") {
+        let k = j + 1;
+        while (k < raw.length && /\s/.test(raw[k])) k += 1;
+        const tail = raw.slice(k);
+        closesString = tail.startsWith("}") || /^"[a-zA-Z0-9_.-]+"\s*:/.test(tail);
+      }
+
+      if (closesString) {
+        inString = false;
+        isCurrentStringKey = false;
+        out += '"';
+      } else {
+        out += '\\"';
+      }
+      i += 1;
+      continue;
+    }
+
+    out += ch;
+    i += 1;
+  }
+
+  return out;
+}
+
+/**
+ * Parses strict JSON, malformed MacroDroid JSON (raw newlines or unescaped quotes in strings),
+ * or `application/x-www-form-urlencoded` form payloads.
+ */
+export function parseBotPayloadRaw(
+  rawBody: string,
+  contentType?: string | null
+): ParsedBotPayload {
+  const trimmed = rawBody.trim();
+  if (!trimmed) return {};
+
+  const ct = (contentType ?? "").toLowerCase();
+  if (ct.includes("application/x-www-form-urlencoded") || (!trimmed.startsWith("{") && trimmed.includes("="))) {
+    const sp = new URLSearchParams(trimmed);
+    const out: Record<string, string> = {};
+    sp.forEach((value, key) => {
+      out[key] = value;
+    });
+    return out as unknown as ParsedBotPayload;
+  }
+
+  try {
+    return JSON.parse(trimmed) as ParsedBotPayload;
+  } catch {
+    return JSON.parse(repairMacroDroidJson(trimmed)) as ParsedBotPayload;
+  }
+}
+
 export async function ingestBotNotification(args: {
   rawBody: string;
   headers: Record<string, string | string[] | undefined>;
+  contentType?: string | null;
 }): Promise<{
   ok: true;
   duplicate: boolean;
   notification: BankPaymentNotificationDTO;
   autoMatchedOrderId: string | null;
+  warning?: string;
+  ignoredPackage?: string | null;
 }> {
   const auth = await verifyBotDeviceAuthentication({
     rawBody: args.rawBody,
     headers: args.headers,
   });
 
-  const payload = JSON.parse(args.rawBody) as {
-    title?: string;
-    content: string;
-    app_package?: string;
-    source_type?: "APP_PUSH" | "SMS" | "EMAIL" | "MANUAL";
-    posted_at?: string;
-    event_id?: string;
-    battery_level?: number;
-    network_type?: string;
-    app_version?: string;
-  };
+  const payload = parseBotPayloadRaw(args.rawBody, args.contentType);
 
   const content = String(payload.content ?? "").trim();
   if (!content) {
@@ -480,9 +633,11 @@ export async function ingestBotNotification(args: {
   }
 
   await updateBotDeviceHeartbeat(auth.deviceId, {
-    batteryLevel: payload.battery_level ?? null,
-    networkType: payload.network_type ?? null,
-    appVersion: payload.app_version ?? null,
+    batteryLevel: sanitizeBotBatteryLevel(payload.battery_level),
+    networkType:
+      typeof payload.network_type === "string" ? payload.network_type : null,
+    appVersion:
+      typeof payload.app_version === "string" ? payload.app_version : null,
   });
 
   const receiver = await getActiveReceiverBankAccount();
@@ -498,6 +653,49 @@ export async function ingestBotNotification(args: {
     payload.posted_at && Number.isFinite(Date.parse(payload.posted_at))
       ? new Date(payload.posted_at).toISOString()
       : new Date().toISOString();
+
+  if (
+    isUnresolvedMacroPlaceholder(content) ||
+    isUnresolvedMacroPlaceholder(appPackage)
+  ) {
+    const hash = buildNotificationContentHash({
+      deviceId: auth.deviceId,
+      sourceType,
+      content,
+      postedAt,
+      explicitEventId: payload.event_id,
+    });
+    const ignored = await insertBankNotification({
+      deviceId: auth.deviceId,
+      receiverAccountId: receiver?.id ?? null,
+      sourceType,
+      appPackage,
+      rawContentHash: hash,
+      rawContentPreview: `[MACRODROID_LITERAL pkg=${appPackage ?? "none"}] ${content.slice(0, 140)}`,
+      amountBsCents: null,
+      currency: "VES",
+      referenceFull: null,
+      referenceLast6: null,
+      referenceLast4: null,
+      senderPhone: null,
+      senderDni: null,
+      senderBankCode: null,
+      parserUsed: "unresolved_macro_var",
+      postedAt,
+      status: "IGNORED",
+      matchedOrderId: null,
+      matchedAt: null,
+    });
+    return {
+      ok: true,
+      duplicate: ignored.isDuplicate,
+      notification: ignored.notification,
+      autoMatchedOrderId: null,
+      warning:
+        "MacroDroid envió el nombre de la variable literal sin reemplazar (usa corchetes [not_title], [notification], [not_app_package] desde el botón '...' Magic Text).",
+      ignoredPackage: appPackage,
+    };
+  }
 
   // Origin package allowlist guard (prevents WhatsApp / spoofed notification injection)
   if (sourceType === "APP_PUSH" && receiver && receiver.allowedPackages.length > 0) {
@@ -536,6 +734,8 @@ export async function ingestBotNotification(args: {
         duplicate: ignored.isDuplicate,
         notification: ignored.notification,
         autoMatchedOrderId: null,
+        warning: `Paquete Android '${appPackage ?? "vacío"}' no está autorizado en la cuenta receptora.`,
+        ignoredPackage: appPackage,
       };
     }
   }

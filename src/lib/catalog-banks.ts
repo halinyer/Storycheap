@@ -34,14 +34,21 @@ export const BANK_BY_CODE = new Map(VENEZUELAN_BANKS.map((b) => [b.code, b]));
 
 export const DEFAULT_ANDROID_PACKAGES_BY_BANK: Record<string, string[]> = {
   "0172": ["com.bancamiga.suite", "com.bancamiga", "com.bancamiga.mobile", "SMS", "EMAIL"],
-  "0102": ["com.bdv.personas", "ve.com.bancodevenezuela.bdvenlinea", "SMS", "EMAIL"],
+  "0102": [
+    "com.bancodevenezuela.bdvdigital",
+    "com.bdv.personas",
+    "ve.com.bancodevenezuela.bdvenlinea",
+    "com.bancodevenezuela",
+    "SMS",
+    "EMAIL",
+  ],
   "0134": ["com.banesco.banescoMovil", "com.banesco.pagoMovil", "SMS", "EMAIL"],
   "0105": ["com.mercantil.movil", "com.mercantil.tpago", "SMS", "EMAIL"],
 };
 
 const BANK_KEYWORD_RULES: Array<{ code: string; pattern: RegExp }> = [
   { code: "0172", pattern: /\bbancamiga\b/i },
-  { code: "0102", pattern: /\bbanco\s+de\s+venezuela\b|\bbdv\b/i },
+  { code: "0102", pattern: /\bbanco\s+de\s+venezuela\b|\bpagom[oó]vil\s*bdv\b|\bbdv\s*(?:app|digital)\b|\bbdv\b/i },
   { code: "0134", pattern: /\bbanesco\b/i },
   { code: "0105", pattern: /\bmercantil\b|\btpago\b/i },
   { code: "0108", pattern: /\bprovincial\b|\bbbva\b/i },

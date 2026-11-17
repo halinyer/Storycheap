@@ -24,6 +24,7 @@ import {
 import { getPaymentGateway } from "@/lib/server/payments";
 import {
   deleteBotDevice,
+  getActiveReceiverBankAccount,
   listBankNotifications,
   registerBotDevice,
   savePagoMovilBotSettings,
@@ -955,7 +956,7 @@ export async function saveReceiverBankAccountAction(input: {
     {
       id: input.id,
       bankCode: input.bankCode.trim(),
-      bankName: bankInfo?.name ?? "Bancamiga",
+      bankName: bankInfo?.name ?? "Pago Móvil",
       accountType: input.accountType,
       phone: normalizedPhone,
       dni: cleanDni,
@@ -981,6 +982,53 @@ export async function saveReceiverBankAccountAction(input: {
 
   revalidatePath("/admin/pagomovil");
   revalidatePath("/checkout");
+  return saved;
+}
+
+export async function allowBotAppPackageAction(appPackage: string) {
+  const adminUser = await requireAdminUser();
+  const cleanPkg = appPackage.trim();
+  if (!cleanPkg || /^[\{\[].*[\}\]]$/.test(cleanPkg)) {
+    throw new Error(
+      "Nombre de paquete inválido (MacroDroid envió una variable literal sin valor)."
+    );
+  }
+  const activeAccount = await getActiveReceiverBankAccount();
+  if (!activeAccount) {
+    throw new Error("No hay ninguna cuenta receptora Pago Móvil activa.");
+  }
+  const exists = activeAccount.allowedPackages.some(
+    (p) => p.toLowerCase() === cleanPkg.toLowerCase()
+  );
+  const nextPackages = exists
+    ? activeAccount.allowedPackages
+    : [...activeAccount.allowedPackages, cleanPkg];
+
+  const saved = await saveReceiverBankAccount(
+    {
+      id: activeAccount.id,
+      bankCode: activeAccount.bankCode,
+      bankName: activeAccount.bankName,
+      accountType: activeAccount.accountType,
+      phone: activeAccount.phone,
+      dni: activeAccount.dni,
+      holderName: activeAccount.holderName,
+      allowedPackages: nextPackages,
+      active: activeAccount.active,
+    },
+    adminUser.id
+  );
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "pagomovil.allow_app_package",
+    targetType: "receiver_bank_account",
+    targetId: saved.id,
+    metadata: { appPackage: cleanPkg },
+  });
+
+  revalidatePath("/admin/pagomovil");
   return saved;
 }
 

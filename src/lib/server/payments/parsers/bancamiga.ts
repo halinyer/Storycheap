@@ -7,6 +7,8 @@ const OUTGOING_PATTERNS = [
   /\benviaste\b/i,
   /\bhas\s+enviado\b/i,
   /\bpago\s+enviado\b/i,
+  /\bpagom[oó]vil\s*(?:bdv)?\s+enviado\b/i,
+  /\bpago\s+realizado\b/i,
   /\btransferencia\s+enviada\b/i,
   /\btransferiste\b/i,
   /\bd[eé]bito\s+(?:a|por|en|de)\b/i,
@@ -20,11 +22,13 @@ const OUTGOING_PATTERNS = [
 const INCOMING_PATTERNS = [
   /\brecibiste\b/i,
   /\bhas\s+recibido\b/i,
-  /\bpago\s*m[oó]vil\s+recibido\b/i,
+  /\bpago\s*m[oó]vil\s*(?:bdv\s+)?recibid[oa]\b/i,
+  /\bpor\s+concepto\s+de\s+pagom[oó]vil\s*bdv\b/i,
   /\bpago\s+recibido\b/i,
   /\btransferencia\s+recibida\b/i,
   /\babono\b/i,
   /\bacreditad[oa]\b/i,
+  /\bse\s+ha\s+acreditado\b/i,
   /\bacreditaci[oó]n\b/i,
   /\bcr[eé]dito\s+(?:a|en|por)\b/i,
   /\bte\s+envi[oó]\b/i,
@@ -48,9 +52,12 @@ export function detectIncomingDirection(fullText: string): {
   return { isIncoming: true, reason: null };
 }
 
-export function extractReferenceDigits(text: string): string | null {
+export function extractReferenceDigits(
+  text: string,
+  options?: { allowUnlabeledDigitsFallback?: boolean }
+): string | null {
   const patterns = [
-    /(?:(?:Nro\.?|N[uú]mero)\s*(?:de\s*)?)?(?:Ref(?:erencia)?|Comprobante|Confirmaci[oó]n|Secuencia|Operaci[oó]n|Movimiento|Serial|ID\s*(?:Tx|Transacci[oó]n)?)\s*(?:Nro\.?|N[uú]mero|No\.?|#|:|\.)*\s*([A-Z0-9-]{4,28})/i,
+    /(?:(?:Nro\.?|N[uú]mero)\s*(?:de\s*)?)?(?:Ref(?:erencia)?|Comprobante|Confirmaci[oó]n|Secuencia|Operaci[oó]n|Movimiento|Serial|Clave|Autorizaci[oó]n|ID\s*(?:Tx|Transacci[oó]n)?)\s*(?:Nro\.?|N[uú]mero|No\.?|#|:|\.)*\s*([A-Z0-9-]{4,28})/i,
     /#\s*(\d{4,20})\b/,
   ];
 
@@ -67,6 +74,20 @@ export function extractReferenceDigits(text: string): string | null {
       return alnum;
     }
   }
+
+  if (options?.allowUnlabeledDigitsFallback) {
+    // Strip phones, cedulas, bank codes and amounts before looking for a bare 6..16 digit reference
+    const scrubbed = text
+      .replace(/\b(?:\+?58[\s-]?)?0?4(?:12|14|16|24|26)[\s-]?\d{3}[\s-]?\d{4}\b/g, " ")
+      .replace(/\b[VEJGP][-\s]?\d{5,10}\b/gi, " ")
+      .replace(/\b01\d{2}\b/g, " ")
+      .replace(/\d{1,3}(?:[.,]\d{3})*[.,]\d{2}/g, " ");
+    const bare = scrubbed.match(/\b(\d{6,16})\b/);
+    if (bare?.[1]) {
+      return bare[1];
+    }
+  }
+
   return null;
 }
 
@@ -112,10 +133,13 @@ export function buildParsedResult(args: {
   parserUsed: string;
   bankHint: string | null;
   ownBankCode?: string | null;
+  allowUnlabeledDigitsFallback?: boolean;
 }): ParsedBankNotification {
   const direction = detectIncomingDirection(args.fullText);
   const { amountCents, currency } = extractAmountAndCurrency(args.fullText);
-  const referenceFull = extractReferenceDigits(args.fullText);
+  const referenceFull = extractReferenceDigits(args.fullText, {
+    allowUnlabeledDigitsFallback: args.allowUnlabeledDigitsFallback,
+  });
   const { senderPhone, senderDni, senderBankCode } = extractSenderFields(
     args.fullText,
     args.ownBankCode

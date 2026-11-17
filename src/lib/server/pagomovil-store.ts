@@ -9,6 +9,7 @@ import type {
 } from "@/types";
 import { decryptCode, encryptCode, sha256CodeHash } from "./crypto";
 import { isDemoSandboxEnabled } from "./env";
+import { DEFAULT_ANDROID_PACKAGES_BY_BANK } from "@/lib/catalog-banks";
 import { recordWebhookEventOnce } from "./repository";
 import { getSandboxState, type SandboxBotDeviceRow } from "./sandbox-db";
 import { getSupabaseAdmin } from "./supabase-admin";
@@ -427,7 +428,11 @@ export async function saveReceiverBankAccount(
     holderName: input.holderName.trim(),
     allowedPackages: input.allowedPackages?.length
       ? input.allowedPackages.map((p) => p.trim()).filter(Boolean)
-      : existing?.allowedPackages ?? ["com.bancamiga.suite", "com.bancamiga", "SMS", "EMAIL"],
+      : existing?.allowedPackages ??
+        DEFAULT_ANDROID_PACKAGES_BY_BANK[input.bankCode.trim()] ?? [
+          "SMS",
+          "EMAIL",
+        ],
     active: input.active,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,

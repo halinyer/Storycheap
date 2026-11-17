@@ -891,7 +891,7 @@ function OrderDetailInner() {
                       <p className="text-xs text-slate-400 leading-relaxed">
                         {order.paymentGateway === "pagomovil" ||
                         order.paymentGateway === "pablito"
-                          ? "Abre la ventana de Pago Móvil para copiar los datos Bancamiga y enviar los dígitos de tu referencia."
+                          ? "Abre la ventana de Pago Móvil para copiar los datos de pago y enviar los dígitos de tu referencia."
                           : "Continúa en la pasarela encriptada de ZenoBank para pagar con USDT, USDC, Bitcoin o tarjeta."}
                       </p>
 

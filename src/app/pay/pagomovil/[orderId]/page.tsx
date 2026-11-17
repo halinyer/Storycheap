@@ -871,7 +871,7 @@ function PagoMovilHostedCheckoutContent() {
                     />
                     <span>
                       {data.watchdog.online
-                        ? "Sensor Bancamiga en línea"
+                        ? "Sensor bancario en línea"
                         : "Confirmación pendiente"}
                     </span>
                   </span>

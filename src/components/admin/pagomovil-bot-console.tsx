@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
+  allowBotAppPackageAction,
   deleteBotDeviceAction,
   fetchLiveVenezuelaRatesAction,
   manualConfirmPagoMovilAction,
@@ -39,7 +40,11 @@ import {
   toggleProviderConfigAction,
   updateBsRateAction,
 } from "@/app/admin/actions";
-import { VENEZUELAN_BANKS } from "@/lib/catalog-banks";
+import {
+  BANK_BY_CODE,
+  DEFAULT_ANDROID_PACKAGES_BY_BANK,
+  VENEZUELAN_BANKS,
+} from "@/lib/catalog-banks";
 import { formatCents } from "@/lib/catalog-seed";
 import type {
   BankPaymentNotificationDTO,
@@ -114,16 +119,17 @@ export function PagoMovilBotConsole(props: PagoMovilBotConsoleProps) {
   } | null>(null);
 
   // Receiver Account form
-  const [bankCode, setBankCode] = useState(primaryAccount?.bankCode ?? "0172");
+  const [bankCode, setBankCode] = useState(primaryAccount?.bankCode ?? "0102");
   const [accountType, setAccountType] = useState<"natural" | "juridical">(
-    primaryAccount?.accountType ?? "natural"
+    primaryAccount?.accountType ?? "juridical"
   );
   const [phone, setPhone] = useState(primaryAccount?.phone ?? "");
   const [dni, setDni] = useState(primaryAccount?.dni ?? "");
   const [holderName, setHolderName] = useState(primaryAccount?.holderName ?? "");
   const [allowedPackagesRaw, setAllowedPackagesRaw] = useState(
     primaryAccount?.allowedPackages.join(", ") ??
-      "com.bancamiga.suite, com.bancamiga, SMS, EMAIL"
+      DEFAULT_ANDROID_PACKAGES_BY_BANK[primaryAccount?.bankCode ?? "0102"]?.join(", ") ??
+      "com.bancodevenezuela.bdvdigital, SMS, EMAIL"
   );
   const [accountActive, setAccountActive] = useState(primaryAccount?.active ?? true);
 
@@ -151,7 +157,7 @@ export function PagoMovilBotConsole(props: PagoMovilBotConsoleProps) {
   );
 
   // Device registration
-  const [deviceName, setDeviceName] = useState("Android Bancamiga Principal");
+  const [deviceName, setDeviceName] = useState("Android Receptor BDVApp");
   const [channelType, setChannelType] =
     useState<BotDeviceDTO["channelType"]>("ANDROID_PUSH");
   const [allowPlainBearer, setAllowPlainBearer] = useState(true);
@@ -161,11 +167,11 @@ export function PagoMovilBotConsole(props: PagoMovilBotConsoleProps) {
   } | null>(null);
 
   // Simulator
-  const [simTitle, setSimTitle] = useState("Pago Móvil Recibido");
+  const [simTitle, setSimTitle] = useState("PagomóvilBDV");
   const [simContent, setSimContent] = useState(
-    "Has recibido un Pago Movil de V-20111222 0412-5559988 Banesco (0134) por Bs. 1.250,45 Ref: 84930219"
+    "Has recibido un pago por concepto de PagomovilBDV por Bs. 1.250,45 de 0414-5559988 Banco 0134 Ref: 84930219"
   );
-  const [simPackage, setSimPackage] = useState("com.bancamiga.suite");
+  const [simPackage, setSimPackage] = useState("com.bancodevenezuela.bdvdigital");
   const [simSource, setSimSource] = useState<"APP_PUSH" | "SMS" | "EMAIL">(
     "APP_PUSH"
   );
@@ -360,13 +366,18 @@ export function PagoMovilBotConsole(props: PagoMovilBotConsoleProps) {
   const activeSecretPlaceholder =
     freshPairing?.plainSecret ?? "PEGA_AQUI_TU_SECRETO_DEL_SENSOR";
 
+  const activeBankShort =
+    BANK_BY_CODE.get(bankCode)?.shortName ??
+    primaryAccount?.bankName ??
+    "Pago Móvil";
+
   const macroDroidBodySnippet = JSON.stringify(
     {
-      title: "{not_title}",
-      content: "{notification}",
-      app_package: "{not_app_package}",
+      title: "[not_title]",
+      content: "[notification]",
+      app_package: "[not_app_package]",
       source_type: "APP_PUSH",
-      battery_level: "{battery}",
+      battery_level: "[battery]",
       network_type: "WIFI_DATA",
     },
     null,
@@ -379,7 +390,7 @@ const DEVICE_ID = "${activeDeviceIdentifier}";
 const DEVICE_SECRET = "${activeSecretPlaceholder}";
 
 function checkBankEmails() {
-  const query = 'is:unread (Bancamiga OR "Pago Movil" OR "Pago Móvil" OR "pago recibido")';
+  const query = 'is:unread ("Banco de Venezuela" OR BDV OR PagomovilBDV OR Bancamiga OR "Pago Movil" OR "Pago Móvil" OR "pago recibido")';
   const threads = GmailApp.search(query, 0, 10);
   for (const thread of threads) {
     for (const msg of thread.getMessages()) {
@@ -559,7 +570,7 @@ function checkBankEmails() {
           },
           {
             id: "setup" as const,
-            label: "Cuenta Bancamiga & Reglas",
+            label: `Cuenta ${activeBankShort} & Reglas`,
             icon: Building2,
             badge: null,
           },
@@ -749,21 +760,57 @@ function checkBankEmails() {
                           {n.rawContentPreview}
                         </td>
                         <td className="py-3 pr-3">
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
-                              n.status === "MATCHED"
-                                ? "bg-emerald-500/20 text-emerald-300"
-                                : n.status === "UNMATCHED"
-                                  ? "bg-sky-500/20 text-sky-300"
-                                  : n.status === "DUPLICATE"
-                                    ? "bg-amber-500/20 text-amber-300"
-                                    : n.status === "IGNORED"
-                                      ? "bg-slate-700 text-slate-300"
-                                      : "bg-rose-500/20 text-rose-300"
-                            }`}
-                          >
-                            {n.status}
-                          </span>
+                          <div className="flex flex-col items-start gap-1">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                                n.status === "MATCHED"
+                                  ? "bg-emerald-500/20 text-emerald-300"
+                                  : n.status === "UNMATCHED"
+                                    ? "bg-sky-500/20 text-sky-300"
+                                    : n.status === "DUPLICATE"
+                                      ? "bg-amber-500/20 text-amber-300"
+                                      : n.status === "IGNORED"
+                                        ? "bg-slate-700 text-slate-300"
+                                        : "bg-rose-500/20 text-rose-300"
+                              }`}
+                            >
+                              {n.status}
+                            </span>
+                            {n.status === "IGNORED" &&
+                              n.parserUsed === "package_guard" &&
+                              n.appPackage &&
+                              !/^[\{\[].*[\}\]]$/.test(n.appPackage) && (
+                                <button
+                                  type="button"
+                                  disabled={busyKey === `allow_${n.id}`}
+                                  onClick={async () => {
+                                    setBusyKey(`allow_${n.id}`);
+                                    try {
+                                      const updated =
+                                        await allowBotAppPackageAction(n.appPackage!);
+                                      setAllowedPackagesRaw(
+                                        updated.allowedPackages.join(", ")
+                                      );
+                                      toast.success(
+                                        `App autorizada: ${n.appPackage}`
+                                      );
+                                      router.refresh();
+                                    } catch (err) {
+                                      toast.error(
+                                        err instanceof Error
+                                          ? err.message
+                                          : "Error autorizando paquete"
+                                      );
+                                    } finally {
+                                      setBusyKey(null);
+                                    }
+                                  }}
+                                  className="px-2 py-0.5 rounded-lg bg-amber-400/20 hover:bg-amber-400/30 border border-amber-400/40 text-amber-200 text-[10px] font-bold"
+                                >
+                                  + Autorizar app
+                                </button>
+                              )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -798,7 +845,14 @@ function checkBankEmails() {
                 </label>
                 <select
                   value={bankCode}
-                  onChange={(e) => setBankCode(e.target.value)}
+                  onChange={(e) => {
+                    const nextCode = e.target.value;
+                    setBankCode(nextCode);
+                    const nextDefaults = DEFAULT_ANDROID_PACKAGES_BY_BANK[nextCode];
+                    if (nextDefaults) {
+                      setAllowedPackagesRaw(nextDefaults.join(", "));
+                    }
+                  }}
                   className="w-full rounded-xl bg-slate-950 border border-white/15 px-3 py-2.5 text-xs text-white"
                 >
                   {VENEZUELAN_BANKS.map((b) => (
@@ -903,7 +957,7 @@ function checkBankEmails() {
               ) : (
                 <CheckCircle2 className="w-4 h-4" />
               )}
-              <span>Guardar Cuenta Bancamiga</span>
+              <span>Guardar Cuenta {activeBankShort}</span>
             </button>
           </form>
 
@@ -1083,7 +1137,7 @@ function checkBankEmails() {
                   </option>
                   <option value="ANDROID_SMS">Android SMS Bancario</option>
                   <option value="EMAIL_SCRIPT">
-                    Google Apps Script (Gmail Bancamiga)
+                    Google Apps Script (Gmail Bancario)
                   </option>
                 </select>
               </div>
@@ -1178,7 +1232,7 @@ function checkBankEmails() {
               </h2>
               {props.devices.length === 0 ? (
                 <div className="rounded-2xl bg-slate-950/60 border border-white/[0.06] p-5 text-xs text-slate-400">
-                  Aún no hay sensores creados. Genera uno a la izquierda para conectar tu Android o Gmail Bancamiga.
+                  Aún no hay sensores creados. Genera uno a la izquierda para conectar tu Android ({activeBankShort}) o Gmail.
                 </div>
               ) : (
                 <div className="space-y-2.5">
@@ -1253,7 +1307,7 @@ function checkBankEmails() {
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-black text-white flex items-center gap-2">
                   <Terminal className="w-4 h-4 text-emerald-400" />
-                  <span>Guía Rápida MacroDroid (Android Push Bancamiga)</span>
+                  <span>Guía Rápida MacroDroid (Notificaciones Push {activeBankShort})</span>
                 </h3>
                 <button
                   type="button"
@@ -1267,7 +1321,7 @@ function checkBankEmails() {
               </div>
               <ol className="text-xs text-slate-300 space-y-1.5 list-decimal pl-4 leading-relaxed">
                 <li>
-                  Trigger: <strong>Notificación Recibida</strong> (App: Bancamiga) o <strong>SMS Recibido</strong>.
+                  Trigger: <strong>Notificación Recibida</strong> → elige únicamente la app del banco (ej. <strong>BDVApp / BDV Digital</strong>). No necesitas SMS.
                 </li>
                 <li>
                   Action: <strong>HTTP Request (POST)</strong> hacia{" "}
@@ -1275,6 +1329,9 @@ function checkBankEmails() {
                 </li>
                 <li>
                   Cabeceras: <code className="text-sky-300">X-Bot-Device-Id: {activeDeviceIdentifier}</code> y <code className="text-sky-300">X-Bot-Token</code> con tu secreto.
+                </li>
+                <li>
+                  Body: elige <strong>Tipo de contenido: application/json</strong> y pega el bloque en <strong>Texto</strong> (o usa <strong>Parámetros</strong> con los mismos campos). Si usas JSON, asegúrate de que los comodines tengan <strong>corchetes `[...]`</strong> insertados desde el botón <code className="text-amber-300">...</code> Magic Text (nunca llaves <code>{"{...}"}</code>).
                 </li>
                 <li>
                   Heartbeat recomendado: Macro cada 5 min haciendo <code className="text-emerald-300">POST {props.siteUrl}/api/bot/heartbeat</code>.
@@ -1303,7 +1360,7 @@ function checkBankEmails() {
                 </button>
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Ideal si activas alertas por correo en Bancamiga: corre gratis en Google Cloud cada 1 minuto con firma criptográfica HMAC-SHA256.
+                Ideal si activas alertas por correo en {activeBankShort}: corre gratis en Google Cloud cada 1 minuto con firma criptográfica HMAC-SHA256.
               </p>
               <pre className="rounded-2xl bg-slate-950 border border-white/10 p-3 text-[10px] font-mono text-sky-200 overflow-x-auto max-h-60">
                 {googleAppsScriptSnippet}
@@ -1328,6 +1385,14 @@ function checkBankEmails() {
             <div className="flex flex-wrap gap-2">
               {[
                 {
+                  label: "App BDV (PagomóvilBDV)",
+                  title: "PagomóvilBDV",
+                  content:
+                    "Has recibido un pago por concepto de PagomovilBDV por Bs. 1.250,45 de 0414-5559988 Banco 0134 Ref: 84930219",
+                  pkg: "com.bancodevenezuela.bdvdigital",
+                  src: "APP_PUSH" as const,
+                },
+                {
                   label: "Bancamiga OK",
                   title: "Pago Móvil Recibido",
                   content:
@@ -1345,10 +1410,10 @@ function checkBankEmails() {
                 },
                 {
                   label: "Débito Saliente (Ignorar)",
-                  title: "Pago Móvil Enviado",
+                  title: "PagomóvilBDV",
                   content:
-                    "Enviaste Pago Movil exitoso por Bs. 500,00 Ref: 77441122",
-                  pkg: "com.bancamiga.suite",
+                    "Realizaste un PagomovilBDV exitoso por Bs. 500,00 Ref: 77441122",
+                  pkg: "com.bancodevenezuela.bdvdigital",
                   src: "APP_PUSH" as const,
                 },
               ].map((preset) => (
@@ -1519,7 +1584,7 @@ function checkBankEmails() {
                 type="text"
                 value={manualNote}
                 onChange={(e) => setManualNote(e.target.value)}
-                placeholder="Verificado en app Bancamiga"
+                placeholder={`Verificado en app ${activeBankShort}`}
                 className="w-full rounded-xl bg-slate-950 border border-white/15 px-3 py-2 text-xs text-white"
               />
             </div>
