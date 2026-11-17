@@ -117,6 +117,21 @@ export function extractZenoStoreIdFromPayload(payload: unknown): string | null {
   return null;
 }
 
+export function formatZenoTransactionsTag(
+  transactions: ZenoCheckoutTransaction[],
+  checkoutId?: string | null
+): string | null {
+  if (transactions.length > 0) {
+    return transactions
+      .map((tx) => {
+        const net = tx.networkId ? ` · ${tx.networkId}` : "";
+        return `TX ${tx.transactionId} (${tx.tokenAmount} ${tx.tokenId ?? "USDT"}${net})`;
+      })
+      .join(" | ");
+  }
+  return checkoutId ? `Checkout ZenoBank ${checkoutId}` : null;
+}
+
 function mapCheckoutDto(
   dto: CheckoutResponseDto,
   isSandbox = false

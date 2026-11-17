@@ -230,6 +230,7 @@ export async function sendCreditAdjustmentEmail(params: {
   orderNumber?: string;
   amountCents: number;
   reasonText: string;
+  txReference?: string | null;
 }) {
   const accountUrl = `${getSiteUrl()}/account`;
   const dollars = (params.amountCents / 100).toFixed(2);
@@ -242,6 +243,9 @@ export async function sendCreditAdjustmentEmail(params: {
     rows.push({ label: "N.° de pedido", value: params.orderNumber, mono: true });
   }
   rows.push({ label: "Motivo", value: params.reasonText });
+  if (params.txReference) {
+    rows.push({ label: "Transacción", value: params.txReference, mono: true });
+  }
 
   const html = renderEmailShell({
     preheader: `Se acreditaron $${dollars} USD en tu saldo de StoryCheap.`,

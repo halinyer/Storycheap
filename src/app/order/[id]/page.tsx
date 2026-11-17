@@ -103,6 +103,18 @@ function OrderDetailInner() {
   const [resolvingUnderpayment, setResolvingUnderpayment] = useState(false);
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [userCreditBalanceCents, setUserCreditBalanceCents] = useState(0);
+  const [zenoTransactions, setZenoTransactions] = useState<
+    Array<{
+      uid: string;
+      transactionId: string;
+      networkId: string | null;
+      tokenId: string | null;
+      tokenAmount: string;
+      from: string | null;
+      fromLabel: string | null;
+      createdAt: string;
+    }>
+  >([]);
   const [supportConfig, setSupportConfig] =
     useState<PublicSupportConfigDTO | null>(null);
 
@@ -132,11 +144,15 @@ function OrderDetailInner() {
         order: OrderDTO;
         statusMeta: { label: string; description: string; tone: string };
         userCreditBalanceCents?: number;
+        zenoTransactions?: typeof zenoTransactions;
       };
       setOrder(data.order);
       setStatusMeta(data.statusMeta);
       if (typeof data.userCreditBalanceCents === "number") {
         setUserCreditBalanceCents(data.userCreditBalanceCents);
+      }
+      if (Array.isArray(data.zenoTransactions)) {
+        setZenoTransactions(data.zenoTransactions);
       }
       setAuthRequired(false);
       setErrorMsg(null);
@@ -163,12 +179,16 @@ function OrderDetailInner() {
           order: OrderDTO;
           statusMeta: { label: string; description: string; tone: string };
           userCreditBalanceCents?: number;
+          zenoTransactions?: typeof zenoTransactions;
         };
         if (active) {
           setOrder(data.order);
           setStatusMeta(data.statusMeta);
           if (typeof data.userCreditBalanceCents === "number") {
             setUserCreditBalanceCents(data.userCreditBalanceCents);
+          }
+          if (Array.isArray(data.zenoTransactions)) {
+            setZenoTransactions(data.zenoTransactions);
           }
           setAuthRequired(false);
           setErrorMsg(null);
@@ -661,6 +681,23 @@ function OrderDetailInner() {
                 </div>
 
                 <div className="pt-3 border-t border-amber-400/20 flex flex-wrap items-center gap-2.5">
+                  {zenoTransactions.length > 0 && (
+                    <div className="w-full rounded-xl bg-slate-950/60 border border-amber-400/20 p-3 space-y-1 text-[11px] text-amber-100">
+                      <div className="font-bold text-amber-300">
+                        Transacción(es) detectada(s) en ZenoBank:
+                      </div>
+                      {zenoTransactions.map((tx) => (
+                        <div key={tx.uid} className="font-mono break-all text-slate-200">
+                          • {tx.tokenAmount} {tx.tokenId ?? "USDT"}
+                          {tx.networkId ? ` (${tx.networkId})` : ""} — TX:{" "}
+                          <strong className="text-white">{tx.transactionId}</strong>
+                          {tx.fromLabel || tx.from
+                            ? ` · De: ${tx.fromLabel ?? tx.from}`
+                            : ""}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {userCreditBalanceCents >=
                     order.amountDueCents - order.paidCents && (
                     <button
@@ -694,6 +731,37 @@ function OrderDetailInner() {
                     </span>
                   </button>
                 </div>
+              </div>
+            )}
+
+          {/* Overpayment surplus notification with exact ZenoBank transaction */}
+          {order.paymentGateway === "zenobank" &&
+            order.paidCents > order.amountDueCents && (
+              <div className="rounded-2xl bg-emerald-500/10 border border-emerald-400/30 p-5 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-black text-emerald-300">
+                    Excedente acreditado a tu saldo a favor: +
+                    {formatCents(order.paidCents - order.amountDueCents)} USD
+                  </span>
+                  <span className="text-[11px] font-mono text-emerald-200/80">
+                    Recibido: {formatCents(order.paidCents)} USD / Esperado:{" "}
+                    {formatCents(order.amountDueCents)} USD
+                  </span>
+                </div>
+                {zenoTransactions.length > 0 && (
+                  <div className="rounded-xl bg-slate-950/60 border border-emerald-400/20 p-3 space-y-1 text-[11px] font-mono text-slate-200">
+                    {zenoTransactions.map((tx) => (
+                      <div key={tx.uid} className="break-all">
+                        • {tx.tokenAmount} {tx.tokenId ?? "USDT"}
+                        {tx.networkId ? ` (${tx.networkId})` : ""} — TX:{" "}
+                        <strong className="text-white">{tx.transactionId}</strong>
+                        {tx.fromLabel || tx.from
+                          ? ` · De: ${tx.fromLabel ?? tx.from}`
+                          : ""}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1265,6 +1333,25 @@ function OrderDetailInner() {
                 <span>Total en pasarela</span>
                 <span>{formatCents(order.amountDueCents)} USD</span>
               </div>
+              {order.paidCents > 0 && order.paidCents !== order.amountDueCents && (
+                <div className="flex justify-between text-sky-300 pt-1">
+                  <span>Recibido en pasarela</span>
+                  <span className="font-bold">{formatCents(order.paidCents)} USD</span>
+                </div>
+              )}
+              {order.paymentGateway === "zenobank" && zenoTransactions.length > 0 && (
+                <div className="pt-2 border-t border-white/[0.06] space-y-1 text-[11px] text-slate-400">
+                  <div className="font-semibold text-slate-300">
+                    Transacción ZenoBank:
+                  </div>
+                  {zenoTransactions.map((tx) => (
+                    <div key={tx.uid} className="font-mono break-all text-slate-300">
+                      {tx.transactionId} ({tx.tokenAmount} {tx.tokenId ?? "USDT"}
+                      {tx.networkId ? ` · ${tx.networkId}` : ""})
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 

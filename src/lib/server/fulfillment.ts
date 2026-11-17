@@ -9,6 +9,10 @@ import {
 import { getPaymentGateway } from "./payments";
 import type { NormalizedPaymentWebhookEvent } from "./payments/types";
 import {
+  extractZenoTransactionsFromPayload,
+  formatZenoTransactionsTag,
+} from "./payments/zenobank";
+import {
   appendAuditLog,
   appendCreditLedgerEntry,
   applyAdditionalCreditToOrder,
@@ -606,6 +610,7 @@ async function settleUnderpaymentToCredit(params: {
   note: string;
   needsAttention: boolean;
   attentionReason: string | null;
+  txReference?: string | null;
 }): Promise<boolean> {
   await releaseReservedCodesForOrder(params.order.id);
   const transitioned = await transitionOrderStatus({
@@ -650,6 +655,7 @@ async function settleUnderpaymentToCredit(params: {
         orderNumber: params.order.orderNumber,
         amountCents: totalCreditedCents,
         reasonText: params.note,
+        txReference: params.txReference,
       }).catch(() => {});
     }
   }
@@ -701,13 +707,22 @@ export async function processVerifiedWebhookEvent(
   let authoritativeStatus = event.status;
   let authoritativePaidCents = event.paidCents;
   let authoritativeExpiresAt = event.expiresAt ?? matchedOrder.expiresAt ?? null;
+  let liveZenoTransactions = extractZenoTransactionsFromPayload(event.rawPayload);
   if (!options?.skipRemoteDoubleCheck) {
     const gateway = getPaymentGateway(event.gateway);
     const liveCheckout = await gateway.getCheckout(event.checkoutId);
     authoritativeStatus = liveCheckout.status;
     authoritativePaidCents = liveCheckout.paidCents;
     authoritativeExpiresAt = liveCheckout.expiresAt ?? authoritativeExpiresAt;
+    if (liveCheckout.transactions && liveCheckout.transactions.length > 0) {
+      liveZenoTransactions = liveCheckout.transactions;
+    }
   }
+  const zenoTxTag =
+    event.gateway === "zenobank"
+      ? formatZenoTransactionsTag(liveZenoTransactions, event.checkoutId)
+      : null;
+  const txSuffix = zenoTxTag ? ` · ${zenoTxTag}` : "";
 
   const checkoutHasExpired = Boolean(
     matchedOrder.status === "EXPIRED" ||
@@ -726,10 +741,11 @@ export async function processVerifiedWebhookEvent(
         paidCents: authoritativePaidCents,
         note:
           authoritativePaidCents > 0
-            ? `Pago parcial recibido tras expiración (${matchedOrder.orderNumber})`
+            ? `Pago parcial recibido tras expiración (${matchedOrder.orderNumber})${txSuffix}`
             : `Devolución de saldo aplicado por orden expirada (${matchedOrder.orderNumber})`,
         needsAttention: false,
         attentionReason: null,
+        txReference: authoritativePaidCents > 0 ? zenoTxTag : null,
       });
       await updateWebhookEventStatus(recordId, "processed");
       return {
@@ -765,12 +781,13 @@ export async function processVerifiedWebhookEvent(
         order: matchedOrder,
         paidCents: authoritativePaidCents,
         note: checkoutHasExpired
-          ? `Pago parcial recibido al vencer enlace (${matchedOrder.orderNumber})`
-          : `Monto recibido menor al total en orden ${matchedOrder.orderNumber}`,
+          ? `Pago parcial recibido al vencer enlace (${matchedOrder.orderNumber})${txSuffix}`
+          : `Monto recibido menor al total en orden ${matchedOrder.orderNumber}${txSuffix}`,
         needsAttention:
           event.eventType === "checkout.completed" ||
           authoritativeStatus === "COMPLETED",
-        attentionReason: `Pago insuficiente: pagado ${authoritativePaidCents} vs esperado ${matchedOrder.amountDueCents}`,
+        attentionReason: `Pago insuficiente: pagado ${authoritativePaidCents} vs esperado ${matchedOrder.amountDueCents}${txSuffix}`,
+        txReference: zenoTxTag,
       });
       await updateWebhookEventStatus(recordId, "processed");
       return { outcome: "partial_underpaid_credited", orderId: matchedOrder.id };
@@ -832,7 +849,7 @@ export async function processVerifiedWebhookEvent(
       orderId: matchedOrder.id,
       deltaCents: surplusCents,
       reason: "overpayment",
-      note: `Excedente pagado en orden ${matchedOrder.orderNumber}`,
+      note: `Excedente pagado en orden ${matchedOrder.orderNumber}${txSuffix}`,
       createdBy: null,
     });
     await sendCreditAdjustmentEmail({
@@ -844,6 +861,7 @@ export async function processVerifiedWebhookEvent(
         matchedOrder.paymentGateway === "pablito"
           ? "Excedente enviado en tu Pago Móvil"
           : "Excedente enviado en tu pago cripto",
+      txReference: zenoTxTag,
     }).catch(() => {});
   }
 

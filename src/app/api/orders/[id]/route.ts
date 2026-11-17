@@ -10,6 +10,7 @@ import { getPaymentGateway } from "@/lib/server/payments";
 import {
   getOrderById,
   getUserCreditBalanceCents,
+  getZenoPaymentProofForOrder,
   listPendingSupplierOrdersForOrder,
 } from "@/lib/server/repository";
 import { ORDER_STATUS_META } from "@/lib/server/state-machine";
@@ -122,9 +123,25 @@ export async function GET(
     }
   }
 
-  const userCreditBalanceCents = sessionUser
-    ? await getUserCreditBalanceCents(sessionUser.id).catch(() => 0)
-    : 0;
+  const [userCreditBalanceCents, zenoProof] = await Promise.all([
+    sessionUser
+      ? getUserCreditBalanceCents(sessionUser.id).catch(() => 0)
+      : Promise.resolve(0),
+    order.paymentGateway === "zenobank"
+      ? getZenoPaymentProofForOrder(order.id).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+
+  const zenoTransactions = (zenoProof?.transactions ?? []).map((tx) => ({
+    uid: tx.uid,
+    transactionId: tx.transactionId,
+    networkId: tx.networkId,
+    tokenId: tx.tokenId,
+    tokenAmount: tx.tokenAmount,
+    from: tx.from,
+    fromLabel: tx.fromLabel,
+    createdAt: tx.createdAt,
+  }));
 
   const sanitizedOrder = isAdmin
     ? order
@@ -141,6 +158,7 @@ export async function GET(
       order: sanitizedOrder,
       statusMeta: ORDER_STATUS_META[order.status],
       userCreditBalanceCents,
+      zenoTransactions,
     },
     {
       status: 200,

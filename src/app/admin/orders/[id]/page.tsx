@@ -184,8 +184,20 @@ async function AdminOrderDetailContent({
         {order.paymentGateway === "zenobank" ? (
           <div className="space-y-3 text-xs">
             <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/25 space-y-1">
-              <div className="text-[11px] uppercase font-bold text-amber-300">
-                Cuenta Binance / ZenoBank Receptora
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] uppercase font-bold text-amber-300">
+                  Cuenta Binance / ZenoBank Receptora
+                </div>
+                {order.paidCents > order.amountDueCents && (
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/35 text-[10px] font-black text-emerald-200">
+                    Sobrepago: +{formatCents(order.paidCents - order.amountDueCents)} USD acreditado
+                  </span>
+                )}
+                {order.paidCents > 0 && order.paidCents < order.amountDueCents && (
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/35 text-[10px] font-black text-amber-200">
+                    Pago parcial: {formatCents(order.paidCents)} de {formatCents(order.amountDueCents)} USD
+                  </span>
+                )}
               </div>
               {zenoReceiver ? (
                 <>
@@ -242,7 +254,14 @@ async function AdminOrderDetailContent({
                       </span>
                       <span className="text-[11px] text-slate-400">
                         {tx.networkId ?? "Red ZenoBank"}
+                        {tx.createdAt
+                          ? ` • ${new Date(tx.createdAt).toLocaleString("es-VE")}`
+                          : ""}
                       </span>
+                    </div>
+                    <div className="text-[11px] font-mono text-sky-300 break-all">
+                      TX / Hash / Binance Order: <strong>{tx.transactionId}</strong>
+                      {tx.uid && tx.uid !== tx.transactionId ? ` (UID: ${tx.uid})` : ""}
                     </div>
                     {(tx.toLabel || tx.to) && (
                       <div className="text-slate-200">
@@ -253,14 +272,13 @@ async function AdminOrderDetailContent({
                       </div>
                     )}
                     {(tx.fromLabel || tx.from) && (
-                      <div className="text-slate-400">
+                      <div className="text-slate-300">
                         Origen cliente:{" "}
-                        {tx.fromLabel ? `${tx.fromLabel} (${tx.from ?? ""})` : tx.from}
+                        <strong className="text-white">
+                          {tx.fromLabel ? `${tx.fromLabel} (${tx.from ?? ""})` : tx.from}
+                        </strong>
                       </div>
                     )}
-                    <div className="text-[11px] font-mono text-slate-400 break-all">
-                      TX / Ref: {tx.transactionId}
-                    </div>
                   </div>
                 ))}
               </div>
