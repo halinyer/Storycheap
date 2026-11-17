@@ -27,6 +27,7 @@ import {
   applyAdditionalCreditToOrder,
   batchSaveVariantPricingMeta,
   commitReservedCodesForOrder,
+  countFulfillmentsForOrderItem,
   ensureCustomerProfile,
   findConsumedBinancePayTxIds,
   getOrderByGatewayCheckoutId,
@@ -148,30 +149,60 @@ async function syncActualBilledVariantCost(
   }
 }
 
-async function insertSupplierCodeIdempotently(params: {
-  orderId: string;
-  orderItemId: string;
-  userId: string | null;
-  source: "reloadly" | "centralone";
-  supplierTxId: string | null;
-  codePlaintext: string;
-  pinPlaintext?: string | null;
-}): Promise<boolean> {
-  const codeHash = crypto
-    .createHash("sha256")
-    .update(params.codePlaintext.trim(), "utf8")
-    .digest("hex");
+type IdempotentFulfillmentParams =
+  | {
+      orderId: string;
+      orderItemId: string;
+      userId: string | null;
+      source: "reloadly" | "centralone";
+      supplierTxId: string | null;
+      codePlaintext: string;
+      pinPlaintext?: string | null;
+      maxQuantity?: number;
+    }
+  | {
+      orderId: string;
+      orderItemId: string;
+      userId: string | null;
+      source: "manual";
+      codeInventoryId: string;
+      codeCiphertext: string;
+      codeLast4: string;
+      pinCiphertext?: string | null;
+      maxQuantity?: number;
+    };
+
+/**
+ * Atomically locks each fulfillment slot (per code inventory row or orderItem+code SHA-256)
+ * and enforces the item's `maxQuantity` cap so concurrent retries or webhook races
+ * can never store duplicate or excess gift cards in the customer's vault.
+ */
+async function insertFulfillmentIdempotently(
+  params: IdempotentFulfillmentParams
+): Promise<boolean> {
+  const isManual = params.source === "manual";
+  const lockGateway = isManual ? "manual_code_lock" : "supplier_code_lock";
+  const lockEventId = isManual
+    ? `${params.orderItemId}:${params.codeInventoryId}`
+    : `${params.orderItemId}:${crypto
+        .createHash("sha256")
+        .update(params.codePlaintext.trim(), "utf8")
+        .digest("hex")}`;
+
+  const last4 = isManual ? params.codeLast4 : extractLast4(params.codePlaintext);
+  const supplierTxId = isManual ? null : params.supplierTxId;
+
   const lockResult = await recordWebhookEventOnce({
-    gateway: "supplier_code_lock",
-    eventId: `${params.orderItemId}:${codeHash}`,
-    eventType: "supplier.code_lock",
+    gateway: lockGateway,
+    eventId: lockEventId,
+    eventType: isManual ? "manual.code_lock" : "supplier.code_lock",
     orderId: params.orderId,
-    gatewayCheckoutId: params.supplierTxId,
+    gatewayCheckoutId: supplierTxId,
     signatureValid: true,
     payload: {
       source: params.source,
-      last4: extractLast4(params.codePlaintext),
-      supplierTxId: params.supplierTxId,
+      last4,
+      supplierTxId,
     },
   });
   if (lockResult?.isDuplicate) {
@@ -179,16 +210,34 @@ async function insertSupplierCodeIdempotently(params: {
   }
 
   try {
+    if (typeof params.maxQuantity === "number") {
+      const currentCount = await countFulfillmentsForOrderItem(params.orderItemId);
+      if (currentCount >= params.maxQuantity) {
+        if (lockResult?.recordId) {
+          await updateWebhookEventStatus(
+            lockResult.recordId,
+            "ignored",
+            `Order item quantity cap (${params.maxQuantity}) already reached`
+          );
+        }
+        return false;
+      }
+    }
+
     await insertFulfillmentRecord({
       orderItemId: params.orderItemId,
       orderId: params.orderId,
       userId: params.userId,
       source: params.source,
-      codeInventoryId: null,
-      codeCiphertext: encryptCode(params.codePlaintext),
-      codeLast4: extractLast4(params.codePlaintext),
-      pinCiphertext: params.pinPlaintext ? encryptCode(params.pinPlaintext) : null,
-      supplierTxId: params.supplierTxId,
+      codeInventoryId: isManual ? params.codeInventoryId : null,
+      codeCiphertext: isManual ? params.codeCiphertext : encryptCode(params.codePlaintext),
+      codeLast4: last4,
+      pinCiphertext: isManual
+        ? (params.pinCiphertext ?? null)
+        : params.pinPlaintext
+          ? encryptCode(params.pinPlaintext)
+          : null,
+      supplierTxId,
     });
     if (lockResult?.recordId) {
       await updateWebhookEventStatus(lockResult.recordId, "processed");
@@ -199,7 +248,7 @@ async function insertSupplierCodeIdempotently(params: {
       await updateWebhookEventStatus(
         lockResult.recordId,
         "failed",
-        err instanceof Error ? err.message : "Failed inserting supplier fulfillment"
+        err instanceof Error ? err.message : "Failed inserting fulfillment"
       );
     }
     throw err;
@@ -264,22 +313,38 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       continue;
     }
 
-    // Step A: consume pre-committed manual codes for this variant
-    const pool = committedByVariant.get(item.variantId) ?? [];
-    while (delivered < item.quantity && pool.length > 0) {
-      const codeRow = pool.shift()!;
-      await insertFulfillmentRecord({
+    const tryConsumeManualCode = async (row: {
+      id: string;
+      codeCiphertext: string;
+      codeLast4: string;
+      pinCiphertext?: string | null;
+    }) => {
+      const inserted = await insertFulfillmentIdempotently({
         orderItemId: item.id,
         orderId: order.id,
         userId: order.userId,
         source: "manual",
-        codeInventoryId: codeRow.id,
-        codeCiphertext: codeRow.codeCiphertext,
-        codeLast4: codeRow.codeLast4,
-        pinCiphertext: codeRow.pinCiphertext,
+        codeInventoryId: row.id,
+        codeCiphertext: row.codeCiphertext,
+        codeLast4: row.codeLast4,
+        pinCiphertext: row.pinCiphertext,
+        maxQuantity: item.quantity,
       });
-      delivered += 1;
-      anyFulfilledNowOrBefore = true;
+      if (inserted) {
+        delivered += 1;
+        anyFulfilledNowOrBefore = true;
+        return;
+      }
+      delivered = Math.min(
+        item.quantity,
+        Math.max(delivered, await countFulfillmentsForOrderItem(item.id))
+      );
+    };
+
+    // Step A: consume pre-committed manual codes for this variant
+    const pool = committedByVariant.get(item.variantId) ?? [];
+    while (delivered < item.quantity && pool.length > 0) {
+      await tryConsumeManualCode(pool.shift()!);
     }
 
     // Step B: try claiming additional AVAILABLE manual stock if still needed
@@ -300,19 +365,8 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
         });
         const freshlyCommitted = await commitReservedCodesForOrder(order.id);
         for (const c of freshlyCommitted) {
-          if (c.variantId !== item.variantId) continue;
-          await insertFulfillmentRecord({
-            orderItemId: item.id,
-            orderId: order.id,
-            userId: order.userId,
-            source: "manual",
-            codeInventoryId: c.id,
-            codeCiphertext: c.codeCiphertext,
-            codeLast4: c.codeLast4,
-            pinCiphertext: c.pinCiphertext,
-          });
-          delivered += 1;
-          anyFulfilledNowOrBefore = true;
+          if (c.variantId !== item.variantId || delivered >= item.quantity) continue;
+          await tryConsumeManualCode(c);
         }
       } catch {
         // Not enough manual inventory; fall through to Reloadly or MANUAL_REVIEW
@@ -336,7 +390,7 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
             customIdentifier: `${item.id}-${delivered + 1}`,
             recipientEmail: order.email,
           });
-          const inserted = await insertSupplierCodeIdempotently({
+          const inserted = await insertFulfillmentIdempotently({
             orderItemId: item.id,
             orderId: order.id,
             userId: order.userId,
@@ -344,10 +398,17 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
             supplierTxId: deliveredCode.supplierTxId ?? null,
             codePlaintext: deliveredCode.codePlaintext,
             pinPlaintext: deliveredCode.pinPlaintext,
+            maxQuantity: item.quantity,
           });
           if (inserted) {
             delivered += 1;
             anyFulfilledNowOrBefore = true;
+          } else {
+            delivered = Math.min(
+              item.quantity,
+              Math.max(delivered, await countFulfillmentsForOrderItem(item.id))
+            );
+            break;
           }
         } catch (err) {
           attentionReasons.push(
@@ -422,13 +483,14 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
           if (fzOrder.codes.length > 0) {
             let skippedDuplicate = false;
             for (const codeText of fzOrder.codes.slice(0, item.quantity)) {
-              const inserted = await insertSupplierCodeIdempotently({
+              const inserted = await insertFulfillmentIdempotently({
                 orderItemId: item.id,
                 orderId: order.id,
                 userId: order.userId,
                 source: "centralone",
                 supplierTxId: fzOrder.externalOrderId,
                 codePlaintext: codeText,
+                maxQuantity: item.quantity,
               });
               if (inserted) {
                 delivered += 1;
@@ -549,7 +611,7 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
             } else {
               let skippedDuplicate = false;
               for (const c of codesRes.codes.slice(0, item.quantity)) {
-                const inserted = await insertSupplierCodeIdempotently({
+                const inserted = await insertFulfillmentIdempotently({
                   orderItemId: item.id,
                   orderId: order.id,
                   userId: order.userId,
@@ -557,6 +619,7 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
                   supplierTxId: c1Order.externalOrderId,
                   codePlaintext: c.codePlaintext,
                   pinPlaintext: c.pinPlaintext,
+                  maxQuantity: item.quantity,
                 });
                 if (inserted) {
                   delivered += 1;
@@ -1596,7 +1659,7 @@ export async function syncCentralOneOrderProgress(
 
     if (codesRes.ready) {
       for (const c of codesRes.codes.slice(0, targetItem.quantity)) {
-        const inserted = await insertSupplierCodeIdempotently({
+        const inserted = await insertFulfillmentIdempotently({
           orderItemId: targetItem.id,
           orderId: order.id,
           userId: order.userId,
@@ -1604,6 +1667,7 @@ export async function syncCentralOneOrderProgress(
           supplierTxId: externalOrderId,
           codePlaintext: c.codePlaintext,
           pinPlaintext: c.pinPlaintext,
+          maxQuantity: targetItem.quantity,
         });
         if (inserted) {
           addedCodes += 1;

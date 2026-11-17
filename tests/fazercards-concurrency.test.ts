@@ -37,6 +37,7 @@ vi.mock("@/lib/server/email", async (importOriginal) => {
 });
 
 import * as repository from "@/lib/server/repository";
+import { encryptCode } from "@/lib/server/crypto";
 import { initiateCheckout } from "@/lib/server/checkout-service";
 import {
   fulfillOrder,
@@ -187,5 +188,81 @@ describe("FazerCards Concurrent Webhook & Fulfillment Idempotency", () => {
     expect(mockSendOrderReadyEmail).toHaveBeenCalledTimes(1);
     supplierSpy.mockRestore();
     updateStateSpy.mockRestore();
+  });
+
+  it("caps excess distinct supplier codes at item.quantity and deduplicates revealOrderCodes in the vault", async () => {
+    const TWELVE_CODES = Array.from({ length: 12 }, (_, idx) => `NAA3EXCESS00${idx}`);
+    mockCreateFazerOrder.mockResolvedValueOnce({
+      externalOrderId: "fazer:ord-excess-12",
+      rawOrderId: "ord-excess-12",
+      status: "COMPLETED",
+      quantity: 10,
+      codes: TWELVE_CODES,
+      unitCostCents: 700,
+      failReason: null,
+      rawResponse: { ok: true },
+    });
+
+    const checkout = await initiateCheckout({
+      email: CUSTOMER_SESSION.email,
+      items: [{ variantId: NINTENDO_10_VARIANT_ID, quantity: 10 }],
+      applyStoreCredit: false,
+      paymentGateway: "zenobank",
+      sessionUser: CUSTOMER_SESSION,
+      ipAddress: "127.0.0.1",
+    });
+
+    const orderId = checkout.order.id;
+    const itemId = checkout.order.items[0]!.id;
+    const checkoutId = checkout.order.gatewayCheckoutId!;
+
+    setSandboxZenoCheckout({
+      id: checkoutId,
+      orderId,
+      priceCurrency: "USD",
+      priceAmount: (checkout.order.amountDueCents / 100).toFixed(2),
+      paidAmount: (checkout.order.amountDueCents / 100).toFixed(2),
+      status: "COMPLETED",
+      expiresAt: checkout.order.expiresAt,
+      checkoutUrl: checkout.checkoutUrl,
+      createdAt: checkout.order.createdAt,
+      successRedirectUrl: null,
+    });
+
+    const wh = await processVerifiedWebhookEvent({
+      gateway: "zenobank",
+      eventId: `checkout.completed:${checkoutId}`,
+      eventType: "checkout.completed",
+      orderId,
+      checkoutId,
+      priceCents: checkout.order.amountDueCents,
+      paidCents: checkout.order.amountDueCents,
+      status: "COMPLETED",
+      expiresAt: checkout.order.expiresAt,
+      rawPayload: {},
+    });
+    expect(wh.outcome).toBe("delivered_or_fulfilling");
+
+    const deliveredOrder = await repository.getOrderById(orderId);
+    expect(deliveredOrder?.fulfillments).toHaveLength(10);
+
+    // Even if a stray duplicate ciphertext row existed historically, revealOrderCodes deduplicates the vault output
+    await repository.insertFulfillmentRecord({
+      orderItemId: itemId,
+      orderId,
+      userId: CUSTOMER_SESSION.id,
+      source: "centralone",
+      codeInventoryId: null,
+      codeCiphertext: encryptCode(TWELVE_CODES[0]!),
+      codeLast4: TWELVE_CODES[0]!.slice(-4),
+      supplierTxId: "fazer:ord-excess-12",
+    });
+
+    const revealed = await repository.revealOrderCodes({
+      orderId,
+      actorUserId: CUSTOMER_SESSION.id,
+    });
+    expect(revealed).toHaveLength(10);
+    expect(new Set(revealed.map((c) => c.code)).size).toBe(10);
   });
 });

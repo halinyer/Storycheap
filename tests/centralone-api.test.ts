@@ -13,6 +13,7 @@ const mockRepo = vi.hoisted(() => ({
   updateSupplierOrderState: vi.fn(),
   updateOrderItemUnitCostCents: vi.fn(),
   insertFulfillmentRecord: vi.fn(),
+  countFulfillmentsForOrderItem: vi.fn().mockResolvedValue(0),
   markOrderItemProgress: vi.fn(),
   transitionOrderStatus: vi.fn(),
   markOrderAttentionFlag: vi.fn(),
@@ -78,6 +79,7 @@ describe("Central One API v1 compliance", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockRepo.countFulfillmentsForOrderItem.mockResolvedValue(0);
   });
 
   afterEach(() => {

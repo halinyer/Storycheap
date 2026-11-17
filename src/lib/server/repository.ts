@@ -2359,11 +2359,42 @@ export async function insertFulfillmentRecord(params: {
   return data.id as string;
 }
 
+export async function countFulfillmentsForOrderItem(
+  orderItemId: string
+): Promise<number> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    return getSandboxState().fulfillments.filter(
+      (f) => f.orderItemId === orderItemId
+    ).length;
+  }
+  const { count, error } = await ctx.admin
+    .from("fulfillments")
+    .select("id", { count: "exact", head: true })
+    .eq("order_item_id", orderItemId);
+  if (error) throw error;
+  return count ?? 0;
+}
+
 export async function listFulfillmentsForUser(
   userId: string
 ): Promise<FulfillmentSummaryDTO[]> {
   const orders = await listOrdersForUser(userId);
   return orders.flatMap((o) => o.fulfillments);
+}
+
+function deduplicateRevealedEntries(
+  entries: Array<{ orderItemId: string; dto: RevealedCodeDTO }>
+): RevealedCodeDTO[] {
+  const seen = new Set<string>();
+  const unique: RevealedCodeDTO[] = [];
+  for (const entry of entries) {
+    const key = `${entry.orderItemId}:${entry.dto.code.trim()}:${entry.dto.pin?.trim() ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(entry.dto);
+  }
+  return unique;
 }
 
 /**
@@ -2390,19 +2421,24 @@ export async function revealOrderCodes(params: {
     const rows = getSandboxState().fulfillments.filter(
       (f) => f.orderId === params.orderId
     );
-    const revealed: RevealedCodeDTO[] = rows.map((f) => {
-      if (!f.revealedAt) f.revealedAt = now;
-      const it = itemMeta.get(f.orderItemId);
-      return {
-        fulfillmentId: f.id,
-        productName: it?.productName ?? "Gift Card",
-        denominationLabel: it?.denominationLabel ?? "",
-        region: it?.region ?? "USA",
-        code: decryptCode(f.codeCiphertext),
-        pin: f.pinCiphertext ? decryptCode(f.pinCiphertext) : null,
-        revealedAt: f.revealedAt,
-      };
-    });
+    const revealed = deduplicateRevealedEntries(
+      rows.map((f) => {
+        if (!f.revealedAt) f.revealedAt = now;
+        const it = itemMeta.get(f.orderItemId);
+        return {
+          orderItemId: f.orderItemId,
+          dto: {
+            fulfillmentId: f.id,
+            productName: it?.productName ?? "Gift Card",
+            denominationLabel: it?.denominationLabel ?? "",
+            region: it?.region ?? "USA",
+            code: decryptCode(f.codeCiphertext),
+            pin: f.pinCiphertext ? decryptCode(f.pinCiphertext) : null,
+            revealedAt: f.revealedAt,
+          },
+        };
+      })
+    );
 
     await appendAuditLog({
       actorId: params.actorUserId,
@@ -2432,18 +2468,23 @@ export async function revealOrderCodes(params: {
       .in("id", unrevealedIds);
   }
 
-  const revealed: RevealedCodeDTO[] = (rows ?? []).map((r) => {
-    const it = itemMeta.get(r.order_item_id);
-    return {
-      fulfillmentId: r.id,
-      productName: it?.productName ?? "Gift Card",
-      denominationLabel: it?.denominationLabel ?? "",
-      region: it?.region ?? "USA",
-      code: decryptCode(r.code_ciphertext),
-      pin: r.pin_ciphertext ? decryptCode(r.pin_ciphertext) : null,
-      revealedAt: r.revealed_at ?? now,
-    };
-  });
+  const revealed = deduplicateRevealedEntries(
+    (rows ?? []).map((r) => {
+      const it = itemMeta.get(r.order_item_id);
+      return {
+        orderItemId: r.order_item_id,
+        dto: {
+          fulfillmentId: r.id,
+          productName: it?.productName ?? "Gift Card",
+          denominationLabel: it?.denominationLabel ?? "",
+          region: it?.region ?? "USA",
+          code: decryptCode(r.code_ciphertext),
+          pin: r.pin_ciphertext ? decryptCode(r.pin_ciphertext) : null,
+          revealedAt: r.revealed_at ?? now,
+        },
+      };
+    })
+  );
 
   await appendAuditLog({
     actorId: params.actorUserId,
