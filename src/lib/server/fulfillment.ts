@@ -1,4 +1,5 @@
 import "server-only";
+import crypto from "crypto";
 import type { OrderDTO, ProductVariantDTO, SessionUser } from "@/types";
 import { encryptCode, extractLast4 } from "./crypto";
 import { sendCreditAdjustmentEmail, sendOrderReadyEmail } from "./email";
@@ -147,6 +148,64 @@ async function syncActualBilledVariantCost(
   }
 }
 
+async function insertSupplierCodeIdempotently(params: {
+  orderId: string;
+  orderItemId: string;
+  userId: string | null;
+  source: "reloadly" | "centralone";
+  supplierTxId: string | null;
+  codePlaintext: string;
+  pinPlaintext?: string | null;
+}): Promise<boolean> {
+  const codeHash = crypto
+    .createHash("sha256")
+    .update(params.codePlaintext.trim(), "utf8")
+    .digest("hex");
+  const lockResult = await recordWebhookEventOnce({
+    gateway: "supplier_code_lock",
+    eventId: `${params.orderItemId}:${codeHash}`,
+    eventType: "supplier.code_lock",
+    orderId: params.orderId,
+    gatewayCheckoutId: params.supplierTxId,
+    signatureValid: true,
+    payload: {
+      source: params.source,
+      last4: extractLast4(params.codePlaintext),
+      supplierTxId: params.supplierTxId,
+    },
+  });
+  if (lockResult?.isDuplicate) {
+    return false;
+  }
+
+  try {
+    await insertFulfillmentRecord({
+      orderItemId: params.orderItemId,
+      orderId: params.orderId,
+      userId: params.userId,
+      source: params.source,
+      codeInventoryId: null,
+      codeCiphertext: encryptCode(params.codePlaintext),
+      codeLast4: extractLast4(params.codePlaintext),
+      pinCiphertext: params.pinPlaintext ? encryptCode(params.pinPlaintext) : null,
+      supplierTxId: params.supplierTxId,
+    });
+    if (lockResult?.recordId) {
+      await updateWebhookEventStatus(lockResult.recordId, "processed");
+    }
+    return true;
+  } catch (err) {
+    if (lockResult?.recordId) {
+      await updateWebhookEventStatus(
+        lockResult.recordId,
+        "failed",
+        err instanceof Error ? err.message : "Failed inserting supplier fulfillment"
+      );
+    }
+    throw err;
+  }
+}
+
 /**
  * Delivers all items of a PAID/PARTIAL/MANUAL_REVIEW order using pre-reserved
  * manual codes first, unreserved manual inventory second, and Reloadly only if enabled.
@@ -277,21 +336,19 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
             customIdentifier: `${item.id}-${delivered + 1}`,
             recipientEmail: order.email,
           });
-          await insertFulfillmentRecord({
+          const inserted = await insertSupplierCodeIdempotently({
             orderItemId: item.id,
             orderId: order.id,
             userId: order.userId,
             source: "reloadly",
-            codeInventoryId: null,
-            codeCiphertext: encryptCode(deliveredCode.codePlaintext),
-            codeLast4: extractLast4(deliveredCode.codePlaintext),
-            pinCiphertext: deliveredCode.pinPlaintext
-              ? encryptCode(deliveredCode.pinPlaintext)
-              : null,
             supplierTxId: deliveredCode.supplierTxId ?? null,
+            codePlaintext: deliveredCode.codePlaintext,
+            pinPlaintext: deliveredCode.pinPlaintext,
           });
-          delivered += 1;
-          anyFulfilledNowOrBefore = true;
+          if (inserted) {
+            delivered += 1;
+            anyFulfilledNowOrBefore = true;
+          }
         } catch (err) {
           attentionReasons.push(
             `Reloadly falló para ${item.productName}: ${err instanceof Error ? err.message : "Error desconocido"}`
@@ -356,6 +413,40 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
               ? "failed"
               : "processing";
 
+          if (fzOrder.unitCostCents > 0) {
+            await updateOrderItemUnitCostCents(item.id, fzOrder.unitCostCents);
+            await syncActualBilledVariantCost(variantMeta, fzOrder.unitCostCents);
+          }
+          invalidateFazerCardsBalanceCache();
+
+          if (fzOrder.codes.length > 0) {
+            let skippedDuplicate = false;
+            for (const codeText of fzOrder.codes.slice(0, item.quantity)) {
+              const inserted = await insertSupplierCodeIdempotently({
+                orderItemId: item.id,
+                orderId: order.id,
+                userId: order.userId,
+                source: "centralone",
+                supplierTxId: fzOrder.externalOrderId,
+                codePlaintext: codeText,
+              });
+              if (inserted) {
+                delivered += 1;
+                anyFulfilledNowOrBefore = true;
+              } else {
+                skippedDuplicate = true;
+              }
+            }
+            if (skippedDuplicate) {
+              const freshOrder = await getOrderById(order.id);
+              const freshCount =
+                freshOrder?.fulfillments.filter((f) => f.orderItemId === item.id)
+                  .length ?? delivered;
+              delivered = Math.min(item.quantity, Math.max(delivered, freshCount));
+              if (delivered > 0) anyFulfilledNowOrBefore = true;
+            }
+          }
+
           await upsertSupplierOrder({
             orderId: order.id,
             orderItemId: item.id,
@@ -365,40 +456,10 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
             referenceCode: fzOrder.rawOrderId,
             status: fzStatusNormalized,
             expectedQty: remaining,
-            deliveredCount: fzOrder.codes.length,
+            deliveredCount: Math.min(remaining, Math.max(fzOrder.codes.length, delivered)),
             supplierUnitCostCents: fzOrder.unitCostCents,
             rawPayload: fzOrder.rawResponse,
           });
-          if (fzOrder.unitCostCents > 0) {
-            await updateOrderItemUnitCostCents(item.id, fzOrder.unitCostCents);
-            await syncActualBilledVariantCost(variantMeta, fzOrder.unitCostCents);
-          }
-          invalidateFazerCardsBalanceCache();
-
-          if (fzOrder.codes.length > 0) {
-            const existingCount = order.fulfillments.filter(
-              (f) => f.orderItemId === item.id && f.source === "centralone"
-            ).length;
-            const unseenCodes = fzOrder.codes.slice(
-              existingCount,
-              existingCount + remaining
-            );
-            for (const codeText of unseenCodes) {
-              await insertFulfillmentRecord({
-                orderItemId: item.id,
-                orderId: order.id,
-                userId: order.userId,
-                source: "centralone",
-                codeInventoryId: null,
-                codeCiphertext: encryptCode(codeText),
-                codeLast4: extractLast4(codeText),
-                pinCiphertext: null,
-                supplierTxId: fzOrder.externalOrderId,
-              });
-              delivered += 1;
-              anyFulfilledNowOrBefore = true;
-            }
-          }
 
           if (delivered < item.quantity && fzOrder.status === "PENDING") {
             itemPendingAsync = true;
@@ -486,24 +547,31 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
                 hasPendingAsyncSupplier = true;
               }
             } else {
-              const unseenCodes = codesRes.codes.slice(
-                existingC1Count,
-                existingC1Count + remaining
-              );
-              for (const c of unseenCodes) {
-                await insertFulfillmentRecord({
+              let skippedDuplicate = false;
+              for (const c of codesRes.codes.slice(0, item.quantity)) {
+                const inserted = await insertSupplierCodeIdempotently({
                   orderItemId: item.id,
                   orderId: order.id,
                   userId: order.userId,
                   source: "centralone",
-                  codeInventoryId: null,
-                  codeCiphertext: encryptCode(c.codePlaintext),
-                  codeLast4: extractLast4(c.codePlaintext),
-                  pinCiphertext: c.pinPlaintext ? encryptCode(c.pinPlaintext) : null,
                   supplierTxId: c1Order.externalOrderId,
+                  codePlaintext: c.codePlaintext,
+                  pinPlaintext: c.pinPlaintext,
                 });
-                delivered += 1;
-                anyFulfilledNowOrBefore = true;
+                if (inserted) {
+                  delivered += 1;
+                  anyFulfilledNowOrBefore = true;
+                } else {
+                  skippedDuplicate = true;
+                }
+              }
+              if (skippedDuplicate) {
+                const freshOrder = await getOrderById(order.id);
+                const freshCount =
+                  freshOrder?.fulfillments.filter((f) => f.orderItemId === item.id)
+                    .length ?? delivered;
+                delivered = Math.min(item.quantity, Math.max(delivered, freshCount));
+                if (delivered > 0) anyFulfilledNowOrBefore = true;
               }
 
               if (delivered < item.quantity) {
@@ -560,20 +628,22 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
   }
 
   if (allItemsFulfilled) {
-    await transitionOrderStatus({
+    const movedToDelivered = await transitionOrderStatus({
       orderId: order.id,
       expectedStatuses: ["FULFILLING"],
       nextStatus: "DELIVERED",
       needsAttention: false,
       attentionReason: null,
     });
-    const totalDelivered = order.items.reduce((acc, it) => acc + it.quantity, 0);
-    await sendOrderReadyEmail({
-      to: order.email,
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      itemCount: totalDelivered,
-    }).catch(() => {});
+    if (movedToDelivered) {
+      const totalDelivered = order.items.reduce((acc, it) => acc + it.quantity, 0);
+      await sendOrderReadyEmail({
+        to: order.email,
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        itemCount: totalDelivered,
+      }).catch(() => {});
+    }
   } else if (hasPendingAsyncSupplier && attentionReasons.length === 0) {
     await appendAuditLog({
       actorId: null,
@@ -1508,6 +1578,7 @@ export async function syncCentralOneOrderProgress(
   ).length;
 
   let addedCodes = 0;
+  let skippedDuplicate = false;
   const shouldFetchCodes =
     existingCount < targetItem.quantity &&
     (isCentralOneReadyStatus(live.status) || live.deliveredCount > existingCount);
@@ -1524,37 +1595,42 @@ export async function syncCentralOneOrderProgress(
       : await fetchCentralOneCodesSafe(externalOrderId);
 
     if (codesRes.ready) {
-      const pendingCodes = codesRes.codes.slice(
-        existingCount,
-        targetItem.quantity
-      );
-      for (const c of pendingCodes) {
-        await insertFulfillmentRecord({
+      for (const c of codesRes.codes.slice(0, targetItem.quantity)) {
+        const inserted = await insertSupplierCodeIdempotently({
           orderItemId: targetItem.id,
           orderId: order.id,
           userId: order.userId,
           source: "centralone",
-          codeInventoryId: null,
-          codeCiphertext: encryptCode(c.codePlaintext),
-          codeLast4: extractLast4(c.codePlaintext),
-          pinCiphertext: c.pinPlaintext ? encryptCode(c.pinPlaintext) : null,
           supplierTxId: externalOrderId,
+          codePlaintext: c.codePlaintext,
+          pinPlaintext: c.pinPlaintext,
         });
-        addedCodes += 1;
+        if (inserted) {
+          addedCodes += 1;
+        } else {
+          skippedDuplicate = true;
+        }
       }
     }
   }
 
-  const totalCentralOneForItem = existingCount + addedCodes;
+  let actualItemFulfillments = existingCount + addedCodes;
+  if (skippedDuplicate) {
+    const afterCodesOrder = await getOrderById(order.id);
+    actualItemFulfillments =
+      afterCodesOrder?.fulfillments.filter((f) => f.orderItemId === targetItem.id)
+        .length ?? actualItemFulfillments;
+  }
+  const totalCentralOneForItem = Math.min(targetItem.quantity, actualItemFulfillments);
   const newDeliveredForItem = Math.min(
     targetItem.quantity,
-    Math.max(targetItem.deliveredCount + addedCodes, totalCentralOneForItem)
+    Math.max(targetItem.deliveredCount, totalCentralOneForItem)
   );
 
   const resolvedUnitCost = live.unitCostCents ?? supplierOrder.supplierUnitCostCents;
   await updateSupplierOrderState(supplierOrder.id, {
     status: live.status,
-    deliveredCount: Math.max(live.deliveredCount, totalCentralOneForItem),
+    deliveredCount: Math.min(targetItem.quantity, Math.max(live.deliveredCount, totalCentralOneForItem)),
     supplierUnitCostCents: resolvedUnitCost,
     lastSequence:
       typeof sequenceHint === "number" && sequenceHint > supplierOrder.lastSequence
@@ -1619,19 +1695,21 @@ export async function syncCentralOneOrderProgress(
     refreshed.items.every((it) => it.deliveredCount >= it.quantity) &&
     refreshed.status !== "DELIVERED"
   ) {
-    await transitionOrderStatus({
+    const movedToDelivered = await transitionOrderStatus({
       orderId: order.id,
       expectedStatuses: ["FULFILLING", "PARTIAL", "MANUAL_REVIEW"],
       nextStatus: "DELIVERED",
       needsAttention: false,
       attentionReason: null,
     });
-    await sendOrderReadyEmail({
-      to: order.email,
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      itemCount: refreshed.items.reduce((acc, it) => acc + it.quantity, 0),
-    }).catch(() => {});
+    if (movedToDelivered) {
+      await sendOrderReadyEmail({
+        to: order.email,
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        itemCount: refreshed.items.reduce((acc, it) => acc + it.quantity, 0),
+      }).catch(() => {});
+    }
   }
 
   return { ok: true, status: live.status, addedCodes };
