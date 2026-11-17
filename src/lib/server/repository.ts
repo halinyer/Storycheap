@@ -3538,8 +3538,8 @@ const SUPPORT_TICKETS_FALLBACK_KEY = "support_tickets_fallback";
 export const DEFAULT_SUPPORT_SETTINGS: SupportSettingsDTO = {
   supportEmail: "soporte@storycheap.com",
   adminNotifyEmail: null,
-  whatsappEnabled: false,
-  whatsappNumber: "",
+  whatsappEnabled: true,
+  whatsappNumber: "+584142145528",
   supportHours: "Todos los días · 9:00 AM – 10:00 PM (VEN)",
   floatingWidgetEnabled: true,
   welcomeMessage:
