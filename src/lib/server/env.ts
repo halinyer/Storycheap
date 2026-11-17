@@ -116,3 +116,26 @@ export function getCodeEncryptionKeyRaw(): string {
 export function getCronSecret(): string | null {
   return process.env.CRON_SECRET?.trim() || null;
 }
+
+export function isBinancePayConfigured(): boolean {
+  return Boolean(
+    process.env.BINANCE_API_KEY?.trim() &&
+      process.env.BINANCE_API_SECRET?.trim()
+  );
+}
+
+export function getBinancePayCredentials(): {
+  apiKey: string;
+  apiSecret: string;
+  baseUrl: string;
+} | null {
+  const apiKey = process.env.BINANCE_API_KEY?.trim();
+  const apiSecret = process.env.BINANCE_API_SECRET?.trim();
+  if (!apiKey || !apiSecret) return null;
+  const configured = process.env.BINANCE_API_BASE_URL?.trim();
+  return {
+    apiKey,
+    apiSecret,
+    baseUrl: (configured || "https://api.binance.com").replace(/\/+$/, ""),
+  };
+}

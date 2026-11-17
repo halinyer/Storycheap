@@ -14,7 +14,9 @@ import { sendSupportTicketReplyEmail } from "@/lib/server/email";
 import {
   adminRecordManualZenoPayment,
   adminRefundOrderToCredit,
+  applyVerifiedBinancePayTxToOrder,
   fulfillOrder,
+  listRecentBinancePayCandidatesForOrder,
   reconcileGatewaySession,
   syncAllPendingSupplierOrders,
   syncSupplierOrdersForOrder,
@@ -350,6 +352,48 @@ export async function recordManualZenoPaymentAdminAction(input: {
   revalidatePath("/account");
 
   return res;
+}
+
+export async function listBinancePayCandidatesAdminAction(orderId: string) {
+  await requireAdminUser();
+  const parsedOrderId = z.string().uuid().parse(orderId);
+  return listRecentBinancePayCandidatesForOrder(parsedOrderId);
+}
+
+export async function applyBinancePayTxAdminAction(input: {
+  orderId: string;
+  transactionId: string;
+}) {
+  const adminUser = await requireAdminUser();
+  const parsedOrderId = z.string().uuid().parse(input.orderId);
+  const cleanTx = input.transactionId.trim();
+  if (cleanTx.length < 6) {
+    throw new Error("ID de transacción Binance Pay inválido.");
+  }
+
+  const res = await applyVerifiedBinancePayTxToOrder({
+    orderId: parsedOrderId,
+    transactionId: cleanTx,
+    actorUser: adminUser,
+    source: "admin_tx_verify",
+  });
+
+  revalidatePath("/admin");
+  revalidatePath("/admin/orders");
+  revalidatePath(`/admin/orders/${parsedOrderId}`);
+  revalidatePath(`/order/${parsedOrderId}`);
+  revalidatePath("/admin/customers");
+  revalidatePath("/account");
+  revalidatePath("/admin/treasury");
+
+  return {
+    mode: res.mode,
+    receivedCents: res.receivedCents,
+    missingCents: res.missingCents,
+    surplusCents: res.surplusCents,
+    nextStatus: res.nextStatus,
+    transactionId: res.tx.transactionId,
+  };
 }
 
 export async function updateVariantAdminAction(input: {

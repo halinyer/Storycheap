@@ -3,6 +3,8 @@
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  applyBinancePayTxAdminAction,
+  listBinancePayCandidatesAdminAction,
   recordManualZenoPaymentAdminAction,
   refundOrderToCreditAction,
   resolveOrderAttentionAction,
@@ -40,6 +42,17 @@ export function OrderDetailActions({
   const [noteInput, setNoteInput] = useState(testNote ?? "");
   const [manualUsd, setManualUsd] = useState("");
   const [manualTx, setManualTx] = useState("");
+  const [binanceCandidates, setBinanceCandidates] = useState<
+    Array<{
+      transactionId: string;
+      amount: string;
+      currency: string;
+      usdCents: number;
+      createdAt: string;
+      payerName: string | null;
+      alreadyUsed: boolean;
+    }> | null
+  >(null);
 
   const canSyncZeno =
     paymentGateway === "zenobank" &&
@@ -217,6 +230,109 @@ export function OrderDetailActions({
               <CheckCircle2 className="w-3.5 h-3.5" />
               <span>Registrar pago manual</span>
             </button>
+          </div>
+
+          <div className="pt-2 space-y-2.5">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const res = await listBinancePayCandidatesAdminAction(orderId);
+                  setBinanceCandidates(res.deposits);
+                  if (res.deposits.length === 0) {
+                    toast.info(
+                      "No se encontraron depósitos USD en Binance Pay alrededor de esta orden.",
+                    );
+                  }
+                } catch (err) {
+                  toast.error(
+                    err instanceof Error
+                      ? err.message
+                      : "Error consultando Binance Pay",
+                  );
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/35 text-amber-200 font-bold text-xs disabled:opacity-40"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${busy ? "animate-spin" : ""}`} />
+              <span>Buscar depósitos en Binance Pay</span>
+            </button>
+
+            {binanceCandidates && binanceCandidates.length > 0 && (
+              <div className="rounded-2xl bg-slate-950/70 border border-white/10 p-3 space-y-2">
+                <div className="text-[11px] font-bold text-slate-300">
+                  Depósitos USD detectados en Binance Pay (desde creación de la orden):
+                </div>
+                {binanceCandidates.map((tx) => (
+                  <div
+                    key={tx.transactionId}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2 text-xs"
+                  >
+                    <div className="space-y-0.5">
+                      <div className="font-black text-white">
+                        +{tx.amount} {tx.currency} ({formatCents(tx.usdCents)} USD)
+                        {tx.payerName ? ` · De: ${tx.payerName}` : ""}
+                      </div>
+                      <div className="font-mono text-[11px] text-slate-400">
+                        TX: {tx.transactionId} ·{" "}
+                        {new Date(tx.createdAt).toLocaleString("es-VE")}
+                      </div>
+                    </div>
+                    {tx.alreadyUsed ? (
+                      <span className="px-2.5 py-1 rounded-lg bg-white/[0.06] text-slate-400 text-[10px] font-bold uppercase">
+                        Ya usada
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={async () => {
+                          setBusy(true);
+                          try {
+                            const res = await applyBinancePayTxAdminAction({
+                              orderId,
+                              transactionId: tx.transactionId,
+                            });
+                            setBinanceCandidates(null);
+                            router.refresh();
+                            if (res.mode === "fulfilled") {
+                              toast.success(
+                                res.surplusCents > 0
+                                  ? `TX aplicada (${formatCents(res.receivedCents)} USD). Excedente acreditado: ${formatCents(res.surplusCents)} USD. Estado: ${res.nextStatus}`
+                                  : `TX aplicada (${formatCents(res.receivedCents)} USD). Estado: ${res.nextStatus}`,
+                              );
+                            } else if (res.mode === "partial_pending") {
+                              toast.warning(
+                                `Abono aplicado (${formatCents(res.receivedCents)} USD). Falta: ${formatCents(res.missingCents)} USD.`,
+                              );
+                            } else {
+                              toast.success(
+                                `Orden expirada: acreditados ${formatCents(res.receivedCents)} USD al saldo.`,
+                              );
+                            }
+                          } catch (err) {
+                            toast.error(
+                              err instanceof Error
+                                ? err.message
+                                : "Error aplicando transacción",
+                            );
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-black text-[11px]"
+                      >
+                        Aplicar TX
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

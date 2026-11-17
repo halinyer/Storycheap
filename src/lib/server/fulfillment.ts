@@ -7,6 +7,11 @@ import {
   getOrderPagoMovilReport,
 } from "./pagomovil-store";
 import { getPaymentGateway } from "./payments";
+import {
+  fetchBinancePayIncomingTransactions,
+  findBinancePayTransactionForOrder,
+  type BinancePayIncomingTx,
+} from "./payments/binance-pay";
 import type {
   GatewayCheckoutSession,
   NormalizedPaymentWebhookEvent,
@@ -22,6 +27,7 @@ import {
   batchSaveVariantPricingMeta,
   commitReservedCodesForOrder,
   ensureCustomerProfile,
+  findConsumedBinancePayTxIds,
   getOrderByGatewayCheckoutId,
   getOrderById,
   getProviderConfig,
@@ -30,6 +36,7 @@ import {
   getUserCreditBalanceCents,
   getVariantPricingMetaMap,
   getVariantsLookupByIds,
+  getZenoBinanceReceiver,
   insertFulfillmentRecord,
   listPendingSupplierOrders,
   listPendingSupplierOrdersForOrder,
@@ -999,6 +1006,175 @@ export async function adminRefundOrderToCredit(params: {
   });
 }
 
+async function applyZenoUsdReceiptToOrder(params: {
+  order: OrderDTO;
+  totalPaidCents: number;
+  txTag: string | null;
+  cleanTx: string | null;
+  actorUser: SessionUser | null;
+  auditActionPrefix: string;
+  forceCreditIfExpiredOlderThan24h?: boolean;
+}): Promise<{
+  mode: "fulfilled" | "partial_pending" | "partial_credited";
+  receivedCents: number;
+  missingCents: number;
+  surplusCents: number;
+  nextStatus: OrderDTO["status"];
+  order: OrderDTO;
+}> {
+  const { order, totalPaidCents, txTag, cleanTx, actorUser, auditActionPrefix } = params;
+  const txSuffix = txTag ? ` · ${txTag}` : "";
+
+  const expiredOlderThan24h =
+    Boolean(params.forceCreditIfExpiredOlderThan24h) &&
+    order.status === "EXPIRED" &&
+    Date.now() - Date.parse(order.createdAt) > 24 * 3600_000;
+
+  if (totalPaidCents < order.amountDueCents || expiredOlderThan24h) {
+    const missingCents = Math.max(0, order.amountDueCents - totalPaidCents);
+
+    if (order.status === "EXPIRED") {
+      await settleUnderpaymentToCredit({
+        order,
+        paidCents: totalPaidCents,
+        note: expiredOlderThan24h
+          ? `Pago Binance Pay recibido tras expiración (>24h) (${order.orderNumber})${txSuffix}`
+          : `Pago parcial Binance/ZenoBank conciliado (${order.orderNumber})${txSuffix}`,
+        needsAttention: false,
+        attentionReason: null,
+        txReference: txTag,
+      });
+      await appendAuditLog({
+        actorId: actorUser?.id ?? null,
+        actorRole: actorUser?.role ?? "customer",
+        action: `${auditActionPrefix}_credited`,
+        targetType: "order",
+        targetId: order.id,
+        metadata: {
+          receivedCents: totalPaidCents,
+          expectedCents: order.amountDueCents,
+          missingCents,
+          txReference: cleanTx,
+        },
+      });
+      const updated = (await getOrderById(order.id)) ?? order;
+      return {
+        mode: "partial_credited",
+        receivedCents: totalPaidCents,
+        missingCents,
+        surplusCents: 0,
+        nextStatus: updated.status,
+        order: updated,
+      };
+    }
+
+    if (totalPaidCents <= order.paidCents) {
+      throw new Error(
+        `El monto total (${(totalPaidCents / 100).toFixed(2)} USD) debe superar los ${(order.paidCents / 100).toFixed(2)} USD ya registrados.`
+      );
+    }
+
+    await updateOrderPartialPaymentCents(order.id, totalPaidCents);
+    await appendAuditLog({
+      actorId: actorUser?.id ?? null,
+      actorRole: actorUser?.role ?? "customer",
+      action: `${auditActionPrefix}_partial`,
+      targetType: "order",
+      targetId: order.id,
+      metadata: {
+        receivedCents: totalPaidCents,
+        expectedCents: order.amountDueCents,
+        missingCents,
+        txReference: cleanTx,
+      },
+    });
+    const updated = (await getOrderById(order.id)) ?? order;
+    return {
+      mode: "partial_pending",
+      receivedCents: totalPaidCents,
+      missingCents,
+      surplusCents: 0,
+      nextStatus: updated.status,
+      order: updated,
+    };
+  }
+
+  let transitioned = false;
+  if (order.status === "PENDING_PAYMENT" || order.status === "CREATED") {
+    transitioned = await transitionOrderStatus({
+      orderId: order.id,
+      expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
+      nextStatus: "PAID",
+      paidCents: totalPaidCents,
+      needsAttention: false,
+      attentionReason: null,
+    });
+  } else if (order.status === "EXPIRED") {
+    transitioned = await transitionOrderStatus({
+      orderId: order.id,
+      expectedStatuses: ["EXPIRED"],
+      nextStatus: "MANUAL_REVIEW",
+      paidCents: totalPaidCents,
+      needsAttention: false,
+      attentionReason: null,
+    });
+  } else if (order.status === "MANUAL_REVIEW") {
+    await setOrderPaidCentsForManualReview(order.id, totalPaidCents);
+    await markOrderAttentionFlag(order.id, false, null);
+    transitioned = true;
+  }
+
+  if (!transitioned) {
+    throw new Error(
+      "No se pudo procesar la orden (ya fue atendida o cambió de estado)."
+    );
+  }
+
+  const surplusCents = totalPaidCents - order.amountDueCents;
+  if (surplusCents > 0) {
+    const userId = order.userId ?? (await ensureCustomerProfile(order.email));
+    await appendCreditLedgerEntry({
+      userId,
+      orderId: order.id,
+      deltaCents: surplusCents,
+      reason: "overpayment",
+      note: `Excedente pagado en orden ${order.orderNumber}${txSuffix}`,
+      createdBy: actorUser?.id ?? null,
+    });
+    await sendCreditAdjustmentEmail({
+      to: order.email,
+      orderNumber: order.orderNumber,
+      amountCents: surplusCents,
+      reasonText: "Excedente verificado en tu pago cripto / Binance Pay",
+      txReference: txTag,
+    }).catch(() => {});
+  }
+
+  await appendAuditLog({
+    actorId: actorUser?.id ?? null,
+    actorRole: actorUser?.role ?? "customer",
+    action: `${auditActionPrefix}_confirm`,
+    targetType: "order",
+    targetId: order.id,
+    metadata: {
+      receivedCents: totalPaidCents,
+      expectedCents: order.amountDueCents,
+      surplusCents,
+      txReference: cleanTx,
+    },
+  });
+
+  const fulfilled = await fulfillOrder(order.id);
+  return {
+    mode: "fulfilled",
+    receivedCents: totalPaidCents,
+    missingCents: 0,
+    surplusCents,
+    nextStatus: fulfilled.status,
+    order: fulfilled,
+  };
+}
+
 export async function adminRecordManualZenoPayment(params: {
   orderId: string;
   receivedCents: number;
@@ -1032,146 +1208,196 @@ export async function adminRecordManualZenoPayment(params: {
 
   const cleanTx = params.txReference?.trim() || null;
   const txTag = cleanTx ? `TX ${cleanTx}` : null;
-  const txSuffix = txTag ? ` · ${txTag}` : "";
+  const result = await applyZenoUsdReceiptToOrder({
+    order,
+    totalPaidCents: params.receivedCents,
+    txTag,
+    cleanTx,
+    actorUser: params.adminUser,
+    auditActionPrefix: "order.admin_manual_zeno",
+  });
 
-  if (params.receivedCents < order.amountDueCents) {
-    const missingCents = order.amountDueCents - params.receivedCents;
+  return {
+    mode: result.mode,
+    receivedCents: result.receivedCents,
+    missingCents: result.missingCents,
+    surplusCents: result.surplusCents,
+    nextStatus: result.nextStatus,
+  };
+}
 
-    if (order.status === "EXPIRED") {
-      await settleUnderpaymentToCredit({
-        order,
-        paidCents: params.receivedCents,
-        note: `Pago parcial Binance/ZenoBank conciliado manualmente (${order.orderNumber})${txSuffix}`,
-        needsAttention: false,
-        attentionReason: null,
-        txReference: txTag,
-      });
-      await appendAuditLog({
-        actorId: params.adminUser.id,
-        actorRole: params.adminUser.role,
-        action: "order.admin_manual_zeno_partial_credited",
-        targetType: "order",
-        targetId: order.id,
-        metadata: {
-          receivedCents: params.receivedCents,
-          expectedCents: order.amountDueCents,
-          missingCents,
-          txReference: cleanTx,
-        },
-      });
-      const updated = (await getOrderById(order.id)) ?? order;
-      return {
-        mode: "partial_credited",
-        receivedCents: params.receivedCents,
-        missingCents,
-        surplusCents: 0,
-        nextStatus: updated.status,
-      };
-    }
-
-    if (params.receivedCents <= order.paidCents) {
-      throw new Error(
-        `El monto ingresado debe superar los ${(order.paidCents / 100).toFixed(2)} USD ya registrados.`
-      );
-    }
-
-    await updateOrderPartialPaymentCents(order.id, params.receivedCents);
-    await appendAuditLog({
-      actorId: params.adminUser.id,
-      actorRole: params.adminUser.role,
-      action: "order.admin_manual_zeno_partial",
-      targetType: "order",
-      targetId: order.id,
-      metadata: {
-        receivedCents: params.receivedCents,
-        expectedCents: order.amountDueCents,
-        missingCents,
-        txReference: cleanTx,
-      },
-    });
-    const updated = (await getOrderById(order.id)) ?? order;
-    return {
-      mode: "partial_pending",
-      receivedCents: params.receivedCents,
-      missingCents,
-      surplusCents: 0,
-      nextStatus: updated.status,
-    };
+export class BinancePayVerifyError extends Error {
+  readonly status: number;
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = "BinancePayVerifyError";
+    this.status = status;
   }
+}
 
-  let transitioned = false;
-  if (order.status === "PENDING_PAYMENT" || order.status === "CREATED") {
-    transitioned = await transitionOrderStatus({
-      orderId: order.id,
-      expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
-      nextStatus: "PAID",
-      paidCents: params.receivedCents,
-      needsAttention: false,
-      attentionReason: null,
-    });
-  } else if (order.status === "EXPIRED") {
-    transitioned = await transitionOrderStatus({
-      orderId: order.id,
-      expectedStatuses: ["EXPIRED"],
-      nextStatus: "MANUAL_REVIEW",
-      paidCents: params.receivedCents,
-      needsAttention: false,
-      attentionReason: null,
-    });
-  } else if (order.status === "MANUAL_REVIEW") {
-    await setOrderPaidCentsForManualReview(order.id, params.receivedCents);
-    await markOrderAttentionFlag(order.id, false, null);
-    transitioned = true;
+async function resolveConfiguredBinanceReceiverNumericId(): Promise<string | null> {
+  const rec = await getZenoBinanceReceiver().catch(() => null);
+  const acc = rec?.binanceAccount?.trim() ?? "";
+  return /^\d{5,20}$/.test(acc) ? acc : null;
+}
+
+export async function listRecentBinancePayCandidatesForOrder(orderId: string): Promise<{
+  receiverBinanceId: string | null;
+  deposits: Array<BinancePayIncomingTx & { alreadyUsed: boolean }>;
+}> {
+  const order = await getOrderById(orderId);
+  if (!order) {
+    throw new BinancePayVerifyError("Orden no encontrada.", 404);
   }
-
-  if (!transitioned) {
-    throw new Error(
-      "No se pudo pasar la orden a PAID (ya fue procesada o cambió de estado)."
+  if (order.paymentGateway !== "zenobank") {
+    throw new BinancePayVerifyError(
+      "Esta orden no utiliza ZenoBank / Binance Pay.",
+      400
     );
   }
 
-  const surplusCents = params.receivedCents - order.amountDueCents;
-  if (surplusCents > 0) {
-    const userId = order.userId ?? (await ensureCustomerProfile(order.email));
-    await appendCreditLedgerEntry({
-      userId,
-      orderId: order.id,
-      deltaCents: surplusCents,
-      reason: "overpayment",
-      note: `Excedente pagado en orden ${order.orderNumber}${txSuffix}`,
-      createdBy: params.adminUser.id,
-    });
-    await sendCreditAdjustmentEmail({
-      to: order.email,
-      orderNumber: order.orderNumber,
-      amountCents: surplusCents,
-      reasonText: "Excedente verificado en tu pago cripto / Binance Pay",
-      txReference: txTag,
-    }).catch(() => {});
+  const receiverBinanceId = await resolveConfiguredBinanceReceiverNumericId();
+  const createdMs = Date.parse(order.createdAt);
+  const startTimeMs = Number.isFinite(createdMs)
+    ? createdMs - 10 * 60_000
+    : Date.now() - 24 * 3600_000;
+
+  const list = await fetchBinancePayIncomingTransactions({
+    startTimeMs,
+    limit: 30,
+    expectedReceiverBinanceId: receiverBinanceId,
+  });
+
+  const consumed = await findConsumedBinancePayTxIds(
+    list.map((tx) => tx.transactionId)
+  );
+
+  return {
+    receiverBinanceId,
+    deposits: list.map((tx) => ({
+      ...tx,
+      alreadyUsed: consumed.has(tx.transactionId.trim().toUpperCase()),
+    })),
+  };
+}
+
+export async function applyVerifiedBinancePayTxToOrder(params: {
+  orderId: string;
+  transactionId: string;
+  actorUser?: SessionUser | null;
+  source: "customer_tx_verify" | "admin_tx_verify";
+}) {
+  const order = await getOrderById(params.orderId);
+  if (!order) {
+    throw new BinancePayVerifyError("Orden no encontrada.", 404);
+  }
+  if (order.paymentGateway !== "zenobank") {
+    throw new BinancePayVerifyError(
+      "Esta orden no usa ZenoBank / Binance Pay.",
+      400
+    );
+  }
+  if (
+    order.status === "DELIVERED" ||
+    order.status === "REFUNDED_CREDIT" ||
+    order.status === "CANCELLED"
+  ) {
+    throw new BinancePayVerifyError(
+      `Esta orden ya está en estado ${order.status}.`,
+      409
+    );
   }
 
-  await appendAuditLog({
-    actorId: params.adminUser.id,
-    actorRole: params.adminUser.role,
-    action: "order.admin_manual_zeno_confirm",
-    targetType: "order",
-    targetId: order.id,
-    metadata: {
-      receivedCents: params.receivedCents,
-      expectedCents: order.amountDueCents,
-      surplusCents,
-      txReference: cleanTx,
+  const expectedReceiverBinanceId =
+    await resolveConfiguredBinanceReceiverNumericId();
+  const tx = await findBinancePayTransactionForOrder({
+    txId: params.transactionId,
+    orderCreatedAtIso: order.createdAt,
+    expectedReceiverBinanceId,
+  });
+
+  if (!tx) {
+    throw new BinancePayVerifyError(
+      "No encontramos un depósito entrante USD (USDT/USDC/FDUSD) en Binance Pay con ese ID para esta orden. Revisa el ID de transacción y que se haya enviado tras crear la orden.",
+      404
+    );
+  }
+
+  const consumed = await findConsumedBinancePayTxIds([tx.transactionId]);
+  if (consumed.has(tx.transactionId.trim().toUpperCase())) {
+    throw new BinancePayVerifyError(
+      `La transacción ${tx.transactionId} ya fue aplicada anteriormente.`,
+      409
+    );
+  }
+
+  const receiverInfo = await getZenoBinanceReceiver().catch(() => null);
+  const { isDuplicate, recordId } = await recordWebhookEventOnce({
+    gateway: "zenobank",
+    eventId: `binance_pay_tx:${tx.transactionId.trim().toUpperCase()}`,
+    eventType: "binance_pay.verified",
+    orderId: order.id,
+    gatewayCheckoutId: order.gatewayCheckoutId ?? order.id,
+    signatureValid: true,
+    payload: {
+      source: params.source,
+      data: {
+        id: order.gatewayCheckoutId ?? order.id,
+        transactions: [
+          {
+            uid: tx.orderId || tx.transactionId,
+            transactionId: tx.transactionId,
+            networkId: "BINANCE_PAY",
+            tokenId: `${tx.currency}_BINANCE_PAY`,
+            tokenAmount: tx.amount,
+            from: tx.counterpartyId,
+            fromLabel: tx.payerName,
+            to: tx.receiverBinanceId,
+            toLabel: receiverInfo?.label ?? null,
+            createdAt: tx.createdAt,
+          },
+        ],
+      },
     },
   });
 
-  const fulfilled = await fulfillOrder(order.id);
-  return {
-    mode: "fulfilled",
-    receivedCents: params.receivedCents,
-    missingCents: 0,
-    surplusCents,
-    nextStatus: fulfilled.status,
-  };
+  if (isDuplicate) {
+    throw new BinancePayVerifyError(
+      `La transacción ${tx.transactionId} ya fue aplicada.`,
+      409
+    );
+  }
+
+  const totalPaidCents = order.paidCents + tx.usdCents;
+  const txTag = `TX ${tx.transactionId} (${tx.amount} ${tx.currency} · BINANCE_PAY)`;
+
+  try {
+    const applied = await applyZenoUsdReceiptToOrder({
+      order,
+      totalPaidCents,
+      txTag,
+      cleanTx: tx.transactionId,
+      actorUser: params.actorUser ?? null,
+      auditActionPrefix:
+        params.source === "admin_tx_verify"
+          ? "order.admin_binance_pay"
+          : "order.customer_binance_pay",
+      forceCreditIfExpiredOlderThan24h: params.source === "customer_tx_verify",
+    });
+
+    await updateWebhookEventStatus(recordId, "processed");
+    return {
+      ...applied,
+      tx,
+    };
+  } catch (err) {
+    await updateWebhookEventStatus(
+      recordId,
+      "failed",
+      err instanceof Error ? err.message : "Failed applying Binance Pay TX"
+    );
+    throw err;
+  }
 }
 
 function isCentralOneReadyStatus(status: string): boolean {

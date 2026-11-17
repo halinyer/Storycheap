@@ -2858,6 +2858,67 @@ export async function getZenoPaymentProofForOrder(
   };
 }
 
+export async function findConsumedBinancePayTxIds(
+  txIds: string[]
+): Promise<Set<string>> {
+  const normalizedTargets = new Set(
+    txIds.map((id) => id.trim().toUpperCase()).filter(Boolean)
+  );
+  const consumed = new Set<string>();
+  if (normalizedTargets.size === 0) return consumed;
+
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    for (const w of getSandboxState().webhookEvents) {
+      if (w.gateway !== "zenobank" || w.status === "failed") continue;
+      if (w.eventId.startsWith("binance_pay_tx:")) {
+        const id = w.eventId.slice("binance_pay_tx:".length).trim().toUpperCase();
+        if (normalizedTargets.has(id)) consumed.add(id);
+      }
+      for (const t of extractZenoTransactionsFromPayload(w.payload)) {
+        const up = t.transactionId.trim().toUpperCase();
+        if (normalizedTargets.has(up)) consumed.add(up);
+      }
+    }
+    return consumed;
+  }
+
+  const targetEventIds = Array.from(normalizedTargets).map(
+    (id) => `binance_pay_tx:${id}`
+  );
+  const [directRes, recentRes] = await Promise.all([
+    ctx.admin
+      .from("webhook_events")
+      .select("event_id, status")
+      .eq("gateway", "zenobank")
+      .in("event_id", targetEventIds)
+      .neq("status", "failed"),
+    ctx.admin
+      .from("webhook_events")
+      .select("payload, status")
+      .eq("gateway", "zenobank")
+      .eq("status", "processed")
+      .order("processed_at", { ascending: false })
+      .limit(250),
+  ]);
+
+  for (const row of directRes.data ?? []) {
+    const eid = String(row.event_id ?? "");
+    if (eid.startsWith("binance_pay_tx:")) {
+      const id = eid.slice("binance_pay_tx:".length).trim().toUpperCase();
+      if (normalizedTargets.has(id)) consumed.add(id);
+    }
+  }
+  for (const row of recentRes.data ?? []) {
+    for (const t of extractZenoTransactionsFromPayload(row.payload)) {
+      const up = t.transactionId.trim().toUpperCase();
+      if (normalizedTargets.has(up)) consumed.add(up);
+    }
+  }
+
+  return consumed;
+}
+
 export async function appendAuditLog(params: {
   actorId: string | null;
   actorRole: string;
