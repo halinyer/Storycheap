@@ -10,6 +10,7 @@ import {
   normalizeVePhone,
 } from "@/lib/catalog-banks";
 import { requireAdminUser } from "@/lib/server/auth";
+import { sendSupportTicketReplyEmail } from "@/lib/server/email";
 import {
   adminRefundOrderToCredit,
   fulfillOrder,
@@ -35,13 +36,16 @@ import {
   deleteProductAdmin,
   deleteVariantAdmin,
   getOrderById,
+  getSupportSettings,
   insertInventoryBatch,
   listCatalog,
   markOrderAttentionFlag,
   previewCsvInventoryBatch,
   releaseExpiredReservations,
+  replySupportTicketAdmin,
   saveMonthlyCapitalSnapshot,
   saveSupplierPricingPolicy,
+  saveSupportSettings,
   saveVariantPricingMeta,
   saveZenoBinanceReceiver,
   setBsRateCents,
@@ -78,6 +82,8 @@ import type {
   SourcePriority,
   SupplierPricingPolicy,
   SupplierSyncState,
+  SupportSettingsDTO,
+  SupportTicketStatus,
   TreasuryMovementDTO,
   TreasuryMovementType,
 } from "@/types";
@@ -1388,4 +1394,104 @@ export async function updateSupplierPricingPolicyAdminAction(
   revalidatePath("/admin/products");
   revalidatePath("/", "layout");
   return saved;
+}
+
+const supportSettingsSchema = z.object({
+  supportEmail: z.string().trim().email("Correo público inválido"),
+  adminNotifyEmail: z
+    .union([z.string().trim().email("Correo de alertas inválido"), z.literal(""), z.null()])
+    .optional(),
+  whatsappEnabled: z.boolean(),
+  whatsappNumber: z.string().trim().max(40),
+  supportHours: z.string().trim().min(2).max(120),
+  floatingWidgetEnabled: z.boolean(),
+  welcomeMessage: z.string().trim().min(5).max(400),
+});
+
+export async function updateSupportSettingsAdminAction(
+  input: Omit<SupportSettingsDTO, "updatedAt">
+): Promise<SupportSettingsDTO> {
+  const adminUser = await requireAdminUser();
+  const parsed = supportSettingsSchema.parse(input);
+  const saved = await saveSupportSettings(
+    {
+      ...parsed,
+      adminNotifyEmail: parsed.adminNotifyEmail?.trim() || null,
+    },
+    adminUser.id
+  );
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "support.update_settings",
+    targetType: "store_setting",
+    targetId: "support_settings",
+    metadata: {
+      whatsappEnabled: saved.whatsappEnabled,
+      floatingWidgetEnabled: saved.floatingWidgetEnabled,
+      supportEmail: saved.supportEmail,
+    },
+  });
+
+  revalidatePath("/ayuda");
+  revalidatePath("/admin/support");
+  revalidatePath("/", "layout");
+  return saved;
+}
+
+const replySupportTicketSchema = z.object({
+  ticketId: z.string().uuid(),
+  status: z.enum(["OPEN", "IN_PROGRESS", "RESOLVED"]),
+  reply: z.string().trim().max(3000).nullable().optional(),
+});
+
+export async function replySupportTicketAdminAction(input: {
+  ticketId: string;
+  status: SupportTicketStatus;
+  reply?: string | null;
+}) {
+  const adminUser = await requireAdminUser();
+  const parsed = replySupportTicketSchema.parse(input);
+  const updated = await replySupportTicketAdmin({
+    ticketId: parsed.ticketId,
+    status: parsed.status,
+    reply: parsed.reply ?? null,
+    actorId: adminUser.id,
+    actorEmail: adminUser.email,
+  });
+
+  let emailSent = false;
+  if (parsed.reply && parsed.reply.trim()) {
+    const settings = await getSupportSettings();
+    const mailRes = await sendSupportTicketReplyEmail({
+      to: updated.customerEmail,
+      replyTo: settings.supportEmail,
+      customerName: updated.customerName,
+      ticketNumber: updated.ticketNumber,
+      subject: updated.subject,
+      replyMessage: parsed.reply.trim(),
+      orderNumber: updated.orderNumber,
+    }).catch(() => ({ sent: false }));
+    emailSent = Boolean(mailRes?.sent);
+  }
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "support.reply_ticket",
+    targetType: "support_ticket",
+    targetId: updated.id,
+    metadata: {
+      ticketNumber: updated.ticketNumber,
+      status: updated.status,
+      hasReply: Boolean(parsed.reply?.trim()),
+      emailSent,
+    },
+  });
+
+  revalidatePath("/admin");
+  revalidatePath("/admin/support");
+  revalidatePath("/account");
+  return { ticket: updated, emailSent };
 }

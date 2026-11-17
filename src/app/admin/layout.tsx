@@ -13,6 +13,7 @@ import {
   listOrdersAdmin,
   listProviderConfigs,
   listSupplierItemCostsAdmin,
+  listSupportTicketsAdmin,
   listTreasuryMovementsAdmin,
 } from "@/lib/server/repository";
 import { fetchSuppliersPortfolioSnapshot } from "@/lib/server/suppliers/registry";
@@ -56,6 +57,7 @@ async function AdminAuthGate({ children }: { children: React.ReactNode }) {
     bsRateCents,
     actualItemCostCents,
     includeTestOrders,
+    supportTickets,
   ] = await Promise.all([
     listOrdersAdmin({ needsAttentionOnly: true }),
     listOrdersAdmin(),
@@ -67,7 +69,12 @@ async function AdminAuthGate({ children }: { children: React.ReactNode }) {
     getBsRateCents(),
     listSupplierItemCostsAdmin(),
     getAdminIncludeTestsPreference(),
+    listSupportTicketsAdmin(),
   ]);
+
+  const openSupportTicketsCount = supportTickets.filter(
+    (t) => t.status !== "RESOLVED"
+  ).length;
 
   const lowStockCount = catalog
     .flatMap((p) => p.variants)
@@ -122,6 +129,7 @@ async function AdminAuthGate({ children }: { children: React.ReactNode }) {
             needsAttentionCount={attentionOrders.length}
             lowStockCount={lowStockCount}
             unhealthySuppliersCount={unhealthySuppliersCount}
+            openSupportTicketsCount={openSupportTicketsCount}
           />
           <div className="flex-1 min-w-0 w-full pb-12">{children}</div>
         </div>

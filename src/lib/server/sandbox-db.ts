@@ -13,6 +13,7 @@ import type {
   ProductDTO,
   ProviderConfigDTO,
   ReceiverBankAccountDTO,
+  SupportTicketDTO,
   TreasuryMovementDTO,
   WebhookEventDTO,
 } from "@/types";
@@ -102,6 +103,7 @@ export interface SandboxState {
   bsRateCents: number | null;
   pagoMovil: SandboxPagoMovilState;
   treasuryMovements: TreasuryMovementDTO[];
+  supportTickets: SupportTicketDTO[];
 }
 
 declare global {
@@ -256,6 +258,7 @@ function createInitialSandboxState(): SandboxState {
       webhookSecretCiphertext: null,
     },
     treasuryMovements: [],
+    supportTickets: [],
   };
 }
 

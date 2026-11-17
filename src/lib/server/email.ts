@@ -140,6 +140,7 @@ async function dispatchEmail(params: {
   to: string;
   subject: string;
   html: string;
+  replyTo?: string;
   sandboxLink?: string;
 }): Promise<{ sent: boolean; sandboxLogged: boolean; error?: string }> {
   if (!isResendConfigured()) {
@@ -156,7 +157,7 @@ async function dispatchEmail(params: {
   const resend = new Resend(process.env.RESEND_API_KEY!.trim());
   const { error } = await resend.emails.send({
     from: getFromEmail(),
-    replyTo: getReplyToEmail(),
+    replyTo: params.replyTo?.trim() || getReplyToEmail(),
     to: params.to,
     subject: params.subject,
     html: params.html,
@@ -335,5 +336,118 @@ export async function sendAuthVerificationEmail(params: {
     subject: copy.subject,
     html,
     sandboxLink: params.actionUrl,
+  });
+}
+
+export async function sendSupportTicketReceivedEmailToAdmin(params: {
+  adminTo: string;
+  ticketNumber: string;
+  customerName: string;
+  customerEmail: string;
+  orderNumber?: string | null;
+  topicLabel: string;
+  subject: string;
+  message: string;
+}) {
+  const adminUrl = `${getSiteUrl()}/admin/support`;
+  const html = renderEmailShell({
+    preheader: `Nuevo ticket ${params.ticketNumber} de ${params.customerName}: ${params.subject}`,
+    headerRight: `Soporte · ${params.ticketNumber}`,
+    title: `Nuevo mensaje: ${params.subject}`,
+    intro: `${params.customerName} (${params.customerEmail}) envió una consulta desde la web: "${params.message}"`,
+    rows: [
+      { label: "Ticket", value: params.ticketNumber, mono: true },
+      { label: "Cliente", value: `${params.customerName} (${params.customerEmail})` },
+      { label: "Motivo", value: params.topicLabel },
+      ...(params.orderNumber
+        ? [{ label: "Orden asociada", value: params.orderNumber, mono: true }]
+        : []),
+    ],
+    ctaLabel: "Responder en Admin ERP",
+    ctaUrl: adminUrl,
+    securityNote:
+      "También puedes responder directamente a este correo: el Reply-To apunta al email del cliente.",
+  });
+
+  return dispatchEmail({
+    to: params.adminTo,
+    replyTo: params.customerEmail,
+    subject: `[Soporte ${params.ticketNumber}] ${params.subject}`,
+    html,
+    sandboxLink: adminUrl,
+  });
+}
+
+export async function sendSupportTicketConfirmationEmailToCustomer(params: {
+  to: string;
+  replyTo?: string;
+  customerName: string;
+  ticketNumber: string;
+  subject: string;
+  orderNumber?: string | null;
+}) {
+  const helpUrl = `${getSiteUrl()}/account`;
+  const html = renderEmailShell({
+    preheader: `Recibimos tu consulta ${params.ticketNumber}. Te responderemos muy pronto.`,
+    headerRight: `Ticket ${params.ticketNumber}`,
+    title: "Recibimos tu mensaje de soporte",
+    intro: `Hola ${params.customerName}, registramos tu solicitud correctamente. Nuestro equipo la está revisando y te responderá por este mismo correo y en tu cuenta.`,
+    rows: [
+      { label: "N.° de ticket", value: params.ticketNumber, mono: true },
+      { label: "Asunto", value: params.subject },
+      ...(params.orderNumber
+        ? [{ label: "Orden referenciada", value: params.orderNumber, mono: true }]
+        : []),
+      { label: "Estado", value: "Abierto" },
+    ],
+    ctaLabel: "Ver estado en Mi Cuenta",
+    ctaUrl: helpUrl,
+    securityNote:
+      "Por tu seguridad, jamás compartas contraseñas ni códigos revelados con terceros. Solo respondemos desde canales oficiales.",
+  });
+
+  return dispatchEmail({
+    to: params.to,
+    replyTo: params.replyTo,
+    subject: `Ticket recibido · ${params.ticketNumber} · StoryCheap`,
+    html,
+    sandboxLink: helpUrl,
+  });
+}
+
+export async function sendSupportTicketReplyEmail(params: {
+  to: string;
+  replyTo?: string;
+  customerName: string;
+  ticketNumber: string;
+  subject: string;
+  replyMessage: string;
+  orderNumber?: string | null;
+}) {
+  const accountUrl = `${getSiteUrl()}/account`;
+  const html = renderEmailShell({
+    preheader: `Respuesta a tu ticket ${params.ticketNumber}: ${params.replyMessage}`,
+    headerRight: `Soporte · ${params.ticketNumber}`,
+    title: `Respuesta a: ${params.subject}`,
+    intro: `Hola ${params.customerName}, nuestro equipo de soporte respondió tu solicitud (${params.ticketNumber}): "${params.replyMessage}"`,
+    rows: [
+      { label: "N.° de ticket", value: params.ticketNumber, mono: true },
+      ...(params.orderNumber
+        ? [{ label: "Orden", value: params.orderNumber, mono: true }]
+        : []),
+      { label: "Asunto", value: params.subject },
+    ],
+    ctaLabel: "Ver historial en Mi Cuenta",
+    ctaUrl: accountUrl,
+    securityNote:
+      "Si necesitas agregar más detalles sobre este caso, responde directamente a este correo o escríbenos desde Centro de Ayuda.",
+  });
+
+  return dispatchEmail({
+    to: params.to,
+    replyTo: params.replyTo,
+    subject: `Re: ${params.subject} (${params.ticketNumber}) · StoryCheap`,
+    html,
+    sandboxLink: accountUrl,
   });
 }

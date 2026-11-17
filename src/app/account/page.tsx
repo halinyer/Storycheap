@@ -1,17 +1,27 @@
 /* eslint-disable @next/next/no-img-element */
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { UpdatePasswordForm } from "@/components/auth/update-password-form";
 import { CancelOrderControl } from "@/components/payments/cancel-order-control";
+import { SupportContactForm } from "@/components/support/support-contact-form";
 import { useStore } from "@/context/store-context";
 import { formatCents } from "@/lib/catalog-seed";
 import { resolveBrandTheme } from "@/lib/brand-theme";
-import type { CreditLedgerEntryDTO, OrderDTO } from "@/types";
+import {
+  SUPPORT_STATUS_META,
+  SUPPORT_TOPIC_LABELS,
+} from "@/lib/support-channels";
+import type {
+  CreditLedgerEntryDTO,
+  OrderDTO,
+  SupportTicketDTO,
+} from "@/types";
 import {
   ArrowRight,
   ExternalLink,
+  Headset,
   KeyRound,
   Lock,
   Receipt,
@@ -20,7 +30,7 @@ import {
   Wallet,
 } from "lucide-react";
 
-type AccountTab = "orders" | "codes" | "credit" | "security";
+type AccountTab = "orders" | "codes" | "credit" | "support" | "security";
 
 const REASON_LABELS: Record<CreditLedgerEntryDTO["reason"], string> = {
   overpayment: "Excedente de pago",
@@ -81,25 +91,56 @@ export default function AccountPage() {
   const [tab, setTab] = useState<AccountTab>("orders");
   const [orders, setOrders] = useState<OrderDTO[]>([]);
   const [ledger, setLedger] = useState<CreditLedgerEntryDTO[]>([]);
+  const [supportTickets, setSupportTickets] = useState<SupportTicketDTO[]>([]);
+  const [whatsappUrl, setWhatsappUrl] = useState<string | null>(null);
   const [creditBalanceCents, setCreditBalanceCents] = useState(0);
   const [loading, setLoading] = useState(true);
 
+  const loadSupportTickets = useCallback(async () => {
+    try {
+      const res = await fetch("/api/support", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as { myTickets?: SupportTicketDTO[] };
+      setSupportTickets(data.myTickets ?? []);
+    } catch {
+      // Ignore transient load failures
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
-    fetch("/api/account/summary", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
+    Promise.all([
+      fetch("/api/account/summary", { cache: "no-store" }).then((res) =>
+        res.ok ? res.json() : null
+      ),
+      fetch("/api/support", { cache: "no-store" }).then((res) =>
+        res.ok ? res.json() : null
+      ),
+    ])
       .then(
-        (
-          data: {
+        ([summaryData, supportData]: [
+          {
             orders?: OrderDTO[];
             ledger?: CreditLedgerEntryDTO[];
             creditBalanceCents?: number;
-          } | null
-        ) => {
-          if (!active || !data) return;
-          setOrders(data.orders ?? []);
-          setLedger(data.ledger ?? []);
-          setCreditBalanceCents(Number(data.creditBalanceCents ?? 0));
+          } | null,
+          {
+            config?: { whatsappUrl?: string | null };
+            myTickets?: SupportTicketDTO[];
+          } | null,
+        ]) => {
+          if (!active) return;
+          if (summaryData) {
+            setOrders(summaryData.orders ?? []);
+            setLedger(summaryData.ledger ?? []);
+            setCreditBalanceCents(Number(summaryData.creditBalanceCents ?? 0));
+          }
+          if (supportData?.myTickets) {
+            setSupportTickets(supportData.myTickets);
+          }
+          if (supportData?.config?.whatsappUrl) {
+            setWhatsappUrl(supportData.config.whatsappUrl);
+          }
         }
       )
       .catch(() => {})
@@ -203,6 +244,19 @@ export default function AccountPage() {
         >
           <Wallet className="w-4 h-4" />
           <span>Saldo a favor ({ledger.length})</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setTab("support")}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+            tab === "support"
+              ? "bg-white text-slate-950 shadow-md"
+              : "text-slate-300 hover:text-white"
+          }`}
+        >
+          <Headset className="w-4 h-4" />
+          <span>Soporte ({supportTickets.length})</span>
         </button>
 
         <button
@@ -414,6 +468,86 @@ export default function AccountPage() {
               );
             })
           )}
+        </div>
+      ) : tab === "support" ? (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="lg:col-span-7 space-y-3">
+            {supportTickets.length === 0 ? (
+              <div className="rounded-3xl apple-glass p-10 text-center space-y-2">
+                <Headset className="w-8 h-8 text-sky-400 mx-auto" />
+                <p className="text-xs text-slate-400">
+                  Aún no tienes solicitudes de soporte abiertas. Puedes enviarnos una consulta desde el formulario de al lado.
+                </p>
+              </div>
+            ) : (
+              supportTickets.map((tk) => {
+                const st = SUPPORT_STATUS_META[tk.status];
+                return (
+                  <div
+                    key={tk.id}
+                    className="rounded-3xl apple-glass p-5 space-y-3"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-xs font-black text-sky-300">
+                          {tk.ticketNumber}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${st.badgeClass}`}
+                        >
+                          {st.label}
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          {SUPPORT_TOPIC_LABELS[tk.topic]}
+                        </span>
+                        {tk.orderNumber && (
+                          <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-white/[0.06] text-slate-200">
+                            {tk.orderNumber}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-slate-500">
+                        {new Date(tk.createdAt).toLocaleString()}
+                      </span>
+                    </div>
+
+                    <div className="text-sm font-bold text-white">{tk.subject}</div>
+                    <p className="text-xs text-slate-300 whitespace-pre-wrap leading-relaxed">
+                      {tk.message}
+                    </p>
+
+                    {tk.adminReply && (
+                      <div className="rounded-2xl bg-emerald-500/10 border border-emerald-400/25 p-3.5 space-y-1">
+                        <div className="text-[10px] font-black uppercase tracking-wider text-emerald-300">
+                          Respuesta de Soporte StoryCheap
+                        </div>
+                        <p className="text-xs text-emerald-50 whitespace-pre-wrap leading-relaxed">
+                          {tk.adminReply}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="lg:col-span-5 rounded-3xl apple-glass p-6 space-y-3">
+            <h2 className="text-sm font-black text-white">
+              Nueva consulta a soporte
+            </h2>
+            <p className="text-xs text-slate-400">
+              Recibirás confirmación y respuesta en{" "}
+              <strong className="text-white">{sessionUser?.email}</strong> y en esta pestaña.
+            </p>
+            <SupportContactForm
+              compact
+              whatsappUrl={whatsappUrl}
+              onSuccess={() => {
+                void loadSupportTickets();
+              }}
+            />
+          </div>
         </div>
       ) : tab === "security" ? (
         <div className="max-w-lg rounded-3xl apple-glass p-6 sm:p-8 space-y-5">

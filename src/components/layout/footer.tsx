@@ -37,8 +37,8 @@ export function Footer() {
                 </Link>
               </li>
               <li>
-                <Link href="/ayuda" className="hover:text-white transition-colors">
-                  Política de Regiones, Reembolsos y Ayuda
+                <Link href="/ayuda#contacto" className="hover:text-white transition-colors">
+                  Soporte, Canales de Contacto y Ayuda
                 </Link>
               </li>
             </ul>
@@ -59,7 +59,12 @@ export function Footer() {
               </div>
               <div className="flex items-center gap-2">
                 <Mail className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                <span>Soporte directo: soporte@storycheap.com</span>
+                <a
+                  href="mailto:soporte@storycheap.com"
+                  className="hover:text-white transition-colors"
+                >
+                  Soporte directo: soporte@storycheap.com
+                </a>
               </div>
             </div>
           </div>

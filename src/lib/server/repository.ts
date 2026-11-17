@@ -21,6 +21,10 @@ import type {
   SourcePriority,
   SupplierPricingPolicy,
   SupplierSyncState,
+  SupportSettingsDTO,
+  SupportTicketDTO,
+  SupportTicketStatus,
+  SupportTicketTopic,
   TreasuryAccountId,
   TreasuryMovementDTO,
   TreasuryMovementType,
@@ -3526,4 +3530,304 @@ export async function setOrdersTestFlagAdmin(
   }
 
   return { updatedCount: cleanIds.length, usedCompatibilityStore: false };
+}
+
+const SUPPORT_SETTINGS_KEY = "support_settings";
+const SUPPORT_TICKETS_FALLBACK_KEY = "support_tickets_fallback";
+
+export const DEFAULT_SUPPORT_SETTINGS: SupportSettingsDTO = {
+  supportEmail: "soporte@storycheap.com",
+  adminNotifyEmail: null,
+  whatsappEnabled: false,
+  whatsappNumber: "",
+  supportHours: "Todos los días · 9:00 AM – 10:00 PM (VEN)",
+  floatingWidgetEnabled: true,
+  welcomeMessage:
+    "¿Tienes dudas con tu orden o pago? Escríbenos directo y te ayudamos al instante.",
+};
+
+export async function getSupportSettings(): Promise<SupportSettingsDTO> {
+  const raw = await readSettingJson<Partial<SupportSettingsDTO>>(
+    SUPPORT_SETTINGS_KEY,
+    {}
+  );
+  return {
+    supportEmail:
+      typeof raw.supportEmail === "string" && raw.supportEmail.trim()
+        ? raw.supportEmail.trim()
+        : DEFAULT_SUPPORT_SETTINGS.supportEmail,
+    adminNotifyEmail:
+      typeof raw.adminNotifyEmail === "string" && raw.adminNotifyEmail.trim()
+        ? raw.adminNotifyEmail.trim()
+        : null,
+    whatsappEnabled:
+      typeof raw.whatsappEnabled === "boolean"
+        ? raw.whatsappEnabled
+        : DEFAULT_SUPPORT_SETTINGS.whatsappEnabled,
+    whatsappNumber:
+      typeof raw.whatsappNumber === "string" ? raw.whatsappNumber.trim() : "",
+    supportHours:
+      typeof raw.supportHours === "string" && raw.supportHours.trim()
+        ? raw.supportHours.trim()
+        : DEFAULT_SUPPORT_SETTINGS.supportHours,
+    floatingWidgetEnabled:
+      typeof raw.floatingWidgetEnabled === "boolean"
+        ? raw.floatingWidgetEnabled
+        : DEFAULT_SUPPORT_SETTINGS.floatingWidgetEnabled,
+    welcomeMessage:
+      typeof raw.welcomeMessage === "string" && raw.welcomeMessage.trim()
+        ? raw.welcomeMessage.trim()
+        : DEFAULT_SUPPORT_SETTINGS.welcomeMessage,
+    updatedAt: raw.updatedAt,
+  };
+}
+
+export async function saveSupportSettings(
+  patch: Partial<SupportSettingsDTO>,
+  updatedBy?: string | null
+): Promise<SupportSettingsDTO> {
+  const current = await getSupportSettings();
+  const next: SupportSettingsDTO = {
+    ...current,
+    ...patch,
+    supportEmail:
+      (patch.supportEmail ?? current.supportEmail).trim() ||
+      DEFAULT_SUPPORT_SETTINGS.supportEmail,
+    adminNotifyEmail:
+      patch.adminNotifyEmail !== undefined
+        ? patch.adminNotifyEmail?.trim() || null
+        : current.adminNotifyEmail,
+    whatsappNumber: (patch.whatsappNumber ?? current.whatsappNumber).trim(),
+    updatedAt: new Date().toISOString(),
+  };
+  await writeSettingJson(SUPPORT_SETTINGS_KEY, next, updatedBy);
+  return next;
+}
+
+function generateSupportTicketNumber(): string {
+  const suffix = crypto.randomInt(100000, 999999);
+  return `SUP-${suffix}`;
+}
+
+function mapSupportTicketRow(row: Record<string, unknown>): SupportTicketDTO {
+  return {
+    id: String(row.id),
+    ticketNumber: String(row.ticket_number),
+    userId: row.user_id ? String(row.user_id) : null,
+    customerName: String(row.customer_name ?? ""),
+    customerEmail: String(row.customer_email ?? ""),
+    orderNumber: row.order_number ? String(row.order_number) : null,
+    topic: (row.topic as SupportTicketTopic) ?? "GENERAL",
+    subject: String(row.subject ?? ""),
+    message: String(row.message ?? ""),
+    status: (row.status as SupportTicketStatus) ?? "OPEN",
+    adminReply: row.admin_reply ? String(row.admin_reply) : null,
+    repliedAt: row.replied_at ? String(row.replied_at) : null,
+    repliedBy: row.replied_by ? String(row.replied_by) : null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+async function readFallbackSupportTickets(
+  admin: NonNullable<ReturnType<typeof getSupabaseAdmin>>
+): Promise<SupportTicketDTO[]> {
+  const { data } = await admin
+    .from("store_settings")
+    .select("value")
+    .eq("key", SUPPORT_TICKETS_FALLBACK_KEY)
+    .maybeSingle();
+  const val = (data?.value as { tickets?: SupportTicketDTO[] } | null) ?? null;
+  return Array.isArray(val?.tickets) ? val.tickets : [];
+}
+
+async function writeFallbackSupportTickets(
+  admin: NonNullable<ReturnType<typeof getSupabaseAdmin>>,
+  tickets: SupportTicketDTO[],
+  updatedBy?: string | null
+): Promise<void> {
+  const { error } = await admin.from("store_settings").upsert({
+    key: SUPPORT_TICKETS_FALLBACK_KEY,
+    value: { tickets: tickets.slice(0, 300) },
+    updated_by: updatedBy ?? null,
+  });
+  if (error) throw error;
+}
+
+export async function createSupportTicket(input: {
+  userId?: string | null;
+  customerName: string;
+  customerEmail: string;
+  orderNumber?: string | null;
+  topic: SupportTicketTopic;
+  subject: string;
+  message: string;
+}): Promise<SupportTicketDTO> {
+  const ctx = assertDbOrSandbox();
+  const now = new Date().toISOString();
+  const entry: SupportTicketDTO = {
+    id: crypto.randomUUID(),
+    ticketNumber: generateSupportTicketNumber(),
+    userId: input.userId ?? null,
+    customerName: input.customerName.trim(),
+    customerEmail: input.customerEmail.trim().toLowerCase(),
+    orderNumber: input.orderNumber?.trim() ? input.orderNumber.trim().toUpperCase() : null,
+    topic: input.topic,
+    subject: input.subject.trim(),
+    message: input.message.trim(),
+    status: "OPEN",
+    adminReply: null,
+    repliedAt: null,
+    repliedBy: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  if (ctx.mode === "sandbox") {
+    getSandboxState().supportTickets.unshift(entry);
+    return entry;
+  }
+
+  const { data, error } = await ctx.admin
+    .from("support_tickets")
+    .insert({
+      id: entry.id,
+      ticket_number: entry.ticketNumber,
+      user_id: entry.userId,
+      customer_name: entry.customerName,
+      customer_email: entry.customerEmail,
+      order_number: entry.orderNumber,
+      topic: entry.topic,
+      subject: entry.subject,
+      message: entry.message,
+      status: entry.status,
+    })
+    .select("*")
+    .single();
+
+  if (error) {
+    if (isMissingSchemaObjectError(error)) {
+      const existing = await readFallbackSupportTickets(ctx.admin);
+      await writeFallbackSupportTickets(ctx.admin, [entry, ...existing], entry.userId);
+      return entry;
+    }
+    throw error;
+  }
+
+  return mapSupportTicketRow(data as Record<string, unknown>);
+}
+
+export async function listSupportTicketsAdmin(): Promise<SupportTicketDTO[]> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    return [...getSandboxState().supportTickets].sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt)
+    );
+  }
+
+  const [{ data, error }, fallbackTickets] = await Promise.all([
+    ctx.admin
+      .from("support_tickets")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(300),
+    readFallbackSupportTickets(ctx.admin).catch(() => []),
+  ]);
+
+  if (error) {
+    if (isMissingSchemaObjectError(error)) {
+      return fallbackTickets.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    }
+    throw error;
+  }
+
+  const primary = (data ?? []).map((row) =>
+    mapSupportTicketRow(row as Record<string, unknown>)
+  );
+  const seen = new Set(primary.map((t) => t.id));
+  const merged = [...primary];
+  for (const ft of fallbackTickets) {
+    if (!seen.has(ft.id)) merged.push(ft);
+  }
+  return merged.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function listSupportTicketsForUser(
+  userId: string,
+  email?: string | null
+): Promise<SupportTicketDTO[]> {
+  const all = await listSupportTicketsAdmin();
+  const normEmail = email?.trim().toLowerCase() ?? "";
+  return all.filter(
+    (t) =>
+      t.userId === userId ||
+      (Boolean(normEmail) && t.customerEmail.toLowerCase() === normEmail)
+  );
+}
+
+export async function replySupportTicketAdmin(input: {
+  ticketId: string;
+  reply?: string | null;
+  status: SupportTicketStatus;
+  actorId?: string | null;
+  actorEmail?: string | null;
+}): Promise<SupportTicketDTO> {
+  const ctx = assertDbOrSandbox();
+  const now = new Date().toISOString();
+  const cleanReply = input.reply?.trim() || null;
+
+  if (ctx.mode === "sandbox") {
+    const ticket = getSandboxState().supportTickets.find((t) => t.id === input.ticketId);
+    if (!ticket) throw new Error("Ticket de soporte no encontrado");
+    ticket.status = input.status;
+    if (cleanReply) {
+      ticket.adminReply = cleanReply;
+      ticket.repliedAt = now;
+      ticket.repliedBy = input.actorEmail ?? "admin@storycheap.com";
+    }
+    ticket.updatedAt = now;
+    return { ...ticket };
+  }
+
+  const patch: Record<string, unknown> = {
+    status: input.status,
+    updated_at: now,
+  };
+  if (cleanReply) {
+    patch.admin_reply = cleanReply;
+    patch.replied_at = now;
+    patch.replied_by = input.actorEmail ?? "admin@storycheap.com";
+  }
+
+  const { data, error } = await ctx.admin
+    .from("support_tickets")
+    .update(patch)
+    .eq("id", input.ticketId)
+    .select("*")
+    .maybeSingle();
+
+  if (error && !isMissingSchemaObjectError(error)) {
+    throw error;
+  }
+  if (data) {
+    return mapSupportTicketRow(data as Record<string, unknown>);
+  }
+
+  const existing = await readFallbackSupportTickets(ctx.admin);
+  let updated: SupportTicketDTO | null = null;
+  const next = existing.map((t) => {
+    if (t.id !== input.ticketId) return t;
+    updated = {
+      ...t,
+      status: input.status,
+      adminReply: cleanReply ?? t.adminReply,
+      repliedAt: cleanReply ? now : t.repliedAt,
+      repliedBy: cleanReply ? input.actorEmail ?? "admin@storycheap.com" : t.repliedBy,
+      updatedAt: now,
+    };
+    return updated;
+  });
+  if (!updated) throw new Error("Ticket de soporte no encontrado");
+  await writeFallbackSupportTickets(ctx.admin, next, input.actorId);
+  return updated;
 }

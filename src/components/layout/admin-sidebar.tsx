@@ -7,6 +7,7 @@ import {
   Activity,
   ChevronRight,
   FileKey2,
+  Headset,
   Landmark,
   LayoutDashboard,
   PackageSearch,
@@ -21,6 +22,7 @@ interface AdminSidebarProps {
   needsAttentionCount: number;
   lowStockCount: number;
   unhealthySuppliersCount?: number;
+  openSupportTicketsCount?: number;
 }
 
 interface SidebarNavItem {
@@ -41,6 +43,7 @@ export function AdminSidebar({
   needsAttentionCount,
   lowStockCount,
   unhealthySuppliersCount = 0,
+  openSupportTicketsCount = 0,
 }: AdminSidebarProps) {
   const pathname = usePathname();
 
@@ -96,6 +99,14 @@ export function AdminSidebar({
           href: "/admin/pagomovil",
           label: "Pago Móvil (Bs)",
           icon: Smartphone,
+        },
+        {
+          href: "/admin/support",
+          label: "Soporte y Canales",
+          icon: Headset,
+          badge:
+            openSupportTicketsCount > 0 ? openSupportTicketsCount : undefined,
+          badgeTone: "bg-sky-400 text-slate-950",
         },
         {
           href: "/admin/audit",

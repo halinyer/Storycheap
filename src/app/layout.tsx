@@ -6,6 +6,7 @@ import { CartDrawer } from "@/components/cart/cart-drawer";
 import { Footer } from "@/components/layout/footer";
 import { Navbar } from "@/components/layout/navbar";
 import { StoreChromeGuard } from "@/components/layout/store-chrome-guard";
+import { FloatingSupportWidget } from "@/components/support/floating-support-widget";
 import { StoreProvider } from "@/context/store-context";
 import "./globals.css";
 
@@ -49,6 +50,7 @@ export default function RootLayout({
           <main className="flex-1">{children}</main>
           <StoreChromeGuard>
             <Footer />
+            <FloatingSupportWidget />
           </StoreChromeGuard>
           <Toaster
             theme="dark"

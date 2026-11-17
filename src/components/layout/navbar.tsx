@@ -38,7 +38,7 @@ const SUBNAV_ITEMS: Array<{
   { label: "Apple y Tiendas USA", category: "shopping" },
   { label: "Cripto USDT", category: "crypto" },
   { label: "Mi Bóveda", href: "/account" },
-  { label: "Centro de Ayuda", href: "/ayuda" },
+  { label: "Soporte y Ayuda", href: "/ayuda" },
 ];
 
 export function Navbar() {

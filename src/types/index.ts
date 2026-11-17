@@ -460,3 +460,50 @@ export interface SupplierSyncState {
   recentChanges: SupplierCostChangeRecord[];
 }
 
+export interface SupportSettingsDTO {
+  supportEmail: string;
+  adminNotifyEmail: string | null;
+  whatsappEnabled: boolean;
+  whatsappNumber: string;
+  supportHours: string;
+  floatingWidgetEnabled: boolean;
+  welcomeMessage: string;
+  updatedAt?: string;
+}
+
+export interface PublicSupportConfigDTO {
+  supportEmail: string;
+  whatsappUrl: string | null;
+  whatsappDisplay: string | null;
+  supportHours: string;
+  floatingWidgetEnabled: boolean;
+  welcomeMessage: string;
+}
+
+export type SupportTicketStatus = "OPEN" | "IN_PROGRESS" | "RESOLVED";
+
+export type SupportTicketTopic =
+  | "ORDER_ISSUE"
+  | "PAYMENT"
+  | "CODE_REDEEM"
+  | "GENERAL";
+
+export interface SupportTicketDTO {
+  id: string;
+  ticketNumber: string;
+  userId: string | null;
+  customerName: string;
+  customerEmail: string;
+  orderNumber: string | null;
+  topic: SupportTicketTopic;
+  subject: string;
+  message: string;
+  status: SupportTicketStatus;
+  adminReply: string | null;
+  repliedAt: string | null;
+  repliedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+
