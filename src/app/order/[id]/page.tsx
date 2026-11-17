@@ -544,8 +544,17 @@ function OrderDetailInner() {
 
                 <p className="text-xs sm:text-sm text-slate-400 max-w-2xl leading-relaxed">
                   {order.status === "PENDING_PAYMENT" || order.status === "CREATED"
-                    ? order.paymentGateway === "pagomovil" ||
-                      order.paymentGateway === "pablito"
+                    ? order.paidCents > 0 && order.paidCents < order.amountDueCents
+                      ? `Recibimos ${formatCents(order.paidCents)} USD en ${
+                          order.paymentGateway === "pagomovil" ||
+                          order.paymentGateway === "pablito"
+                            ? "Pago Móvil"
+                            : "ZenoBank"
+                        }. Faltan ${formatCents(
+                          order.amountDueCents - order.paidCents
+                        )} USD para liberar tus códigos digitales automáticamente.`
+                      : order.paymentGateway === "pagomovil" ||
+                        order.paymentGateway === "pablito"
                       ? "Tu orden reserva temporalmente las gift cards mientras realizas el Pago Móvil. Puedes completarlo ahora o cancelar esta orden si prefieres otro método."
                       : "Tu orden reserva temporalmente las gift cards mientras completas el pago en ZenoBank. Puedes retomarlo aquí o cancelar la orden si cambiaste de opinión."
                     : statusMeta?.description}
@@ -807,9 +816,20 @@ function OrderDetailInner() {
                       </p>
 
                       {order.paymentGateway === "zenobank" && (
-                        <div className="pt-1">
-                          <CardNetworksBadge />
-                        </div>
+                        <>
+                          <div className="rounded-xl bg-amber-500/10 border border-amber-500/25 px-3 py-2 text-[11px] text-amber-200/95 leading-relaxed">
+                            <strong className="text-amber-300">
+                              Si pagas por Binance Pay:
+                            </strong>{" "}
+                            envía el monto <strong>exacto con todos los decimales</strong>{" "}
+                            que muestra ZenoBank. Si envías un monto distinto (de más
+                            o de menos), ZenoBank no lo conciliará automáticamente y
+                            deberás reportarlo a soporte con tu ID de transacción.
+                          </div>
+                          <div className="pt-1">
+                            <CardNetworksBadge />
+                          </div>
+                        </>
                       )}
                     </div>
                   </div>
@@ -1335,8 +1355,16 @@ function OrderDetailInner() {
               </div>
               {order.paidCents > 0 && order.paidCents !== order.amountDueCents && (
                 <div className="flex justify-between text-sky-300 pt-1">
-                  <span>Recibido en pasarela</span>
+                  <span>Pagado hasta ahora</span>
                   <span className="font-bold">{formatCents(order.paidCents)} USD</span>
+                </div>
+              )}
+              {order.paidCents > 0 && order.paidCents < order.amountDueCents && (
+                <div className="flex justify-between text-amber-300 font-black pt-1">
+                  <span>Falta para soltar tu código</span>
+                  <span>
+                    {formatCents(order.amountDueCents - order.paidCents)} USD
+                  </span>
                 </div>
               )}
               {order.paymentGateway === "zenobank" && zenoTransactions.length > 0 && (

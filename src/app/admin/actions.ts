@@ -12,11 +12,14 @@ import {
 import { requireAdminUser } from "@/lib/server/auth";
 import { sendSupportTicketReplyEmail } from "@/lib/server/email";
 import {
+  adminRecordManualZenoPayment,
   adminRefundOrderToCredit,
   fulfillOrder,
+  reconcileGatewaySession,
   syncAllPendingSupplierOrders,
   syncSupplierOrdersForOrder,
 } from "@/lib/server/fulfillment";
+import { getPaymentGateway } from "@/lib/server/payments";
 import {
   deleteBotDevice,
   listBankNotifications,
@@ -256,6 +259,97 @@ export async function refundOrderToCreditAction(input: {
   revalidatePath("/admin/orders");
   revalidatePath(`/admin/orders/${input.orderId}`);
   revalidatePath("/admin/customers");
+}
+
+export async function syncZenoBankOrderAdminAction(orderId: string) {
+  const adminUser = await requireAdminUser();
+  const parsedOrderId = z.string().uuid().parse(orderId);
+  const order = await getOrderById(parsedOrderId);
+  if (!order) {
+    throw new Error("Orden no encontrada.");
+  }
+  if (order.paymentGateway !== "zenobank") {
+    throw new Error("Esta orden no utiliza pasarela ZenoBank.");
+  }
+  if (!order.gatewayCheckoutId) {
+    throw new Error("Esta orden no tiene una sesión de checkout ZenoBank registrada.");
+  }
+
+  const gw = getPaymentGateway("zenobank");
+  const liveSession = await gw.getCheckout(order.gatewayCheckoutId);
+  const { reconciled, outcome } = await reconcileGatewaySession({
+    order,
+    session: liveSession,
+    source: "admin_manual_sync",
+  });
+  const updated = (await getOrderById(order.id)) ?? order;
+  const missingCents = Math.max(0, updated.amountDueCents - updated.paidCents);
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "order.sync_zenobank",
+    targetType: "order",
+    targetId: order.id,
+    metadata: {
+      checkoutId: order.gatewayCheckoutId,
+      liveStatus: liveSession.status,
+      livePaidCents: liveSession.paidCents,
+      expectedCents: updated.amountDueCents,
+      missingCents,
+      reconciled,
+      outcome: outcome ?? null,
+      resultingStatus: updated.status,
+    },
+  });
+
+  revalidatePath("/admin");
+  revalidatePath("/admin/orders");
+  revalidatePath(`/admin/orders/${order.id}`);
+  revalidatePath(`/order/${order.id}`);
+
+  return {
+    liveStatus: liveSession.status,
+    livePaidCents: liveSession.paidCents,
+    expectedCents: updated.amountDueCents,
+    missingCents,
+    reconciled,
+    nextStatus: updated.status,
+  };
+}
+
+export async function recordManualZenoPaymentAdminAction(input: {
+  orderId: string;
+  receivedUsd: string;
+  txReference?: string;
+}) {
+  const adminUser = await requireAdminUser();
+  const parsedOrderId = z.string().uuid().parse(input.orderId);
+  const normalizedStr = input.receivedUsd.trim().replace(",", ".");
+  const parsedUsd = Number(normalizedStr);
+  if (!Number.isFinite(parsedUsd) || parsedUsd <= 0) {
+    throw new Error("Ingresa un monto recibido válido en USD (ej. 0.75 o 1.00).");
+  }
+  const receivedCents = Math.round(parsedUsd * 100);
+  if (receivedCents <= 0) {
+    throw new Error("El monto debe ser al menos $0.01 USD.");
+  }
+
+  const res = await adminRecordManualZenoPayment({
+    orderId: parsedOrderId,
+    receivedCents,
+    txReference: input.txReference,
+    adminUser,
+  });
+
+  revalidatePath("/admin");
+  revalidatePath("/admin/orders");
+  revalidatePath(`/admin/orders/${parsedOrderId}`);
+  revalidatePath(`/order/${parsedOrderId}`);
+  revalidatePath("/admin/customers");
+  revalidatePath("/account");
+
+  return res;
 }
 
 export async function updateVariantAdminAction(input: {

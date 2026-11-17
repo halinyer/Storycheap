@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServerSessionUser } from "@/lib/server/auth";
 import { isZenoBankConfigured } from "@/lib/server/env";
 import {
-  processVerifiedWebhookEvent,
+  reconcileGatewaySession,
   syncCentralOneOrderProgress,
 } from "@/lib/server/fulfillment";
 import { hasOrderAccessCookie } from "@/lib/server/order-access";
@@ -58,37 +58,12 @@ export async function GET(
       try {
         const gw = getPaymentGateway("zenobank");
         const liveSession = await gw.getCheckout(order.gatewayCheckoutId);
-        if (
-          liveSession.status === "COMPLETED" ||
-          liveSession.status === "PARTIALLY_PAID" ||
-          liveSession.status === "EXPIRED" ||
-          liveSession.status === "CANCELLED"
-        ) {
-          const eventType =
-            liveSession.status === "COMPLETED"
-              ? "checkout.completed"
-              : liveSession.status === "PARTIALLY_PAID"
-                ? "checkout.partially_paid"
-                : "checkout.expired";
-          const expiredTag =
-            liveSession.expiresAt && Date.now() >= Date.parse(liveSession.expiresAt)
-              ? "exp"
-              : "open";
-          await processVerifiedWebhookEvent(
-            {
-              gateway: "zenobank",
-              eventId: `poll_reconcile:${order.gatewayCheckoutId}:${liveSession.status}:${liveSession.paidCents}:${expiredTag}`,
-              eventType,
-              orderId: order.id,
-              checkoutId: order.gatewayCheckoutId,
-              priceCents: liveSession.priceCents,
-              paidCents: liveSession.paidCents,
-              status: liveSession.status,
-              expiresAt: liveSession.expiresAt,
-              rawPayload: { source: "order_poll_reconcile", liveSession },
-            },
-            { skipRemoteDoubleCheck: true }
-          );
+        const rec = await reconcileGatewaySession({
+          order,
+          session: liveSession,
+          source: "order_poll_reconcile",
+        });
+        if (rec.reconciled) {
           order = (await getOrderById(id)) ?? order;
         }
       } catch {

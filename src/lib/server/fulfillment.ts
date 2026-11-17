@@ -7,7 +7,10 @@ import {
   getOrderPagoMovilReport,
 } from "./pagomovil-store";
 import { getPaymentGateway } from "./payments";
-import type { NormalizedPaymentWebhookEvent } from "./payments/types";
+import type {
+  GatewayCheckoutSession,
+  NormalizedPaymentWebhookEvent,
+} from "./payments/types";
 import {
   extractZenoTransactionsFromPayload,
   formatZenoTransactionsTag,
@@ -35,6 +38,7 @@ import {
   recordWebhookEventOnce,
   releaseReservedCodesForOrder,
   reserveManualCodes,
+  setOrderPaidCentsForManualReview,
   transitionOrderStatus,
   updateOrderItemUnitCostCents,
   updateOrderPartialPaymentCents,
@@ -869,6 +873,60 @@ export async function processVerifiedWebhookEvent(
   return { outcome: "delivered_or_fulfilling", orderId: matchedOrder.id };
 }
 
+/**
+ * Reconciles a freshly polled gateway checkout session (e.g. ZenoBank) against an order,
+ * including OPEN checkouts where a partial transfer just arrived (`paidCents > order.paidCents`).
+ */
+export async function reconcileGatewaySession(params: {
+  order: OrderDTO;
+  session: GatewayCheckoutSession;
+  source: string;
+}): Promise<{ reconciled: boolean; outcome?: string }> {
+  const { order, session, source } = params;
+  const hasNewPartialPayment =
+    session.status === "OPEN" && session.paidCents > order.paidCents;
+
+  if (
+    session.status !== "COMPLETED" &&
+    session.status !== "PARTIALLY_PAID" &&
+    session.status !== "EXPIRED" &&
+    session.status !== "CANCELLED" &&
+    !hasNewPartialPayment
+  ) {
+    return { reconciled: false };
+  }
+
+  const eventType: NormalizedPaymentWebhookEvent["eventType"] =
+    session.status === "COMPLETED"
+      ? "checkout.completed"
+      : session.status === "PARTIALLY_PAID" || hasNewPartialPayment
+        ? "checkout.partially_paid"
+        : "checkout.expired";
+
+  const expiredTag =
+    session.expiresAt && Date.now() >= Date.parse(session.expiresAt)
+      ? "exp"
+      : "open";
+
+  const res = await processVerifiedWebhookEvent(
+    {
+      gateway: order.paymentGateway,
+      eventId: `${source}:${order.gatewayCheckoutId ?? order.id}:${session.status}:${session.paidCents}:${expiredTag}`,
+      eventType,
+      orderId: order.id,
+      checkoutId: order.gatewayCheckoutId ?? session.checkoutId,
+      priceCents: session.priceCents,
+      paidCents: session.paidCents,
+      status: session.status,
+      expiresAt: session.expiresAt,
+      rawPayload: { source, liveSession: session, session },
+    },
+    { skipRemoteDoubleCheck: true }
+  );
+
+  return { reconciled: true, outcome: res.outcome };
+}
+
 export async function adminRefundOrderToCredit(params: {
   orderId: string;
   adminUser: SessionUser;
@@ -888,9 +946,12 @@ export async function adminRefundOrderToCredit(params: {
     return acc + pendingUnits * it.unitPriceCents;
   }, 0);
 
+  // Never refund more than what the customer actually funded (`paidCents + creditAppliedCents`)
+  const actuallyFundedCents = Math.max(0, order.paidCents + order.creditAppliedCents);
   const refundCents = Math.min(
     order.subtotalCents,
-    undeliveredCents > 0 ? undeliveredCents : order.paidCents + order.creditAppliedCents
+    actuallyFundedCents,
+    undeliveredCents > 0 ? undeliveredCents : actuallyFundedCents
   );
 
   const userId = order.userId ?? (await ensureCustomerProfile(order.email));
@@ -913,7 +974,14 @@ export async function adminRefundOrderToCredit(params: {
 
   await transitionOrderStatus({
     orderId: order.id,
-    expectedStatuses: ["PAID", "FULFILLING", "PARTIAL", "MANUAL_REVIEW", "EXPIRED"],
+    expectedStatuses: [
+      "PAID",
+      "FULFILLING",
+      "PARTIAL",
+      "MANUAL_REVIEW",
+      "EXPIRED",
+      ...(actuallyFundedCents > 0 ? (["PENDING_PAYMENT"] as const) : []),
+    ],
     nextStatus: "REFUNDED_CREDIT",
     needsAttention: false,
     attentionReason: null,
@@ -929,6 +997,181 @@ export async function adminRefundOrderToCredit(params: {
     targetId: order.id,
     metadata: { refundCents, reasonNote: params.reasonNote },
   });
+}
+
+export async function adminRecordManualZenoPayment(params: {
+  orderId: string;
+  receivedCents: number;
+  txReference?: string | null;
+  adminUser: SessionUser;
+}): Promise<{
+  mode: "fulfilled" | "partial_pending" | "partial_credited";
+  receivedCents: number;
+  missingCents: number;
+  surplusCents: number;
+  nextStatus: OrderDTO["status"];
+}> {
+  if (!Number.isInteger(params.receivedCents) || params.receivedCents <= 0) {
+    throw new Error("El monto recibido debe ser mayor a $0.00 USD.");
+  }
+
+  const order = await getOrderById(params.orderId);
+  if (!order) throw new Error("Orden no encontrada.");
+  if (order.paymentGateway !== "zenobank") {
+    throw new Error("Esta orden no utiliza pasarela ZenoBank / Binance.");
+  }
+  if (
+    order.status === "DELIVERED" ||
+    order.status === "REFUNDED_CREDIT" ||
+    order.status === "CANCELLED"
+  ) {
+    throw new Error(
+      `No se puede registrar pago manual en estado ${order.status}.`
+    );
+  }
+
+  const cleanTx = params.txReference?.trim() || null;
+  const txTag = cleanTx ? `TX ${cleanTx}` : null;
+  const txSuffix = txTag ? ` · ${txTag}` : "";
+
+  if (params.receivedCents < order.amountDueCents) {
+    const missingCents = order.amountDueCents - params.receivedCents;
+
+    if (order.status === "EXPIRED") {
+      await settleUnderpaymentToCredit({
+        order,
+        paidCents: params.receivedCents,
+        note: `Pago parcial Binance/ZenoBank conciliado manualmente (${order.orderNumber})${txSuffix}`,
+        needsAttention: false,
+        attentionReason: null,
+        txReference: txTag,
+      });
+      await appendAuditLog({
+        actorId: params.adminUser.id,
+        actorRole: params.adminUser.role,
+        action: "order.admin_manual_zeno_partial_credited",
+        targetType: "order",
+        targetId: order.id,
+        metadata: {
+          receivedCents: params.receivedCents,
+          expectedCents: order.amountDueCents,
+          missingCents,
+          txReference: cleanTx,
+        },
+      });
+      const updated = (await getOrderById(order.id)) ?? order;
+      return {
+        mode: "partial_credited",
+        receivedCents: params.receivedCents,
+        missingCents,
+        surplusCents: 0,
+        nextStatus: updated.status,
+      };
+    }
+
+    if (params.receivedCents <= order.paidCents) {
+      throw new Error(
+        `El monto ingresado debe superar los ${(order.paidCents / 100).toFixed(2)} USD ya registrados.`
+      );
+    }
+
+    await updateOrderPartialPaymentCents(order.id, params.receivedCents);
+    await appendAuditLog({
+      actorId: params.adminUser.id,
+      actorRole: params.adminUser.role,
+      action: "order.admin_manual_zeno_partial",
+      targetType: "order",
+      targetId: order.id,
+      metadata: {
+        receivedCents: params.receivedCents,
+        expectedCents: order.amountDueCents,
+        missingCents,
+        txReference: cleanTx,
+      },
+    });
+    const updated = (await getOrderById(order.id)) ?? order;
+    return {
+      mode: "partial_pending",
+      receivedCents: params.receivedCents,
+      missingCents,
+      surplusCents: 0,
+      nextStatus: updated.status,
+    };
+  }
+
+  let transitioned = false;
+  if (order.status === "PENDING_PAYMENT" || order.status === "CREATED") {
+    transitioned = await transitionOrderStatus({
+      orderId: order.id,
+      expectedStatuses: ["PENDING_PAYMENT", "CREATED"],
+      nextStatus: "PAID",
+      paidCents: params.receivedCents,
+      needsAttention: false,
+      attentionReason: null,
+    });
+  } else if (order.status === "EXPIRED") {
+    transitioned = await transitionOrderStatus({
+      orderId: order.id,
+      expectedStatuses: ["EXPIRED"],
+      nextStatus: "MANUAL_REVIEW",
+      paidCents: params.receivedCents,
+      needsAttention: false,
+      attentionReason: null,
+    });
+  } else if (order.status === "MANUAL_REVIEW") {
+    await setOrderPaidCentsForManualReview(order.id, params.receivedCents);
+    await markOrderAttentionFlag(order.id, false, null);
+    transitioned = true;
+  }
+
+  if (!transitioned) {
+    throw new Error(
+      "No se pudo pasar la orden a PAID (ya fue procesada o cambió de estado)."
+    );
+  }
+
+  const surplusCents = params.receivedCents - order.amountDueCents;
+  if (surplusCents > 0) {
+    const userId = order.userId ?? (await ensureCustomerProfile(order.email));
+    await appendCreditLedgerEntry({
+      userId,
+      orderId: order.id,
+      deltaCents: surplusCents,
+      reason: "overpayment",
+      note: `Excedente pagado en orden ${order.orderNumber}${txSuffix}`,
+      createdBy: params.adminUser.id,
+    });
+    await sendCreditAdjustmentEmail({
+      to: order.email,
+      orderNumber: order.orderNumber,
+      amountCents: surplusCents,
+      reasonText: "Excedente verificado en tu pago cripto / Binance Pay",
+      txReference: txTag,
+    }).catch(() => {});
+  }
+
+  await appendAuditLog({
+    actorId: params.adminUser.id,
+    actorRole: params.adminUser.role,
+    action: "order.admin_manual_zeno_confirm",
+    targetType: "order",
+    targetId: order.id,
+    metadata: {
+      receivedCents: params.receivedCents,
+      expectedCents: order.amountDueCents,
+      surplusCents,
+      txReference: cleanTx,
+    },
+  });
+
+  const fulfilled = await fulfillOrder(order.id);
+  return {
+    mode: "fulfilled",
+    receivedCents: params.receivedCents,
+    missingCents: 0,
+    surplusCents,
+    nextStatus: fulfilled.status,
+  };
 }
 
 function isCentralOneReadyStatus(status: string): boolean {

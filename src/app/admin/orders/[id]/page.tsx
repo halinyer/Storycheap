@@ -101,6 +101,34 @@ async function AdminOrderDetailContent({
           </div>
         )}
 
+        {order.paidCents > 0 && order.paidCents < order.amountDueCents && (
+          <div className="rounded-2xl bg-amber-500/15 border border-amber-500/40 p-4 flex items-start gap-3 text-xs text-amber-100">
+            <AlertTriangle className="w-5 h-5 text-amber-300 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="font-black text-amber-200">
+                Pago parcial recibido (código retenido)
+              </div>
+              <div className="leading-relaxed">
+                Pagado:{" "}
+                <strong className="text-white">
+                  {formatCents(order.paidCents)} USD
+                </strong>{" "}
+                · Total esperado:{" "}
+                <strong className="text-white">
+                  {formatCents(order.amountDueCents)} USD
+                </strong>{" "}
+                ·{" "}
+                <strong className="text-amber-200">
+                  Falta para soltar el código:{" "}
+                  {formatCents(order.amountDueCents - order.paidCents)} USD
+                </strong>
+                . La entrega permanece bloqueada hasta recibir el saldo faltante
+                o acreditarlo como saldo interno al cliente.
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 text-xs">
           <div className="p-3 rounded-2xl bg-white/[0.03] border border-white/[0.08]">
             <span className="text-slate-400 block">Subtotal</span>
@@ -349,6 +377,9 @@ async function AdminOrderDetailContent({
         orderId={order.id}
         status={order.status}
         needsAttention={order.needsAttention}
+        paymentGateway={order.paymentGateway}
+        hasGatewayCheckoutId={Boolean(order.gatewayCheckoutId)}
+        amountDueCents={order.amountDueCents}
         isTest={order.isTest}
         testNote={order.testNote}
       />

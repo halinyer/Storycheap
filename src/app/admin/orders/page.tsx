@@ -143,17 +143,24 @@ async function AdminOrdersContent({
                     </td>
                     <td className="px-5 py-4 text-slate-200">{o.email}</td>
                     <td className="px-5 py-4">
-                      <span
-                        className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase ${
-                          o.needsAttention
-                            ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                            : o.status === "DELIVERED"
-                            ? "bg-emerald-500/20 text-emerald-300"
-                            : "bg-white/[0.06] text-slate-200"
-                        }`}
-                      >
-                        {o.status}
-                      </span>
+                      <div className="flex flex-col items-start gap-1">
+                        <span
+                          className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase ${
+                            o.needsAttention
+                              ? "bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                              : o.status === "DELIVERED"
+                              ? "bg-emerald-500/20 text-emerald-300"
+                              : "bg-white/[0.06] text-slate-200"
+                          }`}
+                        >
+                          {o.status}
+                        </span>
+                        {o.paidCents > 0 && o.paidCents < o.amountDueCents && (
+                          <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-amber-500/15 border border-amber-500/35 text-amber-300 whitespace-nowrap">
+                            Falta {formatCents(o.amountDueCents - o.paidCents)}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-5 py-4 font-black text-white">
                       {formatCents(o.subtotalCents)} USD

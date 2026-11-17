@@ -1,7 +1,7 @@
 import { connection, NextResponse, type NextRequest } from "next/server";
 import { getCronSecret, isStorePreviewMode } from "@/lib/server/env";
 import {
-  processVerifiedWebhookEvent,
+  reconcileGatewaySession,
   syncCentralOneOrderProgress,
 } from "@/lib/server/fulfillment";
 import { getPaymentGateway } from "@/lib/server/payments";
@@ -52,37 +52,12 @@ export async function GET(request: NextRequest) {
     try {
       const gw = getPaymentGateway(order.paymentGateway);
       const session = await gw.getCheckout(order.gatewayCheckoutId);
-      if (
-        session.status === "COMPLETED" ||
-        session.status === "PARTIALLY_PAID" ||
-        session.status === "EXPIRED" ||
-        session.status === "CANCELLED"
-      ) {
-        const eventType =
-          session.status === "COMPLETED"
-            ? "checkout.completed"
-            : session.status === "PARTIALLY_PAID"
-              ? "checkout.partially_paid"
-              : "checkout.expired";
-        const expiredTag =
-          session.expiresAt && Date.now() >= Date.parse(session.expiresAt)
-            ? "exp"
-            : "open";
-        await processVerifiedWebhookEvent(
-          {
-            gateway: order.paymentGateway,
-            eventId: `reconcile:${order.gatewayCheckoutId}:${session.status}:${session.paidCents}:${expiredTag}`,
-            eventType,
-            orderId: order.id,
-            checkoutId: order.gatewayCheckoutId,
-            priceCents: session.priceCents,
-            paidCents: session.paidCents,
-            status: session.status,
-            expiresAt: session.expiresAt,
-            rawPayload: { source: "cron_reconcile", session },
-          },
-          { skipRemoteDoubleCheck: true }
-        );
+      const rec = await reconcileGatewaySession({
+        order,
+        session,
+        source: "cron_reconcile",
+      });
+      if (rec.reconciled) {
         reconciledCount += 1;
       }
     } catch {
