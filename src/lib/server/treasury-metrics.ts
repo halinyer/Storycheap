@@ -2,6 +2,7 @@ import type {
   OrderDTO,
   SupplierPortfolioRow,
   TreasuryMovementDTO,
+  TreasuryMovementType,
   TreasuryPositionSummary,
 } from "@/types";
 import { summarizeOrdersMetrics } from "./sales-metrics";
@@ -235,6 +236,14 @@ export function computeTreasuryPosition({
     activeOrdersMetrics.profitCents + exchangeDiffUsdCents - expensesUsdCents;
   const undistributedProfitUsdCents =
     netBusinessProfitUsdCents - withdrawnProfitUsdCents;
+  const liquidProfitInReceiversUsdCents =
+    undistributedProfitUsdCents > 0
+      ? Math.min(undistributedProfitUsdCents, Math.max(0, totalReceiversUsdCents))
+      : 0;
+  const reinvestedProfitInSuppliersUsdCents =
+    undistributedProfitUsdCents > 0
+      ? undistributedProfitUsdCents - liquidProfitInReceiversUsdCents
+      : 0;
 
   const suppliersDiscrepancyUsdCents =
     totalSuppliersUsdCents - theoreticalSuppliersUsdCents;
@@ -254,6 +263,8 @@ export function computeTreasuryPosition({
     exchangeDiffUsdCents,
     netBusinessProfitUsdCents,
     undistributedProfitUsdCents,
+    liquidProfitInReceiversUsdCents,
+    reinvestedProfitInSuppliersUsdCents,
     theoreticalSuppliersUsdCents,
     suppliersDiscrepancyUsdCents,
     creditLiabilityUsdCents,
@@ -266,5 +277,70 @@ export function computeTreasuryPosition({
     pagomovilSalesGrossBsCents: activeOrdersMetrics.pagomovilBsCents,
     creditAppliedSalesUsdCents: activeOrdersMetrics.creditAppliedCents,
     fundedBySupplierUsdCents,
+  };
+}
+
+/**
+ * Splits a treasury operation that carries an on-chain/bank network fee into
+ * the net transfer/capital entry plus a paired `EXPENSE_FEE` entry so account
+ * balances, theoretical supplier cupo, and net profit all reconcile to the penny.
+ */
+export function buildTreasuryMovementWithFeePlan(input: {
+  movementType: TreasuryMovementType;
+  sourceAccount: string;
+  targetAccount: string;
+  amountUsdCents: number;
+  networkFeeUsdCents?: number | null;
+}): {
+  primaryAmountUsdCents: number;
+  feeEntry: {
+    movementType: "EXPENSE_FEE";
+    sourceAccount: string;
+    targetAccount: "expense";
+    amountUsdCents: number;
+  } | null;
+} {
+  const feeCents = Math.max(0, Math.round(Number(input.networkFeeUsdCents ?? 0)));
+  if (!Number.isFinite(feeCents) || feeCents === 0) {
+    return { primaryAmountUsdCents: input.amountUsdCents, feeEntry: null };
+  }
+  if (
+    input.movementType !== "SUPPLIER_TOPUP" &&
+    input.movementType !== "CAPITAL_IN" &&
+    input.movementType !== "PROFIT_WITHDRAWAL"
+  ) {
+    throw new Error(
+      "La comisión de red se aplica en recargas a distribuidor, aportes de capital o retiros."
+    );
+  }
+  if (input.amountUsdCents <= feeCents) {
+    throw new Error(
+      "La comisión de red debe ser menor que el monto total enviado."
+    );
+  }
+
+  const fromExternal =
+    input.sourceAccount === "external" || input.movementType === "CAPITAL_IN";
+
+  if (fromExternal) {
+    return {
+      primaryAmountUsdCents: input.amountUsdCents,
+      feeEntry: {
+        movementType: "EXPENSE_FEE",
+        sourceAccount: input.targetAccount,
+        targetAccount: "expense",
+        amountUsdCents: feeCents,
+      },
+    };
+  }
+
+  return {
+    primaryAmountUsdCents: input.amountUsdCents - feeCents,
+    feeEntry: {
+      movementType: "EXPENSE_FEE",
+      sourceAccount: input.sourceAccount,
+      targetAccount: "expense",
+      amountUsdCents: feeCents,
+    },
   };
 }

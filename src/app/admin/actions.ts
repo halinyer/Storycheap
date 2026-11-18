@@ -33,6 +33,7 @@ import {
 } from "@/lib/server/pagomovil-store";
 import { adminManualConfirmPagoMovil } from "@/lib/server/payments/pagomovil-bot";
 import { parseBankNotification } from "@/lib/server/payments/parsers";
+import { buildTreasuryMovementWithFeePlan } from "@/lib/server/treasury-metrics";
 import {
   appendAuditLog,
   appendCreditLedgerEntry,
@@ -1300,6 +1301,7 @@ const createTreasuryMovementSchema = z.object({
   sourceAccount: z.string().trim().min(1).max(60),
   targetAccount: z.string().trim().min(1).max(60),
   amountUsdCents: z.number().int().min(0).max(500_000_000),
+  networkFeeUsdCents: z.number().int().min(0).max(50_000_000).optional(),
   amountBsCents: z.number().int().min(0).max(5_000_000_000).nullable().optional(),
   exchangeRateCents: z.number().int().min(1).max(50_000_000).nullable().optional(),
   partnerName: z.string().trim().max(80).nullable().optional(),
@@ -1314,6 +1316,7 @@ export async function createTreasuryMovementAction(input: {
   sourceAccount: string;
   targetAccount: string;
   amountUsdCents: number;
+  networkFeeUsdCents?: number;
   amountBsCents?: number | null;
   exchangeRateCents?: number | null;
   partnerName?: string | null;
@@ -1331,11 +1334,19 @@ export async function createTreasuryMovementAction(input: {
     throw new Error("La cuenta de origen y destino no pueden ser iguales.");
   }
 
-  const created = await createTreasuryMovementAdmin({
+  const feePlan = buildTreasuryMovementWithFeePlan({
     movementType: parsed.movementType,
     sourceAccount: parsed.sourceAccount,
     targetAccount: parsed.targetAccount,
     amountUsdCents: parsed.amountUsdCents,
+    networkFeeUsdCents: parsed.networkFeeUsdCents,
+  });
+
+  const created = await createTreasuryMovementAdmin({
+    movementType: parsed.movementType,
+    sourceAccount: parsed.sourceAccount,
+    targetAccount: parsed.targetAccount,
+    amountUsdCents: feePlan.primaryAmountUsdCents,
     amountBsCents: parsed.amountBsCents ?? null,
     exchangeRateCents: parsed.exchangeRateCents ?? null,
     partnerName: parsed.partnerName || null,
@@ -1345,6 +1356,27 @@ export async function createTreasuryMovementAction(input: {
     relatedOrderId: parsed.relatedOrderId ?? null,
     createdBy: adminUser.id,
   });
+
+  let createdFeeId: string | null = null;
+  if (feePlan.feeEntry) {
+    const feeRow = await createTreasuryMovementAdmin({
+      movementType: feePlan.feeEntry.movementType,
+      sourceAccount: feePlan.feeEntry.sourceAccount,
+      targetAccount: feePlan.feeEntry.targetAccount,
+      amountUsdCents: feePlan.feeEntry.amountUsdCents,
+      amountBsCents: null,
+      exchangeRateCents: null,
+      partnerName: parsed.partnerName || null,
+      reference: parsed.reference || null,
+      notes: `Comisión de red (${parsed.sourceAccount} → ${parsed.targetAccount})${
+        parsed.notes ? ` · ${parsed.notes}` : ""
+      }`,
+      occurredAt: parsed.occurredAt,
+      relatedOrderId: parsed.relatedOrderId ?? null,
+      createdBy: adminUser.id,
+    });
+    createdFeeId = feeRow.id;
+  }
 
   await appendAuditLog({
     actorId: adminUser.id,
@@ -1357,6 +1389,8 @@ export async function createTreasuryMovementAction(input: {
       sourceAccount: created.sourceAccount,
       targetAccount: created.targetAccount,
       amountUsdCents: created.amountUsdCents,
+      networkFeeUsdCents: feePlan.feeEntry?.amountUsdCents ?? 0,
+      feeMovementId: createdFeeId,
       amountBsCents: created.amountBsCents,
       partnerName: created.partnerName,
     },

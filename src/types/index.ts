@@ -406,6 +406,10 @@ export interface TreasuryPositionSummary {
   /** Ganancia dentro del negocio sin retirar = Equity + Retiros - Capital Aportado (o ventas netas sin retirar) */
   netBusinessProfitUsdCents: number;
   undistributedProfitUsdCents: number;
+  /** Parte de la ganancia sin retirar que está líquida hoy en cuentas receptoras (retirable ahora) */
+  liquidProfitInReceiversUsdCents: number;
+  /** Parte de la ganancia sin retirar que está reinvertida trabajando dentro de distribuidores API/CSV */
+  reinvestedProfitInSuppliersUsdCents: number;
   /** Saldo teórico esperado en proveedores vs saldo real en vivo (alerta si falta registrar un fondeo o reembolso) */
   theoreticalSuppliersUsdCents: number;
   suppliersDiscrepancyUsdCents: number;

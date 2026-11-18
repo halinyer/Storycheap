@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { computeTreasuryPosition } from "@/lib/server/treasury-metrics";
+import {
+  buildTreasuryMovementWithFeePlan,
+  computeTreasuryPosition,
+} from "@/lib/server/treasury-metrics";
 import type { OrderDTO, TreasuryMovementDTO } from "@/types";
 
 function makeOrder(overrides: Partial<OrderDTO> = {}): OrderDTO {
@@ -128,6 +131,8 @@ describe("computeTreasuryPosition — exact $400 -> $421 cases & test reconcilia
     expect(pos.salesGrossProfitUsdCents).toBe(2100);
     expect(pos.withdrawnProfitUsdCents).toBe(0);
     expect(pos.undistributedProfitUsdCents).toBe(2100);
+    expect(pos.liquidProfitInReceiversUsdCents).toBe(0);
+    expect(pos.reinvestedProfitInSuppliersUsdCents).toBe(2100);
     expect(pos.suppliersDiscrepancyUsdCents).toBe(0);
     expect(pos.fundedBySupplierUsdCents.fazercards).toBe(82100);
   });
@@ -307,5 +312,123 @@ describe("computeTreasuryPosition — exact $400 -> $421 cases & test reconcilia
     expect(pos.salesGrossProfitUsdCents).toBe(0);
     expect(pos.withdrawnProfitUsdCents).toBe(0);
     expect(pos.suppliersDiscrepancyUsdCents).toBe(0);
+  });
+
+  it("Descuenta comisiones de red BSC al reinvertir saldo y distingue ganancia liquida vs reinvertida", () => {
+    const netflix10Order = makeOrder({
+      id: "ord-nf-10",
+      subtotalCents: 15460,
+      creditAppliedCents: 7,
+      amountDueCents: 15453,
+      paidCents: 15453,
+      paymentGateway: "zenobank",
+      items: [
+        {
+          id: "item-nf-10",
+          orderId: "ord-nf-10",
+          variantId: "v-nf15",
+          productName: "Netflix Gift Card (USA / USD)",
+          productSlug: "netflix-gift-card-usa",
+          denominationLabel: "15 USD",
+          region: "USA",
+          unitPriceCents: 1546,
+          unitCostCents: 1460,
+          quantity: 10,
+          deliveredCount: 10,
+          status: "FULFILLED",
+        },
+      ],
+    });
+
+    const initialFazerSeed = makeMovement({
+      movementType: "CAPITAL_IN",
+      sourceAccount: "external",
+      targetAccount: "fazercards",
+      amountUsdCents: 14600,
+    });
+
+    // Transfer 1: $154.53 sent from Binance with $0.01 BSC network fee ($154.52 credited)
+    const plan1 = buildTreasuryMovementWithFeePlan({
+      movementType: "SUPPLIER_TOPUP",
+      sourceAccount: "zenobank",
+      targetAccount: "fazercards",
+      amountUsdCents: 15453,
+      networkFeeUsdCents: 1,
+    });
+    expect(plan1.primaryAmountUsdCents).toBe(15452);
+    expect(plan1.feeEntry).toEqual({
+      movementType: "EXPENSE_FEE",
+      sourceAccount: "zenobank",
+      targetAccount: "expense",
+      amountUsdCents: 1,
+    });
+
+    // Transfer 2: $3.00 sent from external wallet with $0.01 BSC fee ($2.99 credited)
+    const plan2 = buildTreasuryMovementWithFeePlan({
+      movementType: "SUPPLIER_TOPUP",
+      sourceAccount: "external",
+      targetAccount: "fazercards",
+      amountUsdCents: 300,
+      networkFeeUsdCents: 1,
+    });
+    expect(plan2.primaryAmountUsdCents).toBe(300);
+    expect(plan2.feeEntry).toEqual({
+      movementType: "EXPENSE_FEE",
+      sourceAccount: "fazercards",
+      targetAccount: "expense",
+      amountUsdCents: 1,
+    });
+
+    const movements = [
+      initialFazerSeed,
+      makeMovement({
+        movementType: "SUPPLIER_TOPUP",
+        sourceAccount: "zenobank",
+        targetAccount: "fazercards",
+        amountUsdCents: plan1.primaryAmountUsdCents,
+        occurredAt: "2026-11-17T21:10:00.000Z",
+      }),
+      makeMovement({
+        movementType: plan1.feeEntry!.movementType,
+        sourceAccount: plan1.feeEntry!.sourceAccount,
+        targetAccount: plan1.feeEntry!.targetAccount,
+        amountUsdCents: plan1.feeEntry!.amountUsdCents,
+        occurredAt: "2026-11-17T21:10:01.000Z",
+      }),
+      makeMovement({
+        movementType: "SUPPLIER_TOPUP",
+        sourceAccount: "external",
+        targetAccount: "fazercards",
+        amountUsdCents: plan2.primaryAmountUsdCents,
+        occurredAt: "2026-11-17T21:12:00.000Z",
+      }),
+      makeMovement({
+        movementType: plan2.feeEntry!.movementType,
+        sourceAccount: plan2.feeEntry!.sourceAccount,
+        targetAccount: plan2.feeEntry!.targetAccount,
+        amountUsdCents: plan2.feeEntry!.amountUsdCents,
+        occurredAt: "2026-11-17T21:12:01.000Z",
+      }),
+    ];
+
+    const pos = computeTreasuryPosition({
+      orders: [netflix10Order],
+      movements,
+      suppliers: [
+        { id: "fazercards", balanceCents: 15751, enabled: true, configured: true },
+      ],
+    });
+
+    // Binance drained cleanly to $0.00; FazerCards has exact $157.51 ($154.52 + $2.99)
+    expect(pos.zenobankBalanceUsdCents).toBe(0);
+    expect(pos.totalSuppliersUsdCents).toBe(15751);
+    expect(pos.suppliersDiscrepancyUsdCents).toBe(0);
+    expect(pos.netContributedCapitalUsdCents).toBe(14900);
+    // Gross sales profit = $154.60 - $146.00 = $8.60; minus $0.02 BSC fees = $8.58
+    expect(pos.salesGrossProfitUsdCents).toBe(860);
+    expect(pos.expensesUsdCents).toBe(2);
+    expect(pos.netBusinessProfitUsdCents).toBe(858);
+    expect(pos.liquidProfitInReceiversUsdCents).toBe(0);
+    expect(pos.reinvestedProfitInSuppliersUsdCents).toBe(858);
   });
 });

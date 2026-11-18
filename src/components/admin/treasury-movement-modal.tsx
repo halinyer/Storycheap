@@ -9,7 +9,7 @@ import type {
   TreasuryMovementDTO,
   TreasuryMovementType,
 } from "@/types";
-import { ArrowRightLeft, PlusCircle, X } from "lucide-react";
+import { AlertCircle, ArrowRightLeft, PlusCircle, X } from "lucide-react";
 import { toast } from "sonner";
 
 export interface TreasuryMovementModalPreset {
@@ -31,7 +31,7 @@ const TYPE_META: Record<
   SUPPLIER_TOPUP: {
     label: "Reinvertir / Recargar Distribuidor",
     helper:
-      "Mueve saldo de Binance o Pago Móvil hacia un proveedor (ej. FazerCards o Central One). No reduce tu ganancia: solo cambia dinero de tu receptora a cupo de venta.",
+      "Mueve saldo de Binance o Pago Móvil hacia un proveedor (ej. FazerCards o Central One). Si pagas comisión de red (ej. $0.01 BSC), regístrala para descontarla de la ganancia neta.",
     defaultSource: "zenobank",
     defaultTarget: "fazercards",
   },
@@ -52,7 +52,7 @@ const TYPE_META: Record<
   INTERNAL_TRANSFER: {
     label: "Cambio P2P / Transferencia Interna",
     helper:
-      "Convierte Bolívares de Bancamiga/Pago Móvil a USDT en Binance (o viceversa) registrando el monto real en Bs salientes y USD recibidos.",
+      "Convierte Bolívares de Pago Móvil a USDT en Binance (o viceversa) registrando el monto real en Bs salientes y USD recibidos.",
     defaultSource: "pagomovil",
     defaultTarget: "zenobank",
   },
@@ -85,6 +85,11 @@ export interface TreasuryMovementModalProps {
   onClose: () => void;
   suppliers: SupplierPortfolioRow[];
   preset?: TreasuryMovementModalPreset;
+  activePagoMovilBankName?: string | null;
+  receiverBalances?: {
+    zenobankUsdCents: number;
+    pagomovilUsdCents: number;
+  };
   onCreated?: (movement: TreasuryMovementDTO) => void;
 }
 
@@ -96,6 +101,8 @@ export function TreasuryMovementModal(props: TreasuryMovementModalProps) {
       onClose={props.onClose}
       suppliers={props.suppliers}
       preset={props.preset}
+      activePagoMovilBankName={props.activePagoMovilBankName}
+      receiverBalances={props.receiverBalances}
       onCreated={props.onCreated}
     />
   );
@@ -105,9 +112,14 @@ function TreasuryMovementModalForm({
   onClose,
   suppliers,
   preset,
+  activePagoMovilBankName,
+  receiverBalances,
   onCreated,
 }: Omit<TreasuryMovementModalProps, "open">) {
   const router = useRouter();
+  const pagoMovilLabel = activePagoMovilBankName
+    ? `Pago Móvil · ${activePagoMovilBankName} (Bs)`
+    : "Pago Móvil (Bs)";
   const initialType = preset?.movementType ?? "SUPPLIER_TOPUP";
   const [movementType, setMovementType] =
     useState<TreasuryMovementType>(initialType);
@@ -118,6 +130,7 @@ function TreasuryMovementModalForm({
     preset?.targetAccount ?? TYPE_META[initialType].defaultTarget
   );
   const [usdInput, setUsdInput] = useState("");
+  const [networkFeeInput, setNetworkFeeInput] = useState("");
   const [bsInput, setBsInput] = useState("");
   const [partnerName, setPartnerName] = useState("");
   const [reference, setReference] = useState("");
@@ -139,9 +152,20 @@ function TreasuryMovementModalForm({
     setMovementType(nextType);
     setSourceAccount(TYPE_META[nextType].defaultSource);
     setTargetAccount(TYPE_META[nextType].defaultTarget);
+    setNetworkFeeInput("");
   };
 
+  const supportsNetworkFee =
+    movementType === "SUPPLIER_TOPUP" ||
+    movementType === "CAPITAL_IN" ||
+    movementType === "PROFIT_WITHDRAWAL";
+
   const parsedUsdCents = parseMoneyToCents(usdInput);
+  const parsedFeeCents = supportsNetworkFee
+    ? parseMoneyToCents(networkFeeInput) ?? 0
+    : 0;
+  const netTargetCents =
+    parsedUsdCents !== null ? Math.max(0, parsedUsdCents - parsedFeeCents) : null;
   const parsedBsCents = parseMoneyToCents(bsInput);
   const impliedP2pRate =
     parsedUsdCents && parsedUsdCents > 0 && parsedBsCents && parsedBsCents > 0
@@ -161,6 +185,10 @@ function TreasuryMovementModalForm({
     e.preventDefault();
     if (parsedUsdCents === null || parsedUsdCents <= 0) {
       toast.error("Ingresa un monto en USD válido mayor a 0.");
+      return;
+    }
+    if (parsedFeeCents > 0 && parsedFeeCents >= parsedUsdCents) {
+      toast.error("La comisión de red debe ser menor al monto total enviado.");
       return;
     }
 
@@ -188,13 +216,18 @@ function TreasuryMovementModalForm({
         sourceAccount: finalSource,
         targetAccount: finalTarget,
         amountUsdCents: parsedUsdCents,
+        networkFeeUsdCents: parsedFeeCents > 0 ? parsedFeeCents : undefined,
         amountBsCents: parsedBsCents,
         exchangeRateCents: impliedP2pRate ? Math.round(impliedP2pRate * 100) : null,
         partnerName: partnerName.trim() || null,
         reference: reference.trim() || null,
         notes: notes.trim(),
       });
-      toast.success(`Movimiento registrado (${formatCents(created.amountUsdCents)})`);
+      toast.success(
+        parsedFeeCents > 0
+          ? `Movimiento registrado (${formatCents(created.amountUsdCents)} + ${formatCents(parsedFeeCents)} fee de red)`
+          : `Movimiento registrado (${formatCents(created.amountUsdCents)})`
+      );
       onCreated?.(created);
       router.refresh();
       onClose();
@@ -283,7 +316,7 @@ function TreasuryMovementModalForm({
                   className="w-full rounded-xl bg-slate-950 border border-white/15 px-3 py-2 text-xs text-white"
                 >
                   <option value="zenobank">Binance / ZenoBank (USDT)</option>
-                  <option value="pagomovil">Bancamiga / Pago Móvil (Bs)</option>
+                  <option value="pagomovil">{pagoMovilLabel}</option>
                   {supplierOptions.map((s) => (
                     <option key={s.value} value={s.value}>
                       {s.label}
@@ -309,7 +342,7 @@ function TreasuryMovementModalForm({
                   ) : (
                     <>
                       <option value="zenobank">Binance / ZenoBank (USDT)</option>
-                      <option value="pagomovil">Bancamiga / Pago Móvil (Bs)</option>
+                      <option value="pagomovil">{pagoMovilLabel}</option>
                       {movementType === "SUPPLIER_TOPUP" && (
                         <option value="external">Capital externo directo</option>
                       )}
@@ -322,6 +355,19 @@ function TreasuryMovementModalForm({
                     </>
                   )}
                 </select>
+                {receiverBalances &&
+                  (sourceAccount === "zenobank" || sourceAccount === "pagomovil") && (
+                    <p className="mt-1 text-[10px] text-slate-400">
+                      Disponible en caja:{" "}
+                      <strong className="text-slate-200 font-mono">
+                        {formatCents(
+                          sourceAccount === "zenobank"
+                            ? receiverBalances.zenobankUsdCents
+                            : receiverBalances.pagomovilUsdCents
+                        )}
+                      </strong>
+                    </p>
+                  )}
               </div>
 
               <div>
@@ -347,7 +393,7 @@ function TreasuryMovementModalForm({
                         movementType === "INTERNAL_TRANSFER") && (
                         <>
                           <option value="zenobank">Binance / ZenoBank (USDT)</option>
-                          <option value="pagomovil">Bancamiga / Pago Móvil (Bs)</option>
+                          <option value="pagomovil">{pagoMovilLabel}</option>
                         </>
                       )}
                       {movementType !== "INTERNAL_TRANSFER" &&
@@ -364,23 +410,46 @@ function TreasuryMovementModalForm({
           )}
 
           <div
-            className={`grid grid-cols-1 ${showBsInput ? "sm:grid-cols-2" : ""} gap-3`}
+            className={`grid grid-cols-1 ${
+              showBsInput || supportsNetworkFee ? "sm:grid-cols-2" : ""
+            } gap-3`}
           >
             <div>
               <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                {isSwapBsToUsd ? "USDT reales recibidos (USD)" : "Monto (USD)"}
+                {isSwapBsToUsd
+                  ? "USDT reales recibidos (USD)"
+                  : supportsNetworkFee
+                    ? "Monto enviado / debitado (USD)"
+                    : "Monto (USD)"}
               </label>
               <input
                 required
                 type="number"
                 step="0.01"
                 min="0.01"
-                placeholder="Ej. 400.00"
+                placeholder="Ej. 154.53"
                 value={usdInput}
                 onChange={(e) => setUsdInput(e.target.value)}
                 className="w-full rounded-xl bg-slate-950 border border-white/15 px-3.5 py-2 text-sm font-mono font-bold text-white focus:outline-none focus:border-indigo-400"
               />
             </div>
+
+            {supportsNetworkFee && (
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-amber-300 mb-1">
+                  Comisión de red / Fee (USD, opcional)
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="Ej. 0.01 (BSC)"
+                  value={networkFeeInput}
+                  onChange={(e) => setNetworkFeeInput(e.target.value)}
+                  className="w-full rounded-xl bg-slate-950 border border-amber-400/25 px-3.5 py-2 text-sm font-mono font-bold text-amber-200 focus:outline-none focus:border-amber-400"
+                />
+              </div>
+            )}
 
             {showBsInput && (
               <div>
@@ -404,6 +473,40 @@ function TreasuryMovementModalForm({
               </div>
             )}
           </div>
+
+          {supportsNetworkFee && parsedUsdCents !== null && parsedUsdCents > 0 && (
+            <div className="rounded-xl bg-amber-500/[0.07] border border-amber-400/25 px-3.5 py-2.5 text-[11px] space-y-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-slate-200">
+                <span>
+                  Sale de origen:{" "}
+                  <strong className="font-mono text-white">
+                    {formatCents(parsedUsdCents)}
+                  </strong>
+                </span>
+                <span>
+                  Comisión (-Ganancia Neta):{" "}
+                  <strong className="font-mono text-amber-300">
+                    -{formatCents(parsedFeeCents)}
+                  </strong>
+                </span>
+                <span>
+                  Acredita neto en destino:{" "}
+                  <strong className="font-mono text-emerald-300">
+                    {formatCents(netTargetCents ?? parsedUsdCents)}
+                  </strong>
+                </span>
+              </div>
+              {movementType === "SUPPLIER_TOPUP" && (
+                <div className="flex items-start gap-1.5 text-amber-200/85 pt-0.5">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    Recuerda: si el distribuidor te exige factura exacta en red BSC/TRC20, envía{" "}
+                    <strong>monto deseado + fee</strong> en Binance para que no llegue {parsedFeeCents > 0 ? formatCents(parsedFeeCents) : "$0.01"} corto.
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>

@@ -80,7 +80,7 @@ const MOVEMENT_BADGES: Record<
 const ACCOUNT_NAMES: Record<string, string> = {
   external: "Capital Externo",
   zenobank: "Binance / ZenoBank",
-  pagomovil: "Bancamiga / Pago Móvil",
+  pagomovil: "Pago Móvil (Bs)",
   fazercards: "FazerCards API",
   centralone: "Central One API",
   manual: "Stock CSV",
@@ -420,11 +420,21 @@ export function TreasuryConsole({
             {position.netBusinessProfitUsdCents >= 0 ? "+" : ""}
             {formatCents(position.netBusinessProfitUsdCents)}
           </div>
-          <div className="text-[11px] text-slate-400">
-            Retirada {formatCents(position.withdrawnProfitUsdCents)} ·{" "}
-            <span className="text-emerald-300 font-semibold">
-              Sin retirar {formatCents(position.undistributedProfitUsdCents)}
-            </span>
+          <div className="text-[11px] text-slate-400 leading-relaxed">
+            Retirada {formatCents(position.withdrawnProfitUsdCents)}
+            {position.expensesUsdCents > 0
+              ? ` · Fees/Gastos -${formatCents(position.expensesUsdCents)}`
+              : ""}
+            <div className="text-[11px]">
+              <span className="text-emerald-300 font-semibold">
+                En caja {formatCents(position.liquidProfitInReceiversUsdCents)}
+              </span>
+              {" · "}
+              <span className="text-sky-300 font-semibold">
+                Reinvertida en APIs{" "}
+                {formatCents(position.reinvestedProfitInSuppliersUsdCents)}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -615,7 +625,10 @@ export function TreasuryConsole({
           <div className="rounded-2xl bg-[#0d101b] border border-sky-400/20 p-5 flex items-center justify-between gap-4">
             <div>
               <div className="text-xs font-bold text-sky-300">
-                Saldo Neto Disponible en Bancamiga / Pago Móvil
+                Saldo Neto Disponible en{" "}
+                {activePagoMovilAccount?.bankName
+                  ? `${activePagoMovilAccount.bankName} / Pago Móvil`
+                  : "Pago Móvil (Bs)"}
               </div>
               <div className="text-2xl font-black font-mono text-white mt-1">
                 {formatBsCents(position.pagomovilBalanceBsCents)}{" "}
@@ -863,6 +876,11 @@ export function TreasuryConsole({
         onClose={() => setModalOpen(false)}
         suppliers={suppliers}
         preset={modalPreset}
+        activePagoMovilBankName={activePagoMovilAccount?.bankName ?? null}
+        receiverBalances={{
+          zenobankUsdCents: position.zenobankBalanceUsdCents,
+          pagomovilUsdCents: position.pagomovilBalanceUsdCents,
+        }}
       />
     </div>
   );
