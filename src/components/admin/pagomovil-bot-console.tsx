@@ -224,6 +224,28 @@ export function PagoMovilBotConsole(props: PagoMovilBotConsoleProps) {
     }
   };
 
+  const handleDisableWatchdogBlock = async () => {
+    setBusyKey("disable_watchdog_block");
+    try {
+      await savePagoMovilBotSettingsAction({
+        rateExpirationMinutes: props.settings.rateExpirationMinutes,
+        orderExpirationMinutes: props.settings.orderExpirationMinutes,
+        amountToleranceBsCents: props.settings.amountToleranceBsCents,
+        watchdogOfflineMinutes: props.settings.watchdogOfflineMinutes,
+        minReferenceDigits: props.settings.minReferenceDigits,
+        enforceWatchdog: false,
+        requireSenderPhone: props.settings.requireSenderPhone,
+      });
+      setEnforceWatchdog(false);
+      toast.success("Bloqueo por Watchdog desactivado; Pago Móvil habilitado en Checkout");
+      router.refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Error actualizando Watchdog");
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const handleFetchLiveRates = async () => {
     setBusyKey("live_rates");
     try {
@@ -388,6 +410,20 @@ export function PagoMovilBotConsole(props: PagoMovilBotConsoleProps) {
     2
   );
 
+  const macroDroidHeartbeatSnippet = JSON.stringify(
+    {
+      battery_level: "[battery]",
+      network_type: "WIFI_DATA",
+    },
+    null,
+    2
+  );
+
+  const watchdogBlockingCheckout =
+    props.providerEnabled &&
+    props.settings.enforceWatchdog &&
+    !props.watchdog.online;
+
   const googleAppsScriptSnippet = `// Pega esto en script.google.com (Trigger: Cada 1 minuto)
 const INGEST_URL = "${props.siteUrl}/api/bot/ingest";
 const DEVICE_ID = "${activeDeviceIdentifier}";
@@ -461,18 +497,24 @@ function checkBankEmails() {
 
         {/* Card 2: Checkout Gateway Status */}
         <div className="rounded-3xl apple-glass p-5 space-y-2 border border-white/10">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
               Checkout StoryCheap
             </span>
             <span
               className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
-                props.providerEnabled
-                  ? "bg-emerald-500/15 text-emerald-300"
-                  : "bg-rose-500/15 text-rose-300"
+                !props.providerEnabled
+                  ? "bg-rose-500/15 text-rose-300"
+                  : watchdogBlockingCheckout
+                    ? "bg-amber-500/15 text-amber-300"
+                    : "bg-emerald-500/15 text-emerald-300"
               }`}
             >
-              {props.providerEnabled ? "ACTIVO" : "PAUSADO"}
+              {!props.providerEnabled
+                ? "PAUSADO"
+                : watchdogBlockingCheckout
+                  ? "BLOQUEADO (WATCHDOG)"
+                  : "ACTIVO"}
             </span>
           </div>
           <div className="text-base font-black text-white truncate">
@@ -480,17 +522,34 @@ function checkBankEmails() {
               ? `${primaryAccount.bankCode} · ${primaryAccount.bankName}`
               : "Sin cuenta receptora"}
           </div>
-          <button
-            type="button"
-            disabled={busyKey === "toggle_provider"}
-            onClick={() => void handleToggleProvider()}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-[11px] font-bold text-white transition-colors"
-          >
-            <Power className="w-3.5 h-3.5" />
-            <span>
-              {props.providerEnabled ? "Pausar pasarela" : "Activar en Checkout"}
-            </span>
-          </button>
+          {watchdogBlockingCheckout && (
+            <div className="text-[11px] text-amber-300 leading-snug">
+              Watchdog offline (&gt;{props.settings.watchdogOfflineMinutes} min) bloqueando Checkout.
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={busyKey === "toggle_provider"}
+              onClick={() => void handleToggleProvider()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-[11px] font-bold text-white transition-colors"
+            >
+              <Power className="w-3.5 h-3.5" />
+              <span>
+                {props.providerEnabled ? "Pausar pasarela" : "Activar en Checkout"}
+              </span>
+            </button>
+            {watchdogBlockingCheckout && (
+              <button
+                type="button"
+                disabled={busyKey === "disable_watchdog_block"}
+                onClick={() => void handleDisableWatchdogBlock()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/30 text-[11px] font-bold text-amber-200 transition-colors"
+              >
+                <span>Desbloquear Checkout</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Card 3: Live Bs/USD Rate Helper */}
@@ -1364,20 +1423,39 @@ function checkBankEmails() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* MacroDroid Card */}
             <div className="rounded-3xl apple-glass p-6 space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-black text-white flex items-center gap-2">
                   <Terminal className="w-4 h-4 text-emerald-400" />
                   <span>Guía Rápida MacroDroid (Notificaciones Push {activeBankShort})</span>
                 </h3>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void copyText("macro_json", macroDroidBodySnippet, "JSON MacroDroid")
-                  }
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/10 text-[11px] font-bold text-white"
-                >
-                  <Copy className="w-3 h-3" /> Copiar JSON
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void copyText(
+                        "macro_json",
+                        macroDroidBodySnippet,
+                        "JSON Notificación MacroDroid"
+                      )
+                    }
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/10 text-[11px] font-bold text-white"
+                  >
+                    <Copy className="w-3 h-3" /> JSON Pago
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void copyText(
+                        "macro_hb",
+                        macroDroidHeartbeatSnippet,
+                        "JSON Heartbeat MacroDroid"
+                      )
+                    }
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-400/30 text-[11px] font-bold text-emerald-200"
+                  >
+                    <Copy className="w-3 h-3" /> JSON Latido
+                  </button>
+                </div>
               </div>
               <ol className="text-xs text-slate-300 space-y-1.5 list-decimal pl-4 leading-relaxed">
                 <li>
@@ -1394,7 +1472,11 @@ function checkBankEmails() {
                   Body: elige <strong>Tipo de contenido: application/json</strong> y pega el bloque en <strong>Texto</strong> (o usa <strong>Parámetros</strong> con los mismos campos). Si usas JSON, asegúrate de que los comodines tengan <strong>corchetes `[...]`</strong> insertados desde el botón <code className="text-amber-300">...</code> Magic Text (nunca llaves <code>{"{...}"}</code>).
                 </li>
                 <li>
-                  Heartbeat recomendado: Macro cada 5 min haciendo <code className="text-emerald-300">POST {props.siteUrl}/api/bot/heartbeat</code>.
+                  Macro Heartbeat (cada 5 min): trigger <strong>Intervalo regular</strong> con la casilla <strong>&quot;Usar reloj de alarma / Use Alarm&quot;</strong> marcada → <strong>HTTP Request (POST o GET)</strong> a{" "}
+                  <code className="text-emerald-300">{props.siteUrl}/api/bot/heartbeat</code> con las mismas cabeceras.
+                </li>
+                <li>
+                  Anti-Doze Android (además de Batería <strong>Sin restricciones</strong>): activa <strong>Datos sin restricciones en segundo plano</strong>, <strong>Inicio automático (Autostart)</strong> si usas Xiaomi/Samsung/Honor, y deja visible la <strong>notificación persistente de MacroDroid</strong>.
                 </li>
               </ol>
               <pre className="rounded-2xl bg-slate-950 border border-white/10 p-3 text-[11px] font-mono text-emerald-300 overflow-x-auto">

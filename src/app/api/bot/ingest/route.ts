@@ -19,6 +19,10 @@ export async function POST(request: Request) {
     try {
       parseBotPayloadRaw(rawBody, contentType);
     } catch {
+      console.warn("[api/bot/ingest] Invalid payload:", {
+        deviceId: request.headers.get("x-bot-device-id") ?? null,
+        contentType,
+      });
       return NextResponse.json(
         { error: "Formato JSON o formulario inválido." },
         { status: 400 }
@@ -41,6 +45,11 @@ export async function POST(request: Request) {
     });
   } catch (err) {
     if (err instanceof PagoMovilAuthError) {
+      console.warn("[api/bot/ingest] Auth rejected:", {
+        deviceId: request.headers.get("x-bot-device-id") ?? null,
+        status: err.status,
+        reason: err.message,
+      });
       return NextResponse.json({ error: err.message }, { status: err.status });
     }
     console.error("[api/bot/ingest] Error:", err);

@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { GET as heartbeatGet, POST as heartbeatPost } from "@/app/api/bot/heartbeat/route";
 import { SANDBOX_DEFAULT_ADMIN_ID } from "@/lib/server/auth";
 import { initiateCheckout } from "@/lib/server/checkout-service";
 import { resolveOrderUnderpayment } from "@/lib/server/fulfillment";
 import {
   getOrderPagoMovilReport,
   getPagoMovilBotSettings,
+  listBotDevices,
   registerBotDevice,
   saveOrderPagoMovilReport,
   savePagoMovilBotSettings,
@@ -1244,6 +1246,61 @@ Ref: 00654321",
       });
       expect(polled.status).toBe("DELIVERED");
       expect(polled.matchedReference).toBe("44556677");
+    });
+
+    it("accepts authenticated POST heartbeat with broken telemetry JSON and GET heartbeat with query telemetry", async () => {
+      const { device, plainSecret } = await setupActivePagoMovilEnvironment(5000);
+
+      // Broken JSON body from misconfigured MacroDroid placeholders must still record heartbeat after auth passes
+      const brokenPostRes = await heartbeatPost(
+        new Request("https://storycheap.com/api/bot/heartbeat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Bot-Device-Id": device.deviceIdentifier,
+            "X-Bot-Token": plainSecret,
+          },
+          body: '{"battery_level": [battery], "network_type": WIFI_DATA, broken}',
+        })
+      );
+      expect(brokenPostRes.status).toBe(200);
+      const postJson = (await brokenPostRes.json()) as {
+        ok: boolean;
+        warning?: string;
+      };
+      expect(postJson.ok).toBe(true);
+      expect(postJson.warning).toBeTruthy();
+
+      // GET with valid headers + query telemetry also succeeds (never 405)
+      const okGetRes = await heartbeatGet(
+        new Request(
+          "https://storycheap.com/api/bot/heartbeat?battery_level=41&network_type=LTE",
+          {
+            method: "GET",
+            headers: {
+              "X-Bot-Device-Id": device.deviceIdentifier,
+              "X-Bot-Token": plainSecret,
+            },
+          }
+        )
+      );
+      expect(okGetRes.status).toBe(200);
+      const devices = await listBotDevices();
+      const updated = devices.find((d) => d.id === device.id);
+      expect(updated?.batteryLevel).toBe(41);
+      expect(updated?.networkType).toBe("LTE");
+
+      // Unauthenticated GET still strictly rejected
+      const badGetRes = await heartbeatGet(
+        new Request("https://storycheap.com/api/bot/heartbeat", {
+          method: "GET",
+          headers: {
+            "X-Bot-Device-Id": device.deviceIdentifier,
+            "X-Bot-Token": "wrong-secret",
+          },
+        })
+      );
+      expect(badGetRes.status).toBe(401);
     });
   });
 });
