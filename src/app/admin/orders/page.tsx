@@ -1,5 +1,6 @@
 import React, { Suspense } from "react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import { formatCents } from "@/lib/catalog-seed";
 import { getAdminIncludeTestsPreference } from "@/lib/server/admin-preferences";
@@ -17,11 +18,18 @@ import { AlertTriangle, ArrowRight, FlaskConical } from "lucide-react";
 async function AdminOrdersContent({
   searchParams,
 }: {
-  searchParams: Promise<{ attention?: string; status?: string; scope?: string }>;
+  searchParams: Promise<{
+    attention?: string;
+    status?: string;
+    scope?: string;
+    q?: string;
+  }>;
 }) {
   await connection();
   const sp = await searchParams;
   const attentionOnly = sp.attention === "1";
+  const query = (sp.q ?? "").trim().slice(0, 80);
+  const queryNorm = query.toLowerCase().replace(/^#/, "");
 
   const [allOrders, actualItemCostCents, includeTestOrders] = await Promise.all([
     listOrdersAdmin({ needsAttentionOnly: attentionOnly }),
@@ -32,17 +40,36 @@ async function AdminOrdersContent({
   const activeScope: "all" | "real" | "test" =
     sp.scope === "real" || sp.scope === "test" || sp.scope === "all"
       ? sp.scope
-      : attentionOnly
+      : attentionOnly || queryNorm
         ? "all"
         : includeTestOrders
           ? "all"
           : "real";
 
-  const orders = allOrders.filter((o) => {
+  const scopedOrders = allOrders.filter((o) => {
     if (activeScope === "real") return !o.isTest;
     if (activeScope === "test") return Boolean(o.isTest);
     return true;
   });
+
+  const orders = queryNorm
+    ? scopedOrders.filter(
+        (o) =>
+          o.orderNumber.toLowerCase().includes(queryNorm) ||
+          o.id.toLowerCase().startsWith(queryNorm) ||
+          o.email.toLowerCase().includes(queryNorm) ||
+          (o.gatewayCheckoutId ?? "").toLowerCase().includes(queryNorm)
+      )
+    : scopedOrders;
+
+  if (queryNorm) {
+    const exact = orders.filter(
+      (o) => o.orderNumber.toLowerCase() === queryNorm
+    );
+    if (exact.length === 1) {
+      redirect(`/admin/orders/${exact[0].id}`);
+    }
+  }
 
   const testCount = allOrders.filter((o) => o.isTest).length;
   const realCount = allOrders.length - testCount;
@@ -103,10 +130,48 @@ async function AdminOrdersContent({
         </div>
       </div>
 
+      <form
+        action="/admin/orders"
+        method="get"
+        role="search"
+        className="flex flex-wrap items-center gap-2"
+      >
+        {attentionOnly && <input type="hidden" name="attention" value="1" />}
+        {!attentionOnly && sp.scope && (
+          <input type="hidden" name="scope" value={sp.scope} />
+        )}
+        <input
+          type="search"
+          name="q"
+          defaultValue={query}
+          autoFocus
+          autoComplete="off"
+          placeholder="Buscar por N° de orden (SC-202611-AA20DB), correo o ID..."
+          aria-label="Buscar orden"
+          className="flex-1 min-w-[260px] rounded-xl bg-slate-950 border border-white/15 px-4 py-2.5 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
+        />
+        <button
+          type="submit"
+          className="px-4 py-2.5 rounded-xl bg-white hover:bg-sky-300 text-slate-950 text-xs font-black transition-colors"
+        >
+          Buscar
+        </button>
+        {query && (
+          <Link
+            href="/admin/orders"
+            className="px-3 py-2.5 rounded-xl text-xs font-bold text-slate-300 border border-white/10 hover:text-white"
+          >
+            Limpiar
+          </Link>
+        )}
+      </form>
+
       <div className="rounded-3xl apple-glass overflow-hidden">
         {orders.length === 0 ? (
           <div className="p-12 text-center text-xs text-slate-400">
-            No hay órdenes registradas con este filtro.
+            {query
+              ? `Ninguna orden coincide con "${query}".`
+              : "No hay órdenes registradas con este filtro."}
           </div>
         ) : (
           <div className="overflow-x-auto">
