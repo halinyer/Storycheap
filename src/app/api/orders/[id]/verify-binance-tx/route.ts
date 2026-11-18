@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getServerSessionUser } from "@/lib/server/auth";
 import {
   applyVerifiedBinancePayTxToOrder,
+  autoReconcileBinancePayForOrder,
   BinancePayVerifyError,
 } from "@/lib/server/fulfillment";
 import { hasOrderAccessCookie } from "@/lib/server/order-access";
@@ -16,7 +17,8 @@ import { getOrderById } from "@/lib/server/repository";
 import { ORDER_STATUS_META } from "@/lib/server/state-machine";
 
 const bodySchema = z.object({
-  transactionId: z.string().trim().min(6).max(80),
+  transactionId: z.string().trim().max(80).optional(),
+  autoDetect: z.boolean().optional(),
 });
 
 export async function POST(
@@ -75,10 +77,61 @@ export async function POST(
     );
   }
 
+  const txIdInput = parsed.data.transactionId?.trim() ?? "";
+  const isAutoDetect = Boolean(parsed.data.autoDetect) || txIdInput.length === 0;
+
+  if (!isAutoDetect && txIdInput.length < 6) {
+    return NextResponse.json(
+      {
+        error:
+          "Ingresa un ID de transacción Binance Pay válido (por ejemplo P_A25QH5...).",
+      },
+      { status: 400 }
+    );
+  }
+
   try {
+    if (isAutoDetect) {
+      const autoRes = await autoReconcileBinancePayForOrder({
+        orderId: order.id,
+        actorUser: sessionUser,
+        source: "customer_auto_verify",
+        minAgeMs: 0,
+      });
+
+      if (!autoRes.matched) {
+        return NextResponse.json(
+          {
+            error:
+              "Aún no detectamos un depósito nuevo en Binance Pay para esta orden. Si ya enviaste los USDT, espera unos segundos o pega tu ID de transacción (P_...) abajo.",
+          },
+          { status: 404 }
+        );
+      }
+
+      return NextResponse.json(
+        {
+          ok: true,
+          outcome: autoRes.mode,
+          receivedCents: autoRes.receivedCents,
+          missingCents: autoRes.missingCents,
+          surplusCents: autoRes.surplusCents,
+          tx: {
+            transactionId: autoRes.tx.transactionId,
+            amount: autoRes.tx.amount,
+            currency: autoRes.tx.currency,
+            usdCents: autoRes.tx.usdCents,
+          },
+          order: autoRes.order,
+          statusMeta: ORDER_STATUS_META[autoRes.order.status],
+        },
+        { status: 200, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
     const res = await applyVerifiedBinancePayTxToOrder({
       orderId: order.id,
-      transactionId: parsed.data.transactionId,
+      transactionId: txIdInput,
       actorUser: sessionUser,
       source: "customer_tx_verify",
     });

@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { computeVariantDualPaymentComparison } from "@/lib/currency";
+import {
+  computeFilteredBinanceP2pRate,
+  computeTargetBsRateFromBenchmark,
+} from "@/lib/server/exchange-rates";
 import {
   buildTreasuryMovementWithFeePlan,
   computeTreasuryPosition,
@@ -430,5 +435,140 @@ describe("computeTreasuryPosition — exact $400 -> $421 cases & test reconcilia
     expect(pos.netBusinessProfitUsdCents).toBe(858);
     expect(pos.liquidProfitInReceiversUsdCents).toBe(0);
     expect(pos.reinvestedProfitInSuppliersUsdCents).toBe(858);
+  });
+
+  it("Audita ganancia o pérdida real en Bolívares (devaluación latente P2P vs tasa cobrada y punto de equilibrio)", () => {
+    // Vendimos una tarjeta de $10.00 (costo API $9.00) a tasa Bs 1.000,00/$ (cobrando Bs 10.000,00)
+    const pmOrder = makeOrder({
+      id: "ord-pm-deval",
+      subtotalCents: 1000,
+      amountDueCents: 1000,
+      paidCents: 1000,
+      paymentGateway: "pagomovil",
+      bsRateCents: 100000, // Bs 1000.00 / $
+      totalBsCents: 1000000, // Bs 10,000.00
+      items: [
+        {
+          id: "item-pm-1",
+          orderId: "ord-pm-deval",
+          variantId: "v-1",
+          productName: "Steam $10",
+          productSlug: "steam-us",
+          denominationLabel: "$10",
+          region: "USA",
+          unitPriceCents: 1000,
+          unitCostCents: 900,
+          quantity: 1,
+          deliveredCount: 1,
+          status: "FULFILLED",
+        },
+      ],
+    });
+
+    // Escenario A: USDT P2P subió a Bs 1.069,50/$ mientras los Bs siguen en el banco
+    const posStillInBank = computeTreasuryPosition({
+      orders: [pmOrder],
+      movements: [],
+      suppliers: [],
+      bsRateCents: 100000,
+      replacementUsdtRateCents: 106950, // Bs 1069.50 / USDT
+    });
+
+    expect(posStillInBank.pagomovilSalesGrossUsdCents).toBe(1000);
+    expect(posStillInBank.pagomovilSalesCostUsdCents).toBe(900);
+    expect(posStillInBank.pagomovilNominalProfitUsdCents).toBe(100); // +$1.00 nominal
+    expect(posStillInBank.weightedBookBsRateCents).toBe(100000); // Bs 1000.00/$
+    // Break-even = Bs 10,000 / $9.00 cost = Bs 1111.11 / USDT (111111 cents)
+    expect(posStillInBank.pagomovilBreakEvenRateCents).toBe(111111);
+    // Mark-to-market hoy en P2P: 10,000 Bs / 1069.50 = $9.35 USDT (935 cents)
+    expect(posStillInBank.pagomovilMarkToMarketUsdtCents).toBe(935);
+    // Pérdida latente por devaluación: $9.35 - $10.00 = -$0.65 (-65 cents)
+    expect(posStillInBank.unrealizedExchangeDiffUsdCents).toBe(-65);
+    // Ganancia neta real aún positiva: +$1.00 margen - $0.65 devaluación = +$0.35 (+35 cents)
+    expect(posStillInBank.pagomovilRealNetProfitUsdCents).toBe(35);
+
+    // Escenario B: Devaluación severa a Bs 1.150,00/USDT (supera el Break-Even de Bs 1.111,11)
+    const posSevereDeval = computeTreasuryPosition({
+      orders: [pmOrder],
+      movements: [],
+      suppliers: [],
+      bsRateCents: 100000,
+      replacementUsdtRateCents: 115000, // Bs 1150.00 / USDT
+    });
+
+    // 10,000 Bs / 1150 = $8.70 USDT (870 cents) -> pérdida latente -$1.30 -> pérdida neta real -$0.30 frente al costo de $9.00
+    expect(posSevereDeval.pagomovilMarkToMarketUsdtCents).toBe(870);
+    expect(posSevereDeval.unrealizedExchangeDiffUsdCents).toBe(-130);
+    expect(posSevereDeval.pagomovilRealNetProfitUsdCents).toBe(-30);
+  });
+});
+
+describe("exchange-rates — filtrado anti-trampa Binance P2P y cálculo de tasa objetivo", () => {
+  it("Ignora anuncios trampa de 1 Bs de rango en Binance P2P y promedia ofertas líquidas", () => {
+    const rate = computeFilteredBinanceP2pRate([
+      // Anuncio trampa (min 300, max 301)
+      { adv: { price: "1055.54", minSingleTransAmount: "300", maxSingleTransAmount: "301" } },
+      // Ofertas reales con liquidez
+      { adv: { price: "1068.00", minSingleTransAmount: "5000", maxSingleTransAmount: "500000" } },
+      { adv: { price: "1070.00", minSingleTransAmount: "5000", maxSingleTransAmount: "500000" } },
+    ]);
+
+    expect(rate).toBe(1069);
+  });
+
+  it("Calcula tasa objetivo desde USDT P2P, Euro BCV o la más alta aplicando spread y piso anti-bajada", () => {
+    const sampleRates = {
+      officialBcvCents: 91665,
+      euroBcvCents: 100739,
+      paraleloCents: 106705,
+      binanceP2pCents: 106950,
+    };
+
+    // Euro BCV sin spread
+    expect(
+      computeTargetBsRateFromBenchmark(
+        sampleRates,
+        { benchmark: "euro_bcv", spreadPct: 0, onlyIncrease: false },
+        null
+      )
+    ).toBe(100739);
+
+    // Binance P2P + 1% spread = 106950 * 1.01 = 108020
+    expect(
+      computeTargetBsRateFromBenchmark(
+        sampleRates,
+        { benchmark: "binance_p2p", spreadPct: 1, onlyIncrease: false },
+        null
+      )
+    ).toBe(108020);
+
+    // Piso anti-bajada (onlyIncrease: true) mantiene la tasa actual si es mayor
+    expect(
+      computeTargetBsRateFromBenchmark(
+        sampleRates,
+        { benchmark: "binance_p2p", spreadPct: 0, onlyIncrease: true },
+        109500
+      )
+    ).toBe(109500);
+  });
+
+  it("Calcula la comparativa exacta de Netflix $15 (Pago en Bs vs Pago directo en USDT) para Admin", () => {
+    const cmp = computeVariantDualPaymentComparison({
+      saleUsd: 15.46,
+      costUsd: 15.0,
+      storeBsRateCents: 112299, // 15.46 * 1122.99 = Bs. 17.361,43
+      usdtP2pRateCents: 107000, // USDT P2P a Bs. 1.070,00
+    });
+
+    expect(cmp).not.toBeNull();
+    expect(cmp!.saleBsCents).toBe(1736143); // Bs. 17.361,43
+    expect(cmp!.realUsdtFromBsRounded).toBe(16.23); // 16.23 USDT
+    expect(cmp!.bsProfitUsdt).toBeCloseTo(1.23, 2); // +1.23 USDT
+    expect(cmp!.bsMarkupPct?.toFixed(2)).toBe("8.17"); // 8.17%
+    expect(cmp!.directUsdtProfit).toBeCloseTo(0.46, 2); // +0.46 USDT
+    expect(cmp!.directUsdtMarkupPct?.toFixed(2)).toBe("3.07"); // 3.07%
+    expect(cmp!.extraCushionUsdt).toBeCloseTo(0.77, 2); // +0.77 USDT extra
+    expect(cmp!.effectiveBsPerCostDollar).toBeCloseTo(1157.43, 2); // Bs. 1.157,43
+    expect(cmp!.effectiveBsSpreadOverUsdt).toBeCloseTo(87.43, 2); // +Bs. 87,43 sobre USDT
   });
 });

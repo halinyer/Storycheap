@@ -4,11 +4,13 @@ import React, { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
+  fetchLiveVenezuelaRatesAction,
   setAdminIncludeTestsAction,
   updateBsRateAction,
 } from "@/app/admin/actions";
 import { StoryCheapLogo } from "@/components/brand/storycheap-logo";
 import { formatCents } from "@/lib/catalog-seed";
+import type { LiveVenezuelaRatesSnapshot } from "@/types";
 import {
   Bell,
   Check,
@@ -16,6 +18,7 @@ import {
   ExternalLink,
   FlaskConical,
   Menu,
+  RefreshCw,
   Wallet,
   X,
 } from "lucide-react";
@@ -51,6 +54,42 @@ export function AdminTopbar({
     bsRateCents ? (bsRateCents / 100).toFixed(2) : ""
   );
   const [savingRate, setSavingRate] = useState(false);
+  const [liveRates, setLiveRates] = useState<LiveVenezuelaRatesSnapshot | null>(
+    null
+  );
+  const [loadingLiveRates, setLoadingLiveRates] = useState(false);
+
+  const loadQuickLiveRates = async () => {
+    setLoadingLiveRates(true);
+    try {
+      const snap = await fetchLiveVenezuelaRatesAction();
+      setLiveRates(snap);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Error consultando tasas"
+      );
+    } finally {
+      setLoadingLiveRates(false);
+    }
+  };
+
+  const applyQuickRate = async (val: number | null, label: string) => {
+    if (!val || val <= 0) return;
+    setRateInput(val.toFixed(2));
+    setSavingRate(true);
+    try {
+      await updateBsRateAction(val);
+      toast.success(`Tasa aplicada (${label}): Bs ${val.toFixed(2)} / USD`);
+      setRateOpen(false);
+      router.refresh();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "No se pudo aplicar la tasa"
+      );
+    } finally {
+      setSavingRate(false);
+    }
+  };
 
   const totalAlerts =
     needsAttentionCount + lowStockCount + unhealthySuppliersCount;
@@ -146,11 +185,17 @@ export function AdminTopbar({
           <div className="relative">
             <button
               type="button"
-              onClick={() => setRateOpen((v) => !v)}
+              onClick={() => {
+                const next = !rateOpen;
+                setRateOpen(next);
+                if (next && !liveRates && !loadingLiveRates) {
+                  void loadQuickLiveRates();
+                }
+              }}
               className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.08] text-[11px] font-semibold text-slate-200 transition-colors"
             >
               <DollarSign className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span className="font-mono">
+              <span className="font-mono tabular-nums">
                 {bsRateCents ? `${(bsRateCents / 100).toFixed(2)} Bs/$` : "Sin tasa Bs"}
               </span>
             </button>
@@ -158,29 +203,110 @@ export function AdminTopbar({
             {rateOpen && (
               <form
                 onSubmit={(e) => void handleSaveRate(e)}
-                className="absolute right-0 mt-2 w-64 rounded-2xl bg-[#121523] border border-white/15 p-3.5 shadow-2xl space-y-2.5 z-50"
+                className="absolute right-0 mt-2 w-72 rounded-2xl bg-[#121523] border border-white/15 p-3.5 shadow-2xl space-y-2.5 z-50"
               >
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">
-                    Tasa congelada Bs/USD
+                    Tasa Tienda Bs/USD
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => setRateOpen(false)}
-                    className="text-slate-500 hover:text-white"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={loadingLiveRates}
+                      onClick={() => void loadQuickLiveRates()}
+                      title="Refrescar tasas en vivo"
+                      className="text-slate-400 hover:text-emerald-300"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${
+                          loadingLiveRates ? "animate-spin text-emerald-400" : ""
+                        }`}
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRateOpen(false)}
+                      className="text-slate-500 hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
+
+                {liveRates && (
+                  <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                    {liveRates.binanceP2p && (
+                      <button
+                        type="button"
+                        disabled={savingRate}
+                        onClick={() =>
+                          void applyQuickRate(liveRates.binanceP2p, "USDT P2P")
+                        }
+                        className="flex items-center justify-between rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/30 px-2 py-1 text-[10px] text-amber-200 transition-colors"
+                      >
+                        <span className="font-bold">USDT P2P</span>
+                        <span className="font-mono tabular-nums font-black text-white">
+                          {liveRates.binanceP2p.toFixed(2)}
+                        </span>
+                      </button>
+                    )}
+                    {liveRates.euroBcv && (
+                      <button
+                        type="button"
+                        disabled={savingRate}
+                        onClick={() =>
+                          void applyQuickRate(liveRates.euroBcv, "EUR BCV")
+                        }
+                        className="flex items-center justify-between rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-400/30 px-2 py-1 text-[10px] text-indigo-200 transition-colors"
+                      >
+                        <span className="font-bold">EUR BCV</span>
+                        <span className="font-mono tabular-nums font-black text-white">
+                          {liveRates.euroBcv.toFixed(2)}
+                        </span>
+                      </button>
+                    )}
+                    {liveRates.officialBcv && (
+                      <button
+                        type="button"
+                        disabled={savingRate}
+                        onClick={() =>
+                          void applyQuickRate(liveRates.officialBcv, "USD BCV")
+                        }
+                        className="flex items-center justify-between rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 px-2 py-1 text-[10px] text-slate-300 transition-colors"
+                      >
+                        <span className="font-bold">USD BCV</span>
+                        <span className="font-mono tabular-nums font-black text-white">
+                          {liveRates.officialBcv.toFixed(2)}
+                        </span>
+                      </button>
+                    )}
+                    {liveRates.paralelo && (
+                      <button
+                        type="button"
+                        disabled={savingRate}
+                        onClick={() =>
+                          void applyQuickRate(liveRates.paralelo, "Paralelo")
+                        }
+                        className="flex items-center justify-between rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/30 px-2 py-1 text-[10px] text-sky-200 transition-colors"
+                      >
+                        <span className="font-bold">Paralelo</span>
+                        <span className="font-mono tabular-nums font-black text-white">
+                          {liveRates.paralelo.toFixed(2)}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
                     step="0.01"
                     min="0.01"
-                    placeholder="Ej. 54.35"
+                    placeholder="Ej. 1069.50"
                     value={rateInput}
                     onChange={(e) => setRateInput(e.target.value)}
-                    className="flex-1 rounded-xl bg-slate-950 border border-white/15 px-2.5 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-indigo-400"
+                    className="flex-1 rounded-xl bg-slate-950 border border-white/15 px-2.5 py-1.5 text-xs text-white font-mono tabular-nums focus:outline-none focus:border-indigo-400"
                   />
                   <button
                     type="submit"

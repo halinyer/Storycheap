@@ -7,6 +7,7 @@ import {
   settleHistoricalTestsAction,
   voidTreasuryMovementAction,
 } from "@/app/admin/actions";
+import { BsExchangeDeskCard } from "@/components/admin/bs-exchange-desk-card";
 import {
   ReceiverLedgersSection,
   type MatchedPagoMovilSummary,
@@ -23,6 +24,8 @@ import type {
 } from "@/lib/server/repository";
 import { formatBsCents } from "@/lib/server/sales-metrics";
 import type {
+  BsRateAutoSyncPolicy,
+  LiveVenezuelaRatesSnapshot,
   OrderDTO,
   ReceiverBankAccountDTO,
   SupplierPortfolioRow,
@@ -99,6 +102,9 @@ export function TreasuryConsole({
   movements,
   suppliers,
   position,
+  bsRateCents = null,
+  bsRatePolicy = null,
+  liveRates = null,
   snapshots: initialSnapshots,
   sqlMigrationApplied,
   migrationSqlSnippet,
@@ -114,6 +120,9 @@ export function TreasuryConsole({
   movements: TreasuryMovementDTO[];
   suppliers: SupplierPortfolioRow[];
   position: TreasuryPositionSummary;
+  bsRateCents?: number | null;
+  bsRatePolicy?: BsRateAutoSyncPolicy | null;
+  liveRates?: LiveVenezuelaRatesSnapshot | null;
   snapshots: CapitalSnapshotRecord[];
   sqlMigrationApplied: boolean;
   migrationSqlSnippet: string;
@@ -656,6 +665,20 @@ export function TreasuryConsole({
           </div>
         </div>
 
+        <BsExchangeDeskCard
+          bsRateCents={bsRateCents}
+          initialPolicy={bsRatePolicy}
+          initialLiveRates={liveRates}
+          position={position}
+          onOpenSwapModal={() =>
+            openModal({
+              movementType: "INTERNAL_TRANSFER",
+              sourceAccount: "pagomovil",
+              targetAccount: "zenobank",
+            })
+          }
+        />
+
         <ReceiverLedgersSection
           allOrders={
             includeTestOrders ? orders : orders.filter((o) => !o.isTest)
@@ -880,6 +903,10 @@ export function TreasuryConsole({
         receiverBalances={{
           zenobankUsdCents: position.zenobankBalanceUsdCents,
           pagomovilUsdCents: position.pagomovilBalanceUsdCents,
+          pagomovilBsCents: position.pagomovilBalanceBsCents,
+          weightedBookBsRateCents: position.weightedBookBsRateCents,
+          liveP2pRateCents:
+            liveRates?.binanceP2pCents ?? position.replacementUsdtRateCents,
         }}
       />
     </div>

@@ -19,6 +19,7 @@ import {
 } from "@/app/admin/actions";
 import { CARD_IMAGE_PRESETS, suggestProductImageUrl } from "@/lib/brand-theme";
 import { formatCents } from "@/lib/catalog-seed";
+import { computeVariantDualPaymentComparison } from "@/lib/currency";
 import {
   evaluateSkuAlignment,
   suggestDenominationLabel,
@@ -36,7 +37,13 @@ import type {
   SupplierPricingPolicy,
   SupplierRepriceMode,
   SupplierSyncState,
+  VolumeDiscountTier,
 } from "@/types";
+import {
+  normalizeVolumeDiscountTiers,
+  validateVolumeDiscountTiersForAdmin,
+} from "@/lib/volume-discounts";
+import { VariantVolumeDiscountsEditor } from "./variant-volume-discounts-editor";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -357,6 +364,166 @@ function formatMarginUsd(diffUsd: number, showFourDecimals: boolean): string {
   return `${diffUsd >= 0 ? "+" : "-"}$${abs.toFixed(digits)}`;
 }
 
+function AdminDualPaymentComparisonPanel({
+  saleUsd,
+  costUsd,
+  storeBsRateCents,
+  usdtP2pRateCents,
+}: {
+  saleUsd: number;
+  costUsd: number | null;
+  storeBsRateCents?: number | null;
+  usdtP2pRateCents?: number | null;
+}) {
+  const cmp = computeVariantDualPaymentComparison({
+    saleUsd,
+    costUsd,
+    storeBsRateCents,
+    usdtP2pRateCents,
+  });
+
+  if (!cmp || cmp.saleBsCents === null || cmp.realUsdtFromBsRounded === null) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-xl bg-slate-950/85 border border-white/[0.08] p-3.5 space-y-2.5 text-xs">
+      {/* Top Conversion Formula Strip */}
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-white/[0.06]">
+        <div className="text-[11px] font-bold text-slate-300">
+          Conversión Rápida Bs → USDT y Comparativa de Cobro (Solo Admin)
+        </div>
+        <div className="font-mono tabular-nums text-[11px] text-sky-300">
+          {formatBsCents(cmp.saleBsCents)} ÷ Bs.{" "}
+          {(cmp.usdtP2pRate ?? 0).toLocaleString("es-VE", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}{" "}
+          (USDT) ={" "}
+          <strong className="text-white font-black">
+            {cmp.realUsdtFromBsRounded.toFixed(2)} USDT
+          </strong>
+        </div>
+      </div>
+
+      {/* 2-Row Comparison Table: Pago en Bolívares vs Pago directo en USDT */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-[11px] font-mono tabular-nums">
+          <thead className="text-slate-400 font-sans border-b border-white/[0.06]">
+            <tr>
+              <th className="py-1.5 pr-3 font-semibold">Método de pago</th>
+              <th className="py-1.5 px-3 font-semibold">Cobro al cliente</th>
+              <th className="py-1.5 px-3 font-semibold">Equivalente en USDT</th>
+              <th className="py-1.5 pl-3 text-right font-semibold">
+                Tu ganancia
+                {cmp.costUsd !== null ? ` (costo $${cmp.costUsd.toFixed(2)})` : ""}
+              </th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/[0.05]">
+            <tr>
+              <td className="py-2 pr-3 font-sans font-bold text-sky-300">
+                Pago en Bolívares
+              </td>
+              <td className="py-2 px-3 text-white font-bold">
+                {formatBsCents(cmp.saleBsCents)}
+              </td>
+              <td className="py-2 px-3 text-sky-200 font-bold">
+                {cmp.realUsdtFromBsRounded.toFixed(2)} USDT
+              </td>
+              <td className="py-2 pl-3 text-right font-bold">
+                {cmp.bsProfitUsdt !== null ? (
+                  <span
+                    className={
+                      cmp.bsProfitUsdt >= 0 ? "text-emerald-300" : "text-rose-300"
+                    }
+                  >
+                    {cmp.bsProfitUsdt >= 0 ? "+" : ""}
+                    {cmp.bsProfitUsdt.toFixed(2)} USDT
+                    {cmp.bsMarkupPct !== null
+                      ? ` (${cmp.bsMarkupPct >= 0 ? "+" : ""}${cmp.bsMarkupPct.toFixed(2)}%)`
+                      : ""}
+                  </span>
+                ) : (
+                  <span className="text-slate-500">—</span>
+                )}
+              </td>
+            </tr>
+            <tr>
+              <td className="py-2 pr-3 font-sans font-bold text-amber-300">
+                Pago directo en USDT
+              </td>
+              <td className="py-2 px-3 text-white font-bold">
+                ${cmp.saleUsd.toFixed(2)} USDT
+              </td>
+              <td className="py-2 px-3 text-amber-200 font-bold">
+                {cmp.saleUsd.toFixed(2)} USDT
+              </td>
+              <td className="py-2 pl-3 text-right font-bold">
+                {cmp.directUsdtProfit !== null ? (
+                  <span
+                    className={
+                      cmp.directUsdtProfit >= 0
+                        ? "text-emerald-300"
+                        : "text-rose-300"
+                    }
+                  >
+                    {cmp.directUsdtProfit >= 0 ? "+" : ""}
+                    {cmp.directUsdtProfit.toFixed(2)} USDT
+                    {cmp.directUsdtMarkupPct !== null
+                      ? ` (${cmp.directUsdtMarkupPct >= 0 ? "+" : ""}${cmp.directUsdtMarkupPct.toFixed(2)}%)`
+                      : ""}
+                  </span>
+                ) : (
+                  <span className="text-slate-500">—</span>
+                )}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* Bottom Cushion & Effective Rate Summary */}
+      {cmp.effectiveBsPerCostDollar !== null && cmp.extraCushionUsdt !== null && (
+        <div className="pt-1.5 border-t border-white/[0.06] flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+          <span>
+            Valoras cada $1 de costo en{" "}
+            <strong className="text-slate-200 font-mono tabular-nums">
+              Bs.{" "}
+              {cmp.effectiveBsPerCostDollar.toLocaleString("es-VE", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </strong>
+            {cmp.effectiveBsSpreadOverUsdt !== null && (
+              <span className="font-mono tabular-nums text-slate-300">
+                {" "}
+                ({cmp.effectiveBsSpreadOverUsdt >= 0 ? "+" : ""}Bs.{" "}
+                {cmp.effectiveBsSpreadOverUsdt.toLocaleString("es-VE", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}{" "}
+                sobre el USDT actual)
+              </span>
+            )}
+          </span>
+          <span className="font-mono tabular-nums">
+            Colchón en Bs vs USDT directo:{" "}
+            <strong
+              className={
+                cmp.extraCushionUsdt >= 0 ? "text-emerald-300" : "text-rose-300"
+              }
+            >
+              {cmp.extraCushionUsdt >= 0 ? "+" : ""}
+              {cmp.extraCushionUsdt.toFixed(2)} USDT extra
+            </strong>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function VariantRow({
   productName,
   productRegion,
@@ -369,6 +536,7 @@ function VariantRow({
   fazerCardsEnabled,
   fazerCardsBalanceCents,
   bsRateCents,
+  usdtP2pRateCents,
   onOpenCentralOnePicker,
   onSaved,
 }: {
@@ -383,6 +551,7 @@ function VariantRow({
   fazerCardsEnabled: boolean;
   fazerCardsBalanceCents: number | null;
   bsRateCents?: number | null;
+  usdtP2pRateCents?: number | null;
   onOpenCentralOnePicker: (
     applySelection: (item: CentralOneCatalogItem) => void,
     initialQuery?: string
@@ -423,6 +592,13 @@ function VariantRow({
   const [deleting, setDeleting] = useState(false);
   const [confirmMismatch, setConfirmMismatch] = useState(false);
   const [saving, setSaving] = useState(false);
+  const savedVolumeDiscounts = normalizeVolumeDiscountTiers(
+    pricingMeta?.volumeDiscounts ?? variant.volumeDiscounts,
+    variant.salePriceCents
+  );
+  const [volumeDiscounts, setVolumeDiscounts] = useState<VolumeDiscountTier[]>(
+    () => savedVolumeDiscounts
+  );
 
   const active =
     optimisticActive && optimisticActive.prevServer === variant.active
@@ -464,8 +640,22 @@ function VariantRow({
       ? parsedPriceFloat - parsedCostFloat
       : null;
   const marginPct =
-    marginUsd !== null && parsedPriceFloat > 0
-      ? (marginUsd / parsedPriceFloat) * 100
+    marginUsd !== null && parsedCostFloat !== null && parsedCostFloat > 0
+      ? (marginUsd / parsedCostFloat) * 100
+      : marginUsd !== null && parsedPriceFloat > 0
+        ? (marginUsd / parsedPriceFloat) * 100
+        : null;
+  const dualComparison =
+    Number.isFinite(parsedPriceFloat) && parsedPriceFloat > 0
+      ? computeVariantDualPaymentComparison({
+          saleUsd: parsedPriceFloat,
+          costUsd:
+            parsedCostFloat !== null && Number.isFinite(parsedCostFloat)
+              ? parsedCostFloat
+              : null,
+          storeBsRateCents: bsRateCents,
+          usdtP2pRateCents,
+        })
       : null;
 
   const liveTenths = liveC1Item
@@ -500,7 +690,9 @@ function VariantRow({
     sourcePriority !== variant.sourcePriority ||
     centraloneId !== (variant.centraloneProductId ?? "") ||
     effectiveC1Name !== (pricingMeta?.centraloneProductName ?? "") ||
-    reloadlyId !== (variant.reloadlyProductId ? String(variant.reloadlyProductId) : "");
+    reloadlyId !== (variant.reloadlyProductId ? String(variant.reloadlyProductId) : "") ||
+    JSON.stringify([...volumeDiscounts].sort((a, b) => a.minQuantity - b.minQuantity)) !==
+      JSON.stringify(savedVolumeDiscounts);
 
   const handleSave = async () => {
     const cleanLabel = label.trim();
@@ -527,6 +719,16 @@ function VariantRow({
     }
 
     const parsedCostCents = numericCost === null ? null : Math.round(numericCost * 100);
+    const tierCheck = validateVolumeDiscountTiersForAdmin({
+      tiers: volumeDiscounts,
+      baseUnitPriceCents: parsedPrice,
+      unitCostCents: parsedCostCents,
+    });
+    if (!tierCheck.ok) {
+      toast.error(tierCheck.error);
+      return;
+    }
+
     const normalizedExactCost =
       numericCost === null
         ? null
@@ -554,10 +756,12 @@ function VariantRow({
           : null,
         lowStockThreshold: variant.lowStockThreshold,
         active,
+        volumeDiscounts: tierCheck.tiers,
       });
       setLabel(cleanLabel);
       setPriceUsd((parsedPrice / 100).toFixed(2));
       setCostUsd(normalizedExactCost ?? "");
+      setVolumeDiscounts(tierCheck.tiers);
       setConfirmMismatch(false);
       toast.success(`Guardado: ${productName} (${cleanLabel})`);
       onSaved();
@@ -897,21 +1101,35 @@ function VariantRow({
           </div>
 
           <div className="min-w-0 text-right pb-1">
-            <div className="text-[11px] text-slate-400 mb-1 truncate">Ganancia</div>
+            <div className="text-[11px] text-slate-400 mb-1 truncate">
+              Ganancia (USDT / Bs)
+            </div>
             {marginUsd !== null ? (
-              <div>
+              <div className="space-y-0.5">
                 <div
                   className={`font-mono font-semibold tabular-nums truncate ${
                     marginUsd >= 0 ? "text-emerald-400" : "text-rose-400"
                   }`}
                 >
                   {formatMarginUsd(marginUsd, hasHighPrecisionCost)}
+                  {marginPct !== null ? ` (${marginPct.toFixed(2)}%)` : ""}
                 </div>
-                {marginPct !== null && (
-                  <div className="text-[10px] text-slate-500 font-mono truncate">
-                    {marginPct.toFixed(1)}%
-                  </div>
-                )}
+                {dualComparison?.bsProfitUsdt !== null &&
+                  dualComparison?.bsProfitUsdt !== undefined && (
+                    <div
+                      className={`text-[10px] font-mono tabular-nums truncate ${
+                        dualComparison.bsProfitUsdt >= 0
+                          ? "text-sky-300"
+                          : "text-rose-300"
+                      }`}
+                    >
+                      En Bs: {dualComparison.bsProfitUsdt >= 0 ? "+" : ""}
+                      {dualComparison.bsProfitUsdt.toFixed(2)} USDT
+                      {dualComparison.bsMarkupPct !== null
+                        ? ` (${dualComparison.bsMarkupPct >= 0 ? "+" : ""}${dualComparison.bsMarkupPct.toFixed(2)}%)`
+                        : ""}
+                    </div>
+                  )}
               </div>
             ) : (
               <div className="text-slate-500 py-1">—</div>
@@ -919,6 +1137,20 @@ function VariantRow({
           </div>
         </div>
       </div>
+
+      {/* Admin-only Dual Payment Comparison Table (Pago en Bs vs Pago directo en USDT) */}
+      {Number.isFinite(parsedPriceFloat) && parsedPriceFloat > 0 && (
+        <AdminDualPaymentComparisonPanel
+          saleUsd={parsedPriceFloat}
+          costUsd={
+            parsedCostFloat !== null && Number.isFinite(parsedCostFloat)
+              ? parsedCostFloat
+              : null
+          }
+          storeBsRateCents={bsRateCents}
+          usdtP2pRateCents={usdtP2pRateCents}
+        />
+      )}
 
       {/* Poka-Yoke Guardrail Banner */}
       {alignment.messages.length > 0 && (
@@ -972,6 +1204,24 @@ function VariantRow({
           )}
         </div>
       )}
+
+      <VariantVolumeDiscountsEditor
+        basePriceCents={
+          Number.isFinite(parsedPriceFloat) && parsedPriceFloat > 0
+            ? Math.round(parsedPriceFloat * 100)
+            : variant.salePriceCents
+        }
+        unitCostCents={
+          parsedCostFloat !== null &&
+          Number.isFinite(parsedCostFloat) &&
+          parsedCostFloat >= 0
+            ? Math.round(parsedCostFloat * 100)
+            : (variant.unitCostCents ?? null)
+        }
+        bsRateCents={bsRateCents}
+        tiers={volumeDiscounts}
+        onChange={setVolumeDiscounts}
+      />
     </div>
   );
 }
@@ -1008,6 +1258,7 @@ export function ProductsConsole({
   fazerCardsEnabled = true,
   fazerCardsBalanceCents = null,
   bsRateCents = null,
+  usdtP2pRateCents = null,
   initialProductId = null,
   initialPricingPolicy = DEFAULT_POLICY_UI,
   initialSyncState = DEFAULT_SYNC_STATE_UI,
@@ -1020,11 +1271,23 @@ export function ProductsConsole({
   fazerCardsEnabled?: boolean;
   fazerCardsBalanceCents?: number | null;
   bsRateCents?: number | null;
+  usdtP2pRateCents?: number | null;
   initialProductId?: string | null;
   initialPricingPolicy?: SupplierPricingPolicy;
   initialSyncState?: SupplierSyncState;
 }) {
   const router = useRouter();
+  const [simUsdtRateInput, setSimUsdtRateInput] = useState<string>(() => {
+    const base = usdtP2pRateCents ?? bsRateCents;
+    return base && base > 0 ? (base / 100).toFixed(2) : "";
+  });
+  const effectiveUsdtP2pRateCents = useMemo(() => {
+    const parsed = Number.parseFloat(simUsdtRateInput.replace(",", "."));
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.round(parsed * 100);
+    }
+    return usdtP2pRateCents ?? bsRateCents ?? null;
+  }, [simUsdtRateInput, usdtP2pRateCents, bsRateCents]);
   const [selectedProductId, setSelectedProductId] = useState<string | null>(
     initialProductId
   );
@@ -1906,9 +2169,23 @@ export function ProductsConsole({
                 </div>
 
                 {bsRateCents && bsRateCents > 0 && (
-                  <span className="px-3 py-1.5 rounded-xl bg-sky-500/10 border border-sky-400/20 text-[11px] font-mono text-sky-200">
-                    Tasa tienda activa: Bs {(bsRateCents / 100).toFixed(2)}/$
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="px-3 py-1.5 rounded-xl bg-sky-500/10 border border-sky-400/20 text-[11px] font-mono tabular-nums text-sky-200">
+                      Tasa cobro tienda: Bs {(bsRateCents / 100).toFixed(2)}/$
+                    </span>
+                    <label className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-500/10 border border-amber-400/25 text-[11px] font-mono tabular-nums text-amber-200">
+                      <span>Tasa USDT hoy: Bs</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={simUsdtRateInput}
+                        onChange={(e) =>
+                          setSimUsdtRateInput(normalizeDecimalInput(e.target.value))
+                        }
+                        className="w-20 rounded-md bg-slate-950 border border-white/15 px-1.5 py-0.5 text-[11px] font-bold text-white text-right focus:outline-none focus:border-amber-400"
+                      />
+                    </label>
+                  </div>
                 )}
               </div>
 
@@ -2171,6 +2448,7 @@ export function ProductsConsole({
                         fazerCardsEnabled={fazerCardsEnabled}
                         fazerCardsBalanceCents={fazerCardsBalanceCents}
                         bsRateCents={bsRateCents}
+                        usdtP2pRateCents={effectiveUsdtP2pRateCents}
                         onOpenCentralOnePicker={(applySelection, initialQuery) =>
                           void openCentralOneCatalogModal(applySelection, initialQuery)
                         }
@@ -2309,6 +2587,23 @@ export function ProductsConsole({
                   className="w-full rounded-xl bg-slate-950 border border-white/10 px-3 py-2 text-white font-mono font-semibold"
                 />
               </div>
+
+              {Number.isFinite(Number.parseFloat(ncPriceUsd)) &&
+                Number.parseFloat(ncPriceUsd) > 0 && (
+                  <div className="sm:col-span-2">
+                    <AdminDualPaymentComparisonPanel
+                      saleUsd={Number.parseFloat(ncPriceUsd)}
+                      costUsd={
+                        ncCostUsd.trim() !== "" &&
+                        Number.isFinite(Number.parseFloat(ncCostUsd))
+                          ? Number.parseFloat(ncCostUsd)
+                          : null
+                      }
+                      storeBsRateCents={bsRateCents}
+                      usdtP2pRateCents={effectiveUsdtP2pRateCents}
+                    />
+                  </div>
+                )}
 
               <div className="sm:col-span-2">
                 <label className="block font-medium text-slate-300 mb-1">Proveedor</label>
@@ -2472,6 +2767,23 @@ export function ProductsConsole({
                   className="w-full rounded-xl bg-slate-950 border border-white/10 px-3 py-2 text-white font-mono font-semibold"
                 />
               </div>
+
+              {Number.isFinite(Number.parseFloat(nvPriceUsd)) &&
+                Number.parseFloat(nvPriceUsd) > 0 && (
+                  <div className="col-span-2">
+                    <AdminDualPaymentComparisonPanel
+                      saleUsd={Number.parseFloat(nvPriceUsd)}
+                      costUsd={
+                        nvCostUsd.trim() !== "" &&
+                        Number.isFinite(Number.parseFloat(nvCostUsd))
+                          ? Number.parseFloat(nvCostUsd)
+                          : null
+                      }
+                      storeBsRateCents={bsRateCents}
+                      usdtP2pRateCents={effectiveUsdtP2pRateCents}
+                    />
+                  </div>
+                )}
               <div className="col-span-2">
                 <label className="block font-medium text-slate-300 mb-1">Proveedor</label>
                 <select

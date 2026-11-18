@@ -3,21 +3,48 @@
 
 import React, { useRef, useState } from "react";
 import Link from "next/link";
+import { useStore } from "@/context/store-context";
 import { formatCents } from "@/lib/catalog-seed";
+import { formatBsFromUsdCents } from "@/lib/currency";
+import { getBestVolumeTierHint } from "@/lib/volume-discounts";
 import type { ProductDTO } from "@/types";
 import { ArrowRight, Globe } from "lucide-react";
 
 interface GiftCardCardProps {
   product: ProductDTO;
+  bsRateCents?: number | null;
 }
 
-export function GiftCardCard({ product }: GiftCardCardProps) {
+export function GiftCardCard({ product, bsRateCents: propBsRateCents }: GiftCardCardProps) {
+  const { displayCurrency, bsRateCents: storeBsRateCents } = useStore();
+  const effectiveBsRateCents = propBsRateCents ?? storeBsRateCents;
   const activeVariants = product.variants.filter((v) => v.active);
   const minPriceCents =
     activeVariants.length > 0
       ? Math.min(...activeVariants.map((v) => v.salePriceCents))
       : 1000;
   const anyInStock = activeVariants.some((v) => v.inStock);
+
+  const volumeSummary = activeVariants.reduce<{
+    minQty: number;
+    maxPct: number;
+  } | null>((best, variant) => {
+    const hint = getBestVolumeTierHint({
+      baseUnitPriceCents: variant.salePriceCents,
+      volumeDiscounts: variant.volumeDiscounts,
+    });
+    if (!hint.firstTier || hint.maxDiscountPct <= 0) return best;
+    if (!best || hint.maxDiscountPct > best.maxPct) {
+      return {
+        minQty: hint.firstTier.minQuantity,
+        maxPct: hint.maxDiscountPct,
+      };
+    }
+    return best;
+  }, null);
+
+  const formattedBs = formatBsFromUsdCents(minPriceCents, effectiveBsRateCents);
+  const showBsPrimary = displayCurrency === "VES" && Boolean(formattedBs);
 
   const cardRef = useRef<HTMLAnchorElement>(null);
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
@@ -78,17 +105,23 @@ export function GiftCardCard({ product }: GiftCardCardProps) {
           }}
         />
 
-        {/* Stock Status */}
+        {/* Top-Left Badge: Eye-catching CoinGate-style discount pin or stock status */}
         <div className="absolute top-3 left-3 z-30">
-          <span
-            className={`px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider shadow-sm ${
-              anyInStock
-                ? "bg-emerald-500/90 text-slate-950"
-                : "bg-slate-800/90 text-slate-300 border border-white/10"
-            }`}
-          >
-            {anyInStock ? "Disponible" : "Sin stock"}
-          </span>
+          {anyInStock && volumeSummary ? (
+            <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-[#e53935] text-white text-[11px] font-bold tracking-tight shadow-md shadow-black/40 tabular-nums">
+              Hasta -{volumeSummary.maxPct}%
+            </span>
+          ) : (
+            <span
+              className={`px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider shadow-sm ${
+                anyInStock
+                  ? "bg-emerald-500/90 text-slate-950"
+                  : "bg-slate-800/90 text-slate-300 border border-white/10"
+              }`}
+            >
+              {anyInStock ? "Disponible" : "Sin stock"}
+            </span>
+          )}
         </div>
 
         {/* Region Badge */}
@@ -100,26 +133,52 @@ export function GiftCardCard({ product }: GiftCardCardProps) {
 
       {/* Minimalist Product Info (Zero Fake Reviews) */}
       <div className="px-1.5 pt-0.5 pb-2">
-        <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400 block mb-1">
-          {product.brand}
-        </span>
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">
+            {product.brand}
+          </span>
+          {volumeSummary && anyInStock && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span>Disponible</span>
+            </span>
+          )}
+        </div>
         <h3 className="font-extrabold text-base text-white group-hover:text-sky-300 transition-colors line-clamp-1">
           {product.name}
         </h3>
       </div>
 
       {/* Price & CTA */}
-      <div className="pt-3 border-t border-white/[0.08] px-1.5 flex items-center justify-between mt-auto">
-        <div>
+      <div className="pt-3 border-t border-white/[0.08] px-1.5 flex items-center justify-between gap-2 mt-auto">
+        <div className="min-w-0">
           <span className="text-[10px] text-slate-400 block font-medium">
             Desde
           </span>
-          <div className="flex items-baseline gap-1">
-            <span className="text-xl font-black text-white tracking-tight">
-              {formatCents(minPriceCents)}
-            </span>
-            <span className="text-[10px] font-bold text-slate-400">USD</span>
-          </div>
+          {showBsPrimary ? (
+            <>
+              <div className="text-lg sm:text-xl font-black text-white tracking-tight tabular-nums leading-tight truncate">
+                {formattedBs}
+              </div>
+              <div className="text-[11px] font-medium text-slate-400 tabular-nums mt-0.5">
+                ≈ {formatCents(minPriceCents)} USD
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-baseline gap-1 leading-tight">
+                <span className="text-lg sm:text-xl font-black text-white tracking-tight tabular-nums">
+                  {formatCents(minPriceCents)}
+                </span>
+                <span className="text-[10px] font-bold text-slate-400">USD</span>
+              </div>
+              {formattedBs && (
+                <div className="text-[11px] font-medium text-slate-400 tabular-nums mt-0.5 truncate">
+                  ≈ {formattedBs}
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white text-slate-950 text-xs font-black transition-all group-hover:bg-sky-300 group-hover:scale-105">

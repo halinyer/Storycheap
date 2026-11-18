@@ -55,6 +55,7 @@ export interface OrdersAggregateMetrics {
   zenobankCount: number;
   pagomovilCents: number;
   pagomovilBsCents: number;
+  pagomovilCostCents: number;
   pagomovilCount: number;
   creditAppliedCents: number;
   creditAppliedCount: number;
@@ -147,6 +148,7 @@ export function summarizeOrdersMetrics(
   let zenobankCount = 0;
   let pagomovilCents = 0;
   let pagomovilBsCents = 0;
+  let pagomovilCostCents = 0;
   let pagomovilCount = 0;
   let creditAppliedCents = 0;
   let creditAppliedCount = 0;
@@ -196,6 +198,13 @@ export function summarizeOrdersMetrics(
         if (typeof effectiveBs === "number" && effectiveBs > 0) {
           pagomovilBsCents += effectiveBs;
         }
+        if (snap.costCents !== null) {
+          const allocatedCost =
+            order.creditAppliedCents > 0 && snap.revenueCents > 0
+              ? Math.round((snap.costCents * cashPaidCents) / snap.revenueCents)
+              : snap.costCents;
+          pagomovilCostCents += allocatedCost;
+        }
       } else {
         zenobankCount += 1;
         zenobankCents += cashPaidCents;
@@ -241,6 +250,7 @@ export function summarizeOrdersMetrics(
     zenobankCount,
     pagomovilCents,
     pagomovilBsCents,
+    pagomovilCostCents,
     pagomovilCount,
     creditAppliedCents,
     creditAppliedCount,

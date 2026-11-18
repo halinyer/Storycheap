@@ -111,7 +111,7 @@ export async function initiateCheckout(
       productSlug: l.product.slug,
       denominationLabel: l.variant.denominationLabel,
       region: l.product.region,
-      unitPriceCents: l.variant.salePriceCents,
+      unitPriceCents: l.effectiveUnitPriceCents,
       unitCostCents: l.variant.unitCostCents ?? null,
       quantity: l.quantity,
     })),

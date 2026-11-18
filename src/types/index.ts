@@ -41,6 +41,11 @@ export type CreditReason =
   | "checkout_apply"
   | "admin_adjust";
 
+export interface VolumeDiscountTier {
+  minQuantity: number;
+  unitPriceCents: number;
+}
+
 export interface ProductVariantDTO {
   id: string;
   productId: string;
@@ -58,6 +63,7 @@ export interface ProductVariantDTO {
   supplierStock?: number | null;
   deliverableStock?: number | null;
   inStock: boolean;
+  volumeDiscounts?: VolumeDiscountTier[];
 }
 
 export interface ProductDTO {
@@ -91,6 +97,7 @@ export interface CartItem {
   unitPriceCents: number;
   unitCostCents?: number | null;
   quantity: number;
+  volumeDiscounts?: VolumeDiscountTier[];
 }
 
 export interface OrderItemDTO {
@@ -423,8 +430,48 @@ export interface TreasuryPositionSummary {
   zenobankSalesGrossUsdCents: number;
   pagomovilSalesGrossUsdCents: number;
   pagomovilSalesGrossBsCents: number;
+  pagomovilSalesCostUsdCents: number;
+  pagomovilNominalProfitUsdCents: number;
+  weightedBookBsRateCents: number | null;
+  replacementUsdtRateCents: number | null;
+  pagomovilMarkToMarketUsdtCents: number;
+  unrealizedExchangeDiffUsdCents: number;
+  pagomovilRealNetProfitUsdCents: number;
+  pagomovilBreakEvenRateCents: number | null;
   creditAppliedSalesUsdCents: number;
   fundedBySupplierUsdCents: Record<string, number>;
+}
+
+export type VenezuelaRateBenchmarkKey =
+  | "binance_p2p"
+  | "euro_bcv"
+  | "paralelo"
+  | "official_bcv"
+  | "highest";
+
+export interface LiveVenezuelaRatesSnapshot {
+  officialBcv: number | null;
+  euroBcv: number | null;
+  paralelo: number | null;
+  binanceP2p: number | null;
+  officialBcvCents: number | null;
+  euroBcvCents: number | null;
+  paraleloCents: number | null;
+  binanceP2pCents: number | null;
+  replacementUsdtRateCents: number | null;
+  bcvToUsdtGapPct: number | null;
+  source: string;
+  fetchedAt: string;
+}
+
+export interface BsRateAutoSyncPolicy {
+  mode: "manual" | "auto";
+  benchmark: VenezuelaRateBenchmarkKey;
+  spreadPct: number;
+  onlyIncrease: boolean;
+  autoSyncIntervalMinutes: number;
+  lastSyncedAt: string | null;
+  lastSyncedRateCents: number | null;
 }
 
 export type SupplierRepriceMode =

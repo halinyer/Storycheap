@@ -10,11 +10,14 @@ import {
   normalizeVePhone,
 } from "@/lib/catalog-banks";
 import { requireAdminUser } from "@/lib/server/auth";
+import { validateVolumeDiscountTiersForAdmin } from "@/lib/volume-discounts";
+import type { VolumeDiscountTier } from "@/types";
 import { sendSupportTicketReplyEmail } from "@/lib/server/email";
 import {
   adminRecordManualZenoPayment,
   adminRefundOrderToCredit,
   applyVerifiedBinancePayTxToOrder,
+  autoReconcileBinancePayForOrder,
   fulfillOrder,
   listRecentBinancePayCandidatesForOrder,
   reconcileGatewaySession,
@@ -79,11 +82,18 @@ import {
 } from "@/lib/server/suppliers/fazercards";
 import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
 import {
+  fetchLiveVenezuelaRates,
+  saveBsRateAutoSyncPolicy,
+  syncBsExchangeRateIfNeeded,
+} from "@/lib/server/exchange-rates";
+import {
   invalidateSupplierQuoteCache,
   syncSupplierCatalogCosts,
 } from "@/lib/server/supplier-sync";
 import type {
   BotDeviceDTO,
+  BsRateAutoSyncPolicy,
+  LiveVenezuelaRatesSnapshot,
   PagoMovilBotSettingsDTO,
   ProviderConfigDTO,
   SourcePriority,
@@ -281,13 +291,30 @@ export async function syncZenoBankOrderAdminAction(orderId: string) {
 
   const gw = getPaymentGateway("zenobank");
   const liveSession = await gw.getCheckout(order.gatewayCheckoutId);
-  const { reconciled, outcome } = await reconcileGatewaySession({
+  let { reconciled, outcome } = await reconcileGatewaySession({
     order,
     session: liveSession,
     source: "admin_manual_sync",
   });
-  const updated = (await getOrderById(order.id)) ?? order;
-  const missingCents = Math.max(0, updated.amountDueCents - updated.paidCents);
+  let updated = (await getOrderById(order.id)) ?? order;
+
+  if (updated.paidCents < updated.amountDueCents) {
+    const autoBinance = await autoReconcileBinancePayForOrder({
+      orderId: order.id,
+      actorUser: adminUser,
+      source: "admin_tx_verify",
+      minAgeMs: 0,
+    }).catch(() => null);
+    if (autoBinance?.matched) {
+      reconciled = true;
+      outcome = autoBinance.mode;
+      updated = autoBinance.order;
+    }
+  }
+
+  const effectivePaidCents = Math.max(liveSession.paidCents, updated.paidCents);
+  const missingCents = Math.max(0, updated.amountDueCents - effectivePaidCents);
+  const surplusCents = Math.max(0, effectivePaidCents - updated.amountDueCents);
 
   await appendAuditLog({
     actorId: adminUser.id,
@@ -298,9 +325,10 @@ export async function syncZenoBankOrderAdminAction(orderId: string) {
     metadata: {
       checkoutId: order.gatewayCheckoutId,
       liveStatus: liveSession.status,
-      livePaidCents: liveSession.paidCents,
+      livePaidCents: effectivePaidCents,
       expectedCents: updated.amountDueCents,
       missingCents,
+      surplusCents,
       reconciled,
       outcome: outcome ?? null,
       resultingStatus: updated.status,
@@ -313,10 +341,14 @@ export async function syncZenoBankOrderAdminAction(orderId: string) {
   revalidatePath(`/order/${order.id}`);
 
   return {
-    liveStatus: liveSession.status,
-    livePaidCents: liveSession.paidCents,
+    liveStatus:
+      effectivePaidCents >= updated.amountDueCents
+        ? "COMPLETED"
+        : liveSession.status,
+    livePaidCents: effectivePaidCents,
     expectedCents: updated.amountDueCents,
     missingCents,
+    surplusCents,
     reconciled,
     nextStatus: updated.status,
   };
@@ -412,12 +444,26 @@ export async function updateVariantAdminAction(input: {
   centraloneRegion?: string | null;
   lowStockThreshold: number;
   active: boolean;
+  volumeDiscounts?: VolumeDiscountTier[];
 }) {
   const adminUser = await requireAdminUser();
 
   const trimmedLabel = input.denominationLabel?.trim();
   if (input.denominationLabel !== undefined && !trimmedLabel) {
     throw new Error("La etiqueta de denominación no puede estar vacía.");
+  }
+
+  let validatedVolumeDiscounts: VolumeDiscountTier[] | undefined;
+  if (input.volumeDiscounts !== undefined) {
+    const check = validateVolumeDiscountTiersForAdmin({
+      tiers: input.volumeDiscounts,
+      baseUnitPriceCents: input.salePriceCents,
+      unitCostCents: input.unitCostCents,
+    });
+    if (!check.ok) {
+      throw new Error(check.error);
+    }
+    validatedVolumeDiscounts = check.tiers;
   }
 
   await updateVariantAdmin(input.variantId, {
@@ -442,6 +488,9 @@ export async function updateVariantAdminAction(input: {
     centraloneRegion: input.centraloneProductId
       ? (input.centraloneRegion ?? null)
       : null,
+    ...(validatedVolumeDiscounts !== undefined
+      ? { volumeDiscounts: validatedVolumeDiscounts }
+      : {}),
   };
   await saveVariantPricingMeta(input.variantId, metaPatch, adminUser.id);
 
@@ -1172,49 +1221,77 @@ export async function listBankNotificationsAdminAction() {
   return listBankNotifications(100);
 }
 
-export async function fetchLiveVenezuelaRatesAction(): Promise<{
-  officialBcv: number | null;
-  paralelo: number | null;
-  source: string;
-  fetchedAt: string;
-}> {
+export async function fetchLiveVenezuelaRatesAction(): Promise<LiveVenezuelaRatesSnapshot> {
   await requireAdminUser();
-  try {
-    const res = await fetch("https://ve.dolarapi.com/v1/dolares", {
-      signal: AbortSignal.timeout(5000),
-      cache: "no-store",
+  return fetchLiveVenezuelaRates({ force: true });
+}
+
+const bsRateAutoSyncPolicySchema = z.object({
+  mode: z.enum(["manual", "auto"]),
+  benchmark: z.enum([
+    "binance_p2p",
+    "euro_bcv",
+    "paralelo",
+    "official_bcv",
+    "highest",
+  ]),
+  spreadPct: z.number().min(-10).max(35),
+  onlyIncrease: z.boolean(),
+  autoSyncIntervalMinutes: z.number().int().min(5).max(720),
+});
+
+export async function saveBsRateAutoSyncPolicyAction(input: {
+  mode: BsRateAutoSyncPolicy["mode"];
+  benchmark: BsRateAutoSyncPolicy["benchmark"];
+  spreadPct: number;
+  onlyIncrease: boolean;
+  autoSyncIntervalMinutes: number;
+  syncNow?: boolean;
+}): Promise<{
+  policy: BsRateAutoSyncPolicy;
+  bsRateCents: number | null;
+  rates: LiveVenezuelaRatesSnapshot | null;
+}> {
+  const adminUser = await requireAdminUser();
+  const parsed = bsRateAutoSyncPolicySchema.parse(input);
+  const savedPolicy = await saveBsRateAutoSyncPolicy(parsed, adminUser.id);
+
+  let syncedRateCents: number | null = null;
+  let liveRates: LiveVenezuelaRatesSnapshot | null = null;
+
+  if (parsed.mode === "auto" || input.syncNow) {
+    const syncResult = await syncBsExchangeRateIfNeeded({
+      force: true,
+      updatedBy: adminUser.id,
     });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-    const items = (await res.json()) as Array<{
-      fuente?: string;
-      nombre?: string;
-      promedio?: number;
-    }>;
-    let officialBcv: number | null = null;
-    let paralelo: number | null = null;
-    for (const item of items) {
-      const f = (item.fuente ?? item.nombre ?? "").toLowerCase();
-      if (f.includes("oficial") && typeof item.promedio === "number") {
-        officialBcv = item.promedio;
-      } else if (f.includes("paralelo") && typeof item.promedio === "number") {
-        paralelo = item.promedio;
-      }
-    }
-    return {
-      officialBcv,
-      paralelo,
-      source: "ve.dolarapi.com",
-      fetchedAt: new Date().toISOString(),
-    };
-  } catch (err) {
-    throw new Error(
-      err instanceof Error
-        ? `No se pudo consultar ve.dolarapi.com (${err.message})`
-        : "No se pudo consultar tasa en vivo."
-    );
+    syncedRateCents = syncResult.bsRateCents;
+    liveRates = syncResult.rates;
   }
+
+  await appendAuditLog({
+    actorId: adminUser.id,
+    actorRole: adminUser.role,
+    action: "pagomovil.save_bs_rate_policy",
+    targetType: "store_settings",
+    targetId: "bs_rate_auto_sync_policy",
+    metadata: {
+      ...savedPolicy,
+      syncedRateCents,
+    },
+  });
+
+  revalidatePath("/", "layout");
+  revalidatePath("/admin");
+  revalidatePath("/admin/pagomovil");
+  revalidatePath("/admin/treasury");
+  revalidatePath("/admin/products");
+  revalidatePath("/checkout");
+
+  return {
+    policy: savedPolicy,
+    bsRateCents: syncedRateCents,
+    rates: liveRates,
+  };
 }
 
 export async function saveZenoBinanceReceiverAction(input: {

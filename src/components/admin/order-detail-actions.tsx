@@ -89,6 +89,10 @@ export function OrderDetailActions({
                   toast.warning(
                     `ZenoBank (${res.liveStatus}): Recibido ${formatCents(res.livePaidCents)} USD · Falta para soltar: ${formatCents(res.missingCents)} USD`,
                   );
+                } else if ((res.surplusCents ?? 0) > 0) {
+                  toast.success(
+                    `Pago verificado (${formatCents(res.livePaidCents)} USD). Excedente acreditado al saldo: +${formatCents(res.surplusCents ?? 0)} USD · Estado: ${res.nextStatus}`,
+                  );
                 } else {
                   toast.success(
                     `ZenoBank (${res.liveStatus}): Pago completo detectado (${formatCents(res.livePaidCents)} USD). Estado: ${res.nextStatus}`,
@@ -107,7 +111,7 @@ export function OrderDetailActions({
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/40 text-sky-100 font-black text-xs disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${busy ? "animate-spin" : ""}`} />
-            <span>Verificar pago en ZenoBank</span>
+            <span>Verificar pago ZenoBank / Binance Pay</span>
           </button>
         )}
 

@@ -3,11 +3,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { initiateCheckout } from "@/lib/server/checkout-service";
 import {
   applyVerifiedBinancePayTxToOrder,
+  autoReconcileBinancePayForOrder,
   BinancePayVerifyError,
   listRecentBinancePayCandidatesForOrder,
+  reconcileGatewaySession,
 } from "@/lib/server/fulfillment";
 import {
   buildBinanceSignedQuery,
+  extractCleanBinanceTxToken,
   parseUsdStablecoinCents,
   setSandboxBinancePayTransactionsForTests,
 } from "@/lib/server/payments/binance-pay";
@@ -197,5 +200,84 @@ describe("Binance Pay Direct Verification & Anti-Replay Protection", () => {
 
     const endBalance = await getUserCreditBalanceCents(CUSTOMER_SESSION.id);
     expect(endBalance - startBalance).toBe(50);
+  });
+
+  it("automatically reconciles ZenoBank overpayments via Binance Pay when ZenoBank reports $0.00", async () => {
+    const startBalance = await getUserCreditBalanceCents(CUSTOMER_SESSION.id);
+    const checkout = await initiateCheckout({
+      email: CUSTOMER_SESSION.email,
+      items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+      applyStoreCredit: false,
+      paymentGateway: "zenobank",
+      sessionUser: CUSTOMER_SESSION,
+      ipAddress: "127.0.0.1",
+    });
+
+    // Customer sends $12.00 USDT instead of $10.50 USD, so ZenoBank leaves checkout OPEN with $0.00
+    const txTimeMs = Date.now() - 4000;
+    setSandboxBinancePayTransactionsForTests([
+      {
+        uid: 167545790,
+        counterpartyId: 241697514,
+        orderId: "466241487216959488",
+        orderType: "C2C",
+        transactionId: "P_A25QJZNXM8W71114",
+        transactionTime: txTimeMs,
+        amount: "12.00",
+        currency: "USDT",
+        payerInfo: { name: "carlos" },
+        receiverInfo: { binanceId: 167545790 },
+      },
+    ]);
+
+    expect(extractCleanBinanceTxToken("ID: p_a25qjznxm8w71114")).toBe(
+      "P_A25QJZNXM8W71114"
+    );
+    expect(extractCleanBinanceTxToken("Orden 466241487216959488")).toBe(
+      "466241487216959488"
+    );
+
+    const rec = await reconcileGatewaySession({
+      order: checkout.order,
+      session: {
+        gateway: "zenobank",
+        checkoutId: checkout.order.gatewayCheckoutId ?? "ch_test_overpay",
+        checkoutUrl: checkout.checkoutUrl,
+        priceCents: 1050,
+        paidCents: 0,
+        status: "OPEN",
+        expiresAt: checkout.order.expiresAt,
+        isSandbox: true,
+      },
+      source: "order_poll_reconcile",
+    });
+
+    expect(rec.reconciled).toBe(true);
+    expect(rec.outcome).toBe("delivered_or_fulfilling");
+
+    const updatedOrder = await getOrderById(checkout.order.id);
+    expect(updatedOrder?.status).toBe("DELIVERED");
+    expect(updatedOrder?.paidCents).toBe(1200);
+
+    const endBalance = await getUserCreditBalanceCents(CUSTOMER_SESSION.id);
+    expect(endBalance - startBalance).toBe(150);
+
+    // Subsequent autoReconcile on a new order must NOT reuse the already-consumed overpayment TX
+    const checkout2 = await initiateCheckout({
+      email: CUSTOMER_SESSION.email,
+      items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+      applyStoreCredit: false,
+      paymentGateway: "zenobank",
+      sessionUser: CUSTOMER_SESSION,
+      ipAddress: "127.0.0.1",
+    });
+
+    const auto2 = await autoReconcileBinancePayForOrder({
+      orderId: checkout2.order.id,
+      actorUser: CUSTOMER_SESSION,
+      source: "customer_auto_verify",
+      minAgeMs: 0,
+    });
+    expect(auto2.matched).toBe(false);
   });
 });

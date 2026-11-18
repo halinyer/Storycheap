@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PayYourWay } from "@/components/storefront/pay-your-way";
@@ -8,6 +8,12 @@ import { Card3DInteractive } from "@/components/ui/card-3d-interactive";
 import { useStore } from "@/context/store-context";
 import { resolveBrandTheme } from "@/lib/brand-theme";
 import { formatCents } from "@/lib/catalog-seed";
+import { formatBsFromUsdCents } from "@/lib/currency";
+import {
+  getBestVolumeTierHint,
+  MAX_ORDER_QUANTITY_PER_LINE,
+  resolveVolumeTierPrice,
+} from "@/lib/volume-discounts";
 import type { ProductDTO } from "@/types";
 import {
   AlertCircle,
@@ -29,11 +35,29 @@ import { toast } from "sonner";
 
 interface ProductDetailClientProps {
   product: ProductDTO;
+  initialBsRateCents?: number | null;
 }
 
-export function ProductDetailClient({ product }: ProductDetailClientProps) {
+export function ProductDetailClient({
+  product,
+  initialBsRateCents = null,
+}: ProductDetailClientProps) {
   const router = useRouter();
-  const { addToCart, setCartDrawerOpen } = useStore();
+  const {
+    addToCart,
+    setCartDrawerOpen,
+    displayCurrency,
+    bsRateCents,
+    hydrateBsRateCents,
+  } = useStore();
+
+  useEffect(() => {
+    if (typeof initialBsRateCents === "number" && initialBsRateCents > 0) {
+      hydrateBsRateCents(initialBsRateCents);
+    }
+  }, [initialBsRateCents, hydrateBsRateCents]);
+
+  const effectiveBsRateCents = bsRateCents ?? initialBsRateCents;
 
   const activeVariants = product.variants
     .filter((v) => v.active)
@@ -58,11 +82,24 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
   const maxQuantity = selectedVariant
     ? typeof selectedVariant.deliverableStock === "number" &&
       selectedVariant.deliverableStock > 0
-      ? Math.min(5, selectedVariant.deliverableStock)
+      ? Math.min(MAX_ORDER_QUANTITY_PER_LINE, selectedVariant.deliverableStock)
       : selectedVariant.availableStock > 0
-        ? Math.min(5, selectedVariant.availableStock)
-        : 5
+        ? Math.min(MAX_ORDER_QUANTITY_PER_LINE, selectedVariant.availableStock)
+        : MAX_ORDER_QUANTITY_PER_LINE
     : 1;
+
+  const variantTierHint = selectedVariant
+    ? getBestVolumeTierHint({
+        baseUnitPriceCents: selectedVariant.salePriceCents,
+        volumeDiscounts: selectedVariant.volumeDiscounts,
+      })
+    : { tiers: [], firstTier: null, bestTier: null, maxDiscountPct: 0 };
+
+  const tierPricing = resolveVolumeTierPrice({
+    baseUnitPriceCents: selectedVariant?.salePriceCents ?? 0,
+    quantity,
+    volumeDiscounts: selectedVariant?.volumeDiscounts,
+  });
 
   const outOfStockLabels = activeVariants
     .filter((v) => !v.inStock)
@@ -85,6 +122,7 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
         imageUrl: product.imageUrl,
         denominationLabel: selectedVariant.denominationLabel,
         unitPriceCents: selectedVariant.salePriceCents,
+        volumeDiscounts: selectedVariant.volumeDiscounts,
       },
       quantity
     );
@@ -282,11 +320,21 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
                 Región
               </span>
               <div className="rounded-xl border border-white/[0.1] bg-white/[0.025] px-3.5 py-2.5 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5 min-w-0">
+                <div className="flex items-center gap-2 min-w-0">
                   <Globe className="w-4 h-4 text-slate-400 shrink-0" />
                   <span className="text-sm font-medium text-white truncate">
                     {product.region}
                   </span>
+                  {activeVariants.some(
+                    (v) => (v.volumeDiscounts?.length ?? 0) > 0
+                  ) && (
+                    <span
+                      title="Esta tarjeta ofrece descuentos por volumen"
+                      className="text-xs font-extrabold text-[#e53935]"
+                    >
+                      %
+                    </span>
+                  )}
                 </div>
                 <span className="text-[11px] font-medium text-emerald-400/90 shrink-0">
                   Compatible
@@ -303,6 +351,17 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                 {activeVariants.map((variant) => {
                   const isSelected = selectedVariant?.id === variant.id;
+                  const vHint = getBestVolumeTierHint({
+                    baseUnitPriceCents: variant.salePriceCents,
+                    volumeDiscounts: variant.volumeDiscounts,
+                  });
+                  const variantBs = formatBsFromUsdCents(
+                    variant.salePriceCents,
+                    effectiveBsRateCents
+                  );
+                  const showVariantBsPrimary =
+                    displayCurrency === "VES" && Boolean(variantBs);
+
                   return (
                     <button
                       key={variant.id}
@@ -311,7 +370,7 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
                         setSelectedVariantId(variant.id);
                         setQuantity(1);
                       }}
-                      className={`rounded-xl border px-3 py-2.5 text-left transition-all ${
+                      className={`relative rounded-xl border px-3 py-2.5 text-left transition-all ${
                         isSelected
                           ? "border-white bg-white/[0.07] text-white ring-1 ring-white/50"
                           : variant.inStock
@@ -319,12 +378,32 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
                             : "border-white/[0.05] bg-transparent text-slate-500 opacity-50"
                       }`}
                     >
-                      <div className="text-[13px] font-semibold leading-snug">
-                        {variant.denominationLabel}
+                      <div className="flex items-baseline justify-between gap-1.5">
+                        <span className="text-[13px] font-semibold leading-snug">
+                          {variant.denominationLabel}
+                        </span>
+                        {vHint.maxDiscountPct > 0 && (
+                          <span className="text-[11px] font-bold text-[#e53935] tabular-nums shrink-0">
+                            -{vHint.maxDiscountPct}%
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-slate-400 tabular-nums mt-0.5">
-                        {formatCents(variant.salePriceCents)} US$
+                        {showVariantBsPrimary
+                          ? variantBs
+                          : `${formatCents(variant.salePriceCents)} USD`}
                       </div>
+                      {showVariantBsPrimary ? (
+                        <div className="text-[10px] text-slate-500 tabular-nums">
+                          ≈ {formatCents(variant.salePriceCents)} USD
+                        </div>
+                      ) : (
+                        variantBs && (
+                          <div className="text-[10px] text-slate-500 tabular-nums">
+                            ≈ {variantBs}
+                          </div>
+                        )
+                      )}
                     </button>
                   );
                 })}
@@ -337,116 +416,276 @@ export function ProductDetailClient({ product }: ProductDetailClientProps) {
               )}
             </div>
 
-            {/* Price Summary, Live Stock & Quantity */}
-            {selectedVariant && (
-              <>
-                <div className="flex items-end justify-between gap-4 pt-1">
-                  <div>
-                    <span className="text-xs text-slate-400 block">Pagas</span>
-                    <div className="text-3xl font-semibold tracking-tight text-white tabular-nums mt-0.5">
-                      {formatCents(selectedVariant.salePriceCents * quantity)}{" "}
-                      <span className="text-base font-medium text-slate-300">
-                        US$
-                      </span>
+            {/* Quiet, High-Trust Purchase Block */}
+            {selectedVariant && (() => {
+              const hasTiers = variantTierHint.tiers.length > 0;
+              const totalBs = formatBsFromUsdCents(
+                tierPricing.lineTotalCents,
+                effectiveBsRateCents
+              );
+              const showBsPrimary =
+                displayCurrency === "VES" && Boolean(totalBs);
+              const regularTotalBs = formatBsFromUsdCents(
+                tierPricing.regularLineTotalCents,
+                effectiveBsRateCents
+              );
+
+              return (
+                <div className="border-t border-white/[0.08] pt-4 space-y-4">
+                  {/* Quantity + Minimal Volume Pricing Selector */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <span className="text-xs font-medium text-slate-300">
+                          Cantidad
+                        </span>
+                        {hasTiers && variantTierHint.firstTier && (
+                          <span className="text-[11px] text-slate-500 ml-2 tabular-nums">
+                            Desc. desde {variantTierHint.firstTier.minQuantity} u.
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="inline-flex items-center rounded-xl border border-white/[0.1] bg-white/[0.025] p-0.5 shrink-0">
+                        <button
+                          type="button"
+                          aria-label="Disminuir cantidad"
+                          disabled={quantity <= 1}
+                          onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                          className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/[0.06] disabled:opacity-35 transition-colors"
+                        >
+                          <Minus className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="w-7 text-center text-xs font-semibold text-white tabular-nums">
+                          {quantity}
+                        </span>
+                        <button
+                          type="button"
+                          aria-label="Aumentar cantidad"
+                          disabled={!canBuy || quantity >= maxQuantity}
+                          onClick={() =>
+                            setQuantity((q) => Math.min(maxQuantity, q + 1))
+                          }
+                          className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/[0.06] disabled:opacity-35 transition-colors"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
 
+                    {hasTiers && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={!canBuy}
+                          onClick={() => setQuantity(1)}
+                          className={`px-2.5 py-1 rounded-lg border text-[11px] font-medium tabular-nums transition-all ${
+                            !tierPricing.appliedTier
+                              ? "border-white/75 bg-white/[0.08] text-white"
+                              : "border-white/[0.09] bg-transparent hover:border-white/25 text-slate-400 hover:text-slate-200"
+                          }`}
+                        >
+                          1 u. · {formatCents(selectedVariant.salePriceCents)}
+                        </button>
+
+                        {variantTierHint.tiers.map((tier) => {
+                          const isActive =
+                            tierPricing.appliedTier?.minQuantity ===
+                            tier.minQuantity;
+                          const unavailableByStock =
+                            tier.minQuantity > maxQuantity;
+                          const pct =
+                            selectedVariant.salePriceCents > 0
+                              ? Number(
+                                  (
+                                    ((selectedVariant.salePriceCents -
+                                      tier.unitPriceCents) /
+                                      selectedVariant.salePriceCents) *
+                                    100
+                                  ).toFixed(1)
+                                )
+                              : 0;
+                          const tierBs = formatBsFromUsdCents(
+                            tier.unitPriceCents,
+                            effectiveBsRateCents
+                          );
+
+                          return (
+                            <button
+                              key={tier.minQuantity}
+                              type="button"
+                              disabled={!canBuy || unavailableByStock}
+                              onClick={() => setQuantity(tier.minQuantity)}
+                              className={`px-2.5 py-1 rounded-lg border text-[11px] font-medium tabular-nums transition-all ${
+                                isActive
+                                  ? "border-white/75 bg-white/[0.08] text-white"
+                                  : unavailableByStock
+                                    ? "border-white/[0.05] text-slate-600 opacity-50 cursor-not-allowed"
+                                    : "border-white/[0.09] bg-transparent hover:border-white/25 text-slate-300 hover:text-white"
+                              }`}
+                            >
+                              {tier.minQuantity}+ u. ·{" "}
+                              {displayCurrency === "VES" && tierBs
+                                ? tierBs
+                                : formatCents(tier.unitPriceCents)}{" "}
+                              <span className="text-slate-400">(-{pct}%)</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Clean Final Price & Savings Readout */}
+                  <div className="pt-1 space-y-1">
+                    <span className="text-xs text-slate-400 block">Pagas</span>
+
+                    <div className="flex flex-wrap items-baseline gap-2.5 tabular-nums">
+                      <span className="text-3xl font-bold tracking-tight text-white">
+                        {showBsPrimary ? (
+                          totalBs
+                        ) : (
+                          <>
+                            {formatCents(tierPricing.lineTotalCents)}{" "}
+                            <span className="text-base font-medium text-slate-300">
+                              USD
+                            </span>
+                          </>
+                        )}
+                      </span>
+
+                      {tierPricing.lineSavingsCents > 0 ? (
+                        <>
+                          <span className="text-sm font-medium text-slate-500 line-through">
+                            {showBsPrimary && regularTotalBs
+                              ? regularTotalBs
+                              : `${formatCents(tierPricing.regularLineTotalCents)} USD`}
+                          </span>
+                          <span className="px-2.5 py-0.5 rounded-full bg-[#e53935] text-white text-xs font-bold shadow-sm">
+                            -{tierPricing.discountPct}%
+                          </span>
+                        </>
+                      ) : (
+                        hasTiers &&
+                        variantTierHint.firstTier &&
+                        variantTierHint.firstTier.minQuantity <= maxQuantity && (
+                          <button
+                            type="button"
+                            disabled={!canBuy}
+                            onClick={() =>
+                              setQuantity(
+                                variantTierHint.firstTier?.minQuantity ?? 1
+                              )
+                            }
+                            className="px-2.5 py-0.5 rounded-full bg-[#e53935] hover:bg-[#dc2626] text-white text-xs font-bold shadow-sm transition-colors cursor-pointer"
+                          >
+                            Hasta -{variantTierHint.maxDiscountPct}% (
+                            {variantTierHint.firstTier.minQuantity}+ u.)
+                          </button>
+                        )
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400 tabular-nums">
+                      {showBsPrimary ? (
+                        <span>
+                          ≈ {formatCents(tierPricing.lineTotalCents)} USD
+                        </span>
+                      ) : (
+                        totalBs && <span>≈ {totalBs}</span>
+                      )}
+                      {quantity > 1 && (
+                        <span>
+                          · {formatCents(tierPricing.effectiveUnitPriceCents)}/u
+                        </span>
+                      )}
+                      {tierPricing.lineSavingsCents > 0 && (
+                        <span className="text-slate-200 font-medium">
+                          · Ahorras {formatCents(tierPricing.lineSavingsCents)} USD
+                        </span>
+                      )}
+                    </div>
+
+                    {tierPricing.nextTier &&
+                      tierPricing.nextTier.minQuantity <= maxQuantity && (
+                        <p className="text-[11px] text-slate-400 tabular-nums pt-0.5">
+                          Agrega{" "}
+                          <span className="text-slate-200 font-medium">
+                            {tierPricing.nextTier.minQuantity - quantity} más
+                          </span>{" "}
+                          para pagar{" "}
+                          <span className="text-slate-200 font-medium">
+                            {formatCents(tierPricing.nextTier.unitPriceCents)} USD/u
+                          </span>
+                          .
+                        </p>
+                      )}
+
                     {selectedVariant.inStock ? (
-                      <div className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
+                      <div className="pt-1 inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         <span>
                           En stock
-                          {typeof selectedVariant.deliverableStock ===
-                            "number" && selectedVariant.deliverableStock <= 5
+                          {typeof selectedVariant.deliverableStock === "number" &&
+                          selectedVariant.deliverableStock <= 5
                             ? ` · ${selectedVariant.deliverableStock} disp.`
                             : ""}
                         </span>
                       </div>
                     ) : (
-                      <div className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-rose-400">
+                      <div className="pt-1 inline-flex items-center gap-1.5 text-xs font-medium text-rose-400">
                         <AlertCircle className="w-3.5 h-3.5" />
                         <span>Fuera de stock</span>
                       </div>
                     )}
                   </div>
 
-                  {/* Minimal Quantity Stepper */}
-                  <div className="flex flex-col items-end gap-1">
-                    <span className="text-[11px] text-slate-400">
-                      Cantidad
-                    </span>
-                    <div className="inline-flex items-center rounded-xl border border-white/[0.1] bg-white/[0.025] p-0.5">
-                      <button
-                        type="button"
-                        aria-label="Disminuir cantidad"
-                        disabled={quantity <= 1}
-                        onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                        className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/[0.06] disabled:opacity-35 transition-colors"
-                      >
-                        <Minus className="w-3.5 h-3.5" />
-                      </button>
-                      <span className="w-7 text-center text-xs font-semibold text-white tabular-nums">
-                        {quantity}
+                  {/* Primary & Secondary CTAs */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                    <button
+                      type="button"
+                      disabled={!canBuy}
+                      onClick={() => handleAddToCart(true)}
+                      className="w-full py-3 px-4 rounded-xl bg-[#0070d1] hover:bg-[#0b84eb] disabled:bg-white/[0.06] disabled:text-slate-500 text-white font-semibold text-sm flex items-center justify-center transition-colors shadow-sm"
+                    >
+                      <span>{canBuy ? "Comprar ahora" : "Sin stock"}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={!canBuy}
+                      onClick={() => handleAddToCart(false)}
+                      className="w-full py-3 px-4 rounded-xl border border-white/[0.16] bg-transparent hover:bg-white/[0.05] disabled:opacity-40 text-white font-medium text-sm flex items-center justify-center gap-2 transition-colors"
+                    >
+                      <ShoppingCart className="w-4 h-4 shrink-0" />
+                      <span>Añadir al carrito</span>
+                    </button>
+                  </div>
+
+                  {/* 3-Column Trust Footer */}
+                  <div className="border-t border-white/[0.08] pt-4 grid grid-cols-3 gap-2 text-center">
+                    <div className="space-y-1">
+                      <Lock className="w-3.5 h-3.5 text-slate-400 mx-auto" />
+                      <span className="block text-[11px] text-slate-400 leading-tight">
+                        Pago seguro
                       </span>
-                      <button
-                        type="button"
-                        aria-label="Aumentar cantidad"
-                        disabled={!canBuy || quantity >= maxQuantity}
-                        onClick={() =>
-                          setQuantity((q) => Math.min(maxQuantity, q + 1))
-                        }
-                        className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/[0.06] disabled:opacity-35 transition-colors"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                      </button>
+                    </div>
+                    <div className="space-y-1">
+                      <Clock className="w-3.5 h-3.5 text-slate-400 mx-auto" />
+                      <span className="block text-[11px] text-slate-400 leading-tight">
+                        Entrega al instante
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      <ShieldCheck className="w-3.5 h-3.5 text-slate-400 mx-auto" />
+                      <span className="block text-[11px] text-slate-400 leading-tight">
+                        Códigos oficiales
+                      </span>
                     </div>
                   </div>
                 </div>
-
-                {/* Primary & Secondary CTAs */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
-                  <button
-                    type="button"
-                    disabled={!canBuy}
-                    onClick={() => handleAddToCart(true)}
-                    className="w-full py-3 px-4 rounded-xl bg-[#0070d1] hover:bg-[#0b84eb] disabled:bg-white/[0.06] disabled:text-slate-500 text-white font-semibold text-sm flex items-center justify-center transition-colors shadow-sm"
-                  >
-                    <span>{canBuy ? "Comprar ahora" : "Sin stock"}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={!canBuy}
-                    onClick={() => handleAddToCart(false)}
-                    className="w-full py-3 px-4 rounded-xl border border-white/[0.16] bg-transparent hover:bg-white/[0.05] disabled:opacity-40 text-white font-medium text-sm flex items-center justify-center gap-2 transition-colors"
-                  >
-                    <ShoppingCart className="w-4 h-4 shrink-0" />
-                    <span>Añadir al carrito</span>
-                  </button>
-                </div>
-              </>
-            )}
-
-            {/* 3-Column Trust Footer */}
-            <div className="border-t border-white/[0.08] pt-4 grid grid-cols-3 gap-2 text-center">
-              <div className="space-y-1">
-                <Lock className="w-3.5 h-3.5 text-slate-400 mx-auto" />
-                <span className="block text-[11px] text-slate-400 leading-tight">
-                  Pago seguro
-                </span>
-              </div>
-              <div className="space-y-1">
-                <Clock className="w-3.5 h-3.5 text-slate-400 mx-auto" />
-                <span className="block text-[11px] text-slate-400 leading-tight">
-                  Entrega al instante
-                </span>
-              </div>
-              <div className="space-y-1">
-                <ShieldCheck className="w-3.5 h-3.5 text-slate-400 mx-auto" />
-                <span className="block text-[11px] text-slate-400 leading-tight">
-                  Códigos oficiales
-                </span>
-              </div>
-            </div>
+              );
+            })()}
           </div>
         </div>
       </div>

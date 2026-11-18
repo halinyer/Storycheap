@@ -50,12 +50,14 @@ export interface BinancePayIncomingTx {
   payerName: string | null;
   counterpartyId: string | null;
   receiverBinanceId: string | null;
+  note?: string | null;
 }
 
 export interface RawBinancePayTxItem {
   uid?: number | string;
   counterpartyId?: number | string;
   orderId?: string;
+  note?: string;
   orderType?: string;
   transactionId?: string;
   transactionTime?: number;
@@ -150,6 +152,7 @@ export function normalizeBinancePayIncomingList(
       counterpartyId:
         item.counterpartyId !== undefined ? String(item.counterpartyId) : null,
       receiverBinanceId,
+      note: item.note?.trim() || null,
     });
   }
 
@@ -192,59 +195,86 @@ export async function fetchBinancePayIncomingTransactions(args?: {
   }
 
   const limit = Math.min(100, Math.max(1, args?.limit ?? 50));
-  const signedQuery = buildBinanceSignedQuery(
-    {
-      startTime: args?.startTimeMs,
-      endTime: args?.endTimeMs,
-      limit,
-      recvWindow: 10000,
-      timestamp: Date.now(),
-    },
-    creds.apiSecret
-  );
 
   const hosts =
     creds.baseUrl !== "https://api.binance.com"
       ? [creds.baseUrl]
-      : ["https://api.binance.com", "https://api1.binance.com"];
+      : [
+          "https://api.binance.com",
+          "https://api-gcp.binance.com",
+          "https://api1.binance.com",
+          "https://api2.binance.com",
+          "https://api3.binance.com",
+          "https://api4.binance.com",
+        ];
 
   let lastErr: Error | null = null;
+  let sawRegionBlock = false;
+
   for (const host of hosts) {
     try {
-      const res = await fetch(
-        `${host}/sapi/v1/pay/transactions?${signedQuery}`,
-        {
+      const executeSignedFetch = async (timestampMs: number) => {
+        const signedQuery = buildBinanceSignedQuery(
+          {
+            startTime: args?.startTimeMs,
+            endTime: args?.endTimeMs,
+            limit,
+            recvWindow: 60000,
+            timestamp: timestampMs,
+          },
+          creds.apiSecret
+        );
+        return fetch(`${host}/sapi/v1/pay/transactions?${signedQuery}`, {
           method: "GET",
           headers: {
             "X-MBX-APIKEY": creds.apiKey,
           },
           cache: "no-store",
-        }
-      );
+        });
+      };
+
+      let res = await executeSignedFetch(Date.now());
 
       if (res.status === 451) {
-        throw new BinancePayRegionBlockedError();
+        sawRegionBlock = true;
+        lastErr = new BinancePayRegionBlockedError();
+        continue;
       }
 
-      const json = (await res.json().catch(() => null)) as {
-        code?: string;
+      let json = (await res.json().catch(() => null)) as {
+        code?: string | number;
         message?: string;
         msg?: string;
         data?: RawBinancePayTxItem[];
       } | null;
 
+      // Auto-recover from server clock skew (-1021 Timestamp outside recvWindow)
+      if (!res.ok && Number(json?.code) === -1021) {
+        const timeRes = await fetch(`${host}/api/v3/time`, {
+          cache: "no-store",
+        }).catch(() => null);
+        const timeJson = (await timeRes?.json().catch(() => null)) as {
+          serverTime?: number;
+        } | null;
+        if (typeof timeJson?.serverTime === "number") {
+          res = await executeSignedFetch(timeJson.serverTime);
+          json = (await res.json().catch(() => null)) as typeof json;
+        }
+      }
+
       if (!res.ok) {
         const msg = json?.msg || json?.message || `Binance HTTP ${res.status}`;
-        if (res.status >= 500) {
+        if (res.status === 403 || res.status >= 500) {
           lastErr = new BinancePayApiError(msg, res.status);
           continue;
         }
         throw new BinancePayApiError(msg, res.status);
       }
 
-      if (json?.code && json.code !== "000000") {
+      const codeStr = json?.code !== undefined ? String(json.code) : "000000";
+      if (codeStr !== "000000") {
         throw new BinancePayApiError(
-          json.message || `Binance Pay error code ${json.code}`,
+          json?.message || json?.msg || `Binance Pay error code ${codeStr}`,
           400
         );
       }
@@ -255,14 +285,15 @@ export async function fetchBinancePayIncomingTransactions(args?: {
         args?.expectedReceiverBinanceId
       );
     } catch (err) {
-      if (err instanceof BinancePayRegionBlockedError) {
-        throw err;
-      }
-      if (err instanceof BinancePayApiError && err.status < 500) {
+      if (err instanceof BinancePayApiError && err.status < 500 && err.status !== 403) {
         throw err;
       }
       lastErr = err instanceof Error ? err : new Error(String(err));
     }
+  }
+
+  if (sawRegionBlock) {
+    throw new BinancePayRegionBlockedError();
   }
 
   throw lastErr ?? new BinancePayApiError("No se pudo consultar Binance Pay.");
@@ -270,12 +301,21 @@ export async function fetchBinancePayIncomingTransactions(args?: {
 
 const ORDER_TX_CLOCK_GRACE_MS = 10 * 60_000;
 
+export function extractCleanBinanceTxToken(raw: string): string {
+  const upper = raw.trim().toUpperCase();
+  const pMatch = upper.match(/P_[A-Z0-9]{8,32}/);
+  if (pMatch) return pMatch[0];
+  const numMatch = upper.match(/\b\d{14,24}\b/);
+  if (numMatch) return numMatch[0];
+  return upper.replace(/\s+/g, "");
+}
+
 export async function findBinancePayTransactionForOrder(args: {
   txId: string;
   orderCreatedAtIso: string;
   expectedReceiverBinanceId?: string | null;
 }): Promise<BinancePayIncomingTx | null> {
-  const cleanId = args.txId.trim().toUpperCase();
+  const cleanId = extractCleanBinanceTxToken(args.txId);
   if (cleanId.length < 6) {
     throw new BinancePayApiError(
       "Ingresa un ID de transacción Binance Pay válido (ej. P_A25QH5...).",
@@ -294,11 +334,15 @@ export async function findBinancePayTransactionForOrder(args: {
     expectedReceiverBinanceId: args.expectedReceiverBinanceId,
   });
 
-  const match = list.find(
-    (t) =>
-      t.transactionId.toUpperCase() === cleanId ||
-      t.orderId.toUpperCase() === cleanId
-  );
+  const match = list.find((t) => {
+    const txUpper = t.transactionId.toUpperCase();
+    const ordUpper = t.orderId.toUpperCase();
+    if (txUpper === cleanId || ordUpper === cleanId) return true;
+    if (cleanId.length >= 8 && (txUpper.endsWith(cleanId) || ordUpper.endsWith(cleanId))) {
+      return true;
+    }
+    return false;
+  });
   if (!match) return null;
 
   if (match.transactionTime < minValidMs) {

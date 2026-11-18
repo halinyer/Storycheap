@@ -7,6 +7,7 @@ import type {
   SessionUser,
 } from "@/types";
 import { getSiteUrl } from "../env";
+import { syncBsExchangeRateIfNeeded } from "../exchange-rates";
 import {
   buildNotificationContentHash,
   claimNotificationForOrder,
@@ -16,10 +17,11 @@ import {
   getActiveReceiverBankAccount,
   getBankNotificationById,
   getBotDeviceWithSecret,
-  getMatchedNotificationForOrder,
+  getMatchedNotificationsForOrder,
   getOrCreatePagoMovilWebhookSecret,
   getOrderPagoMovilReport,
   getPagoMovilBotSettings,
+  getReceivedBsCentsForOrder,
   insertBankNotification,
   isBotWatchdogHealthy,
   markNotificationStatus,
@@ -245,6 +247,7 @@ export class PagoMovilBotAdapter implements PaymentGatewayAdapter {
   readonly id = "pagomovil" as const;
 
   async createCheckout(input: CreateCheckoutInput): Promise<GatewayCheckoutSession> {
+    await syncBsExchangeRateIfNeeded().catch(() => null);
     const bsRateCents = await getBsRateCents();
     const { settings } = await assertPagoMovilCheckoutReady(bsRateCents);
     const effectiveBsRate = bsRateCents!;
@@ -282,10 +285,10 @@ export class PagoMovilBotAdapter implements PaymentGatewayAdapter {
 
   async getCheckout(checkoutId: string): Promise<GatewayCheckoutSession> {
     const orderId = checkoutId.startsWith("pm_") ? checkoutId.slice(3) : checkoutId;
-    const [order, report, matchedNotif, settings] = await Promise.all([
+    const [order, report, matchedNotifs, settings] = await Promise.all([
       getOrderById(orderId),
       getOrderPagoMovilReport(orderId),
-      getMatchedNotificationForOrder(orderId),
+      getMatchedNotificationsForOrder(orderId),
       getPagoMovilBotSettings(),
     ]);
 
@@ -293,7 +296,11 @@ export class PagoMovilBotAdapter implements PaymentGatewayAdapter {
       throw new Error(`Pago Móvil checkout not found: ${checkoutId}`);
     }
 
-    if (matchedNotif && matchedNotif.amountBsCents !== null) {
+    const totalMatchedBsCents = matchedNotifs.reduce(
+      (acc, n) => acc + (n.amountBsCents ?? 0),
+      0
+    );
+    if (matchedNotifs.length > 0 && totalMatchedBsCents > 0) {
       const expectedBs =
         report?.amountDueBsCents ??
         (order.bsRateCents
@@ -303,7 +310,7 @@ export class PagoMovilBotAdapter implements PaymentGatewayAdapter {
       const mapped = mapMatchedBsToAuthoritativeUsdCents({
         order,
         expectedBsCents: expectedBs,
-        paidBsCents: matchedNotif.amountBsCents,
+        paidBsCents: totalMatchedBsCents,
         toleranceBsCents: settings.amountToleranceBsCents,
       });
 
@@ -387,6 +394,13 @@ export class PagoMovilBotAdapter implements PaymentGatewayAdapter {
   }
 }
 
+function formatBsAmount(bsCents: number): string {
+  return (bsCents / 100).toLocaleString("es-VE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 export async function dispatchPagoMovilConfirmedWebhook(params: {
   order: OrderDTO;
   notification: BankPaymentNotificationDTO;
@@ -400,7 +414,20 @@ export async function dispatchPagoMovilConfirmedWebhook(params: {
       ? Math.round((params.order.amountDueCents * params.order.bsRateCents) / 100)
       : params.order.totalBsCents ?? 0);
 
-  const paidBsCents = params.notification.amountBsCents ?? expectedBs;
+  // Sum every claimed bank notification so multiple partial payments accumulate correctly
+  const matchedRows = await getMatchedNotificationsForOrder(params.order.id);
+  const matchedIds = new Set(matchedRows.map((n) => n.id));
+  const matchedTotalBs = matchedRows.reduce(
+    (acc, n) => acc + (n.amountBsCents ?? 0),
+    0
+  );
+  const totalBsCents =
+    matchedTotalBs +
+    (matchedIds.has(params.notification.id)
+      ? 0
+      : params.notification.amountBsCents ?? 0);
+  const paidBsCents = totalBsCents > 0 ? totalBsCents : expectedBs;
+
   const mapped = mapMatchedBsToAuthoritativeUsdCents({
     order: params.order,
     expectedBsCents: expectedBs,
@@ -443,9 +470,117 @@ export async function dispatchPagoMovilConfirmedWebhook(params: {
   });
 
   const { processVerifiedWebhookEvent } = await import("../fulfillment");
-  return processVerifiedWebhookEvent(verifiedEvent, {
+  const result = await processVerifiedWebhookEvent(verifiedEvent, {
     skipRemoteDoubleCheck: false,
   });
+
+  if (mapped.status === "PARTIALLY_PAID") {
+    // Underpayment: abono recorded, codes stay locked, operator is alerted with exact Bs amounts
+    const remainingBs = Math.max(0, expectedBs - paidBsCents);
+    await markOrderAttentionFlag(
+      params.order.id,
+      true,
+      `Pago Móvil PARCIAL (Ref ${params.notification.referenceFull ?? "—"}): recibido Bs ${formatBsAmount(paidBsCents)} de Bs ${formatBsAmount(expectedBs)} · faltan Bs ${formatBsAmount(remainingBs)}. Abono ≈ $${(mapped.paidUsdCents / 100).toFixed(2)} USD registrado.`
+    ).catch(() => {});
+    await appendAuditLog({
+      actorId: null,
+      actorRole: "system",
+      action: "pagomovil.partial_payment_recorded",
+      targetType: "order",
+      targetId: params.order.id,
+      metadata: {
+        notificationId: params.notification.id,
+        reference: params.notification.referenceFull,
+        receivedBsCents: paidBsCents,
+        expectedBsCents: expectedBs,
+        remainingBsCents: remainingBs,
+        creditedUsdCents: mapped.paidUsdCents,
+      },
+    }).catch(() => {});
+  } else {
+    const surplusUsdCents = Math.max(
+      0,
+      mapped.paidUsdCents - params.order.amountDueCents
+    );
+    if (surplusUsdCents > 0) {
+      const surplusBs = Math.max(0, paidBsCents - expectedBs);
+      await markOrderAttentionFlag(
+        params.order.id,
+        true,
+        `Sobrepago Pago Móvil (Ref ${params.notification.referenceFull ?? "—"}): recibido Bs ${formatBsAmount(paidBsCents)} vs Bs ${formatBsAmount(expectedBs)} · excedente Bs ${formatBsAmount(surplusBs)} = +$${(surplusUsdCents / 100).toFixed(2)} USD acreditados al saldo del cliente.`
+      ).catch(() => {});
+      await appendAuditLog({
+        actorId: null,
+        actorRole: "system",
+        action: "pagomovil.overpayment_credited",
+        targetType: "order",
+        targetId: params.order.id,
+        metadata: {
+          notificationId: params.notification.id,
+          reference: params.notification.referenceFull,
+          receivedBsCents: paidBsCents,
+          expectedBsCents: expectedBs,
+          surplusBsCents: surplusBs,
+          creditedUsdCents: surplusUsdCents,
+        },
+      }).catch(() => {});
+    } else {
+      // Fully paid within tolerance: clear stale partial-payment alert
+      await markOrderAttentionFlag(params.order.id, false, null).catch(() => {});
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Claims a bank notification that is smaller than the amount still due, records it as an
+ * abono (partial payment, never releases codes) and tells the customer exactly what is missing.
+ */
+async function recordPagoMovilPartialPayment(params: {
+  order: OrderDTO;
+  notification: BankPaymentNotificationDTO;
+  expectedBsCents: number;
+}): Promise<
+  | {
+      ok: true;
+      notification: BankPaymentNotificationDTO;
+      receivedBsCents: number;
+      remainingBsCents: number;
+      message: string;
+    }
+  | { ok: false; reason: "DUPLICATE_REFERENCE" | "ALREADY_CLAIMED" | "NOT_FOUND" }
+> {
+  const claimed = await claimNotificationForOrder({
+    notificationId: params.notification.id,
+    orderId: params.order.id,
+    receiverAccountId: params.notification.receiverAccountId,
+    referenceFull:
+      params.notification.referenceFull ?? params.notification.referenceLast6 ?? "",
+    amountBsCents: params.notification.amountBsCents ?? 0,
+  });
+  if (!claimed.ok) return claimed;
+
+  await dispatchPagoMovilConfirmedWebhook({
+    order: params.order,
+    notification: claimed.notification,
+    confirmationSource: "bot_auto",
+  });
+
+  const receivedBsCents = await getReceivedBsCentsForOrder(params.order.id);
+  const remainingBsCents = Math.max(0, params.expectedBsCents - receivedBsCents);
+  const message = `Recibimos Bs ${formatBsAmount(claimed.notification.amountBsCents ?? 0)} (abono registrado, total Bs ${formatBsAmount(receivedBsCents)} de Bs ${formatBsAmount(params.expectedBsCents)}). Faltan Bs ${formatBsAmount(remainingBsCents)} para liberar tus códigos: envía la diferencia por Pago Móvil o convierte tu abono en saldo a favor. No se liberaron códigos.`;
+  await saveOrderPagoMovilReport(params.order.id, {
+    lastErrorCode: "AMOUNT_MISMATCH",
+    lastErrorMessage: message,
+  });
+  return {
+    ok: true,
+    notification: claimed.notification,
+    receivedBsCents,
+    remainingBsCents,
+    message,
+  };
 }
 
 export interface ParsedBotPayload {
@@ -854,17 +989,30 @@ export async function ingestBotNotification(args: {
       orders: pendingOrders,
     });
 
-    for (const u of underpaidWaiting) {
-      const msg = `Recibimos Bs ${(inserted.notification.amountBsCents! / 100).toFixed(2)}, pero esta orden requiere Bs ${(u.expectedBsCents / 100).toFixed(2)}. No se liberaron códigos.`;
-      await saveOrderPagoMovilReport(u.order.id, {
-        lastErrorCode: "AMOUNT_MISMATCH",
-        lastErrorMessage: msg,
+    if (underpaidWaiting.length === 1) {
+      // Exactly one order is waiting for this reference: record it as an abono and alert both sides
+      const u = underpaidWaiting[0];
+      const partial = await recordPagoMovilPartialPayment({
+        order: u.order,
+        notification: inserted.notification,
+        expectedBsCents: u.expectedBsCents,
       });
-      await markOrderAttentionFlag(
-        u.order.id,
-        true,
-        `Pago Móvil insuficiente detectado (Ref ${inserted.notification.referenceFull}): recibido Bs ${(inserted.notification.amountBsCents! / 100).toFixed(2)} vs esperado Bs ${(u.expectedBsCents / 100).toFixed(2)}.`
-      );
+      if (!partial.ok && partial.reason === "DUPLICATE_REFERENCE") {
+        await markNotificationStatus(inserted.notification.id, "DUPLICATE");
+      }
+    } else {
+      for (const u of underpaidWaiting) {
+        const msg = `Recibimos Bs ${(inserted.notification.amountBsCents! / 100).toFixed(2)}, pero esta orden requiere Bs ${(u.remainingBsCents / 100).toFixed(2)}. No se liberaron códigos.`;
+        await saveOrderPagoMovilReport(u.order.id, {
+          lastErrorCode: "AMOUNT_MISMATCH",
+          lastErrorMessage: msg,
+        });
+        await markOrderAttentionFlag(
+          u.order.id,
+          true,
+          `Pago Móvil insuficiente detectado (Ref ${inserted.notification.referenceFull}): recibido Bs ${(inserted.notification.amountBsCents! / 100).toFixed(2)} vs esperado Bs ${(u.remainingBsCents / 100).toFixed(2)}.`
+        );
+      }
     }
 
     if (underpaidWaiting.length === 0) {
@@ -898,6 +1046,247 @@ export async function ingestBotNotification(args: {
   };
 }
 
+type PagoMovilClaimResolutionCode =
+  | "COMPLETED"
+  | "ALREADY_PAID"
+  | "WAITING_BANK_CONFIRMATION"
+  | "DUPLICATE_REFERENCE"
+  | "AMBIGUOUS_REFERENCE"
+  | "AMOUNT_MISMATCH"
+  | "RATE_EXPIRED"
+  | "ORDER_EXPIRED"
+  | "INVALID_INPUT";
+
+interface PagoMovilClaimResolution {
+  ok: boolean;
+  code: PagoMovilClaimResolutionCode;
+  message: string;
+  order?: OrderDTO;
+  paidBsCents?: number;
+  expectedBsCents?: number;
+  receivedBsCents?: number;
+  remainingBsCents?: number;
+}
+
+/**
+ * Shared matching & atomic claiming path used by both `verifyOrderPagoMovilClaim`
+ * and opportunistic status-poll reconciliation (eliminates Case A vs Case B TOCTOU races).
+ */
+async function resolveSubmittedPagoMovilReference(params: {
+  order: OrderDTO;
+  cleanRef: string;
+  senderBank: string | null;
+  normalizedPhone: string | null;
+  expectedBsCents: number;
+  remainingBsCents: number;
+  toleranceBsCents: number;
+  actorUser: SessionUser | null;
+}): Promise<PagoMovilClaimResolution> {
+  const { order, cleanRef, expectedBsCents, remainingBsCents } = params;
+  const orderCreatedMs = Date.parse(order.createdAt);
+  const windowStartMs = Number.isFinite(orderCreatedMs)
+    ? orderCreatedMs - 10 * 60_000
+    : Date.now() - 60 * 60_000;
+  const windowEndMs = Date.now() + 5 * 60_000;
+
+  const match = await findCandidateNotificationsForOrder({
+    orderId: order.id,
+    referenceDigits: cleanRef,
+    amountDueBsCents: remainingBsCents,
+    toleranceBsCents: params.toleranceBsCents,
+    senderBankCode: params.senderBank,
+    senderPhone: params.normalizedPhone,
+    windowStartMs,
+    windowEndMs,
+  });
+
+  if (match.kind === "duplicate_used") {
+    const msg = "Esta referencia bancaria ya fue utilizada en otra orden.";
+    await saveOrderPagoMovilReport(order.id, {
+      lastErrorCode: "DUPLICATE_REFERENCE",
+      lastErrorMessage: msg,
+    });
+    await appendAuditLog({
+      actorId: params.actorUser?.id ?? null,
+      actorRole: params.actorUser?.role ?? "customer",
+      action: "pagomovil.duplicate_reference_attempt",
+      targetType: "order",
+      targetId: order.id,
+      metadata: {
+        reportedRef: cleanRef,
+        existingOrderId: match.notification?.matchedOrderId,
+      },
+    }).catch(() => {});
+    return { ok: false, code: "DUPLICATE_REFERENCE", message: msg };
+  }
+
+  if (match.kind === "ambiguous") {
+    const msg =
+      "Detectamos más de un pago reciente con terminación similar. Ingresa el número de referencia completo (todos los dígitos) y el banco emisor.";
+    await saveOrderPagoMovilReport(order.id, {
+      lastErrorCode: "AMBIGUOUS_REFERENCE",
+      lastErrorMessage: msg,
+    });
+    return { ok: false, code: "AMBIGUOUS_REFERENCE", message: msg };
+  }
+
+  if (match.kind === "underpaid" && match.notification) {
+    const partial = await recordPagoMovilPartialPayment({
+      order,
+      notification: match.notification,
+      expectedBsCents,
+    });
+
+    if (!partial.ok) {
+      const msg =
+        partial.reason === "DUPLICATE_REFERENCE"
+          ? "Esta referencia bancaria ya fue utilizada en otra orden."
+          : "Esta referencia bancaria ya fue reclamada por otra operación.";
+      await saveOrderPagoMovilReport(order.id, {
+        lastErrorCode: "DUPLICATE_REFERENCE",
+        lastErrorMessage: msg,
+      });
+      return { ok: false, code: "DUPLICATE_REFERENCE", message: msg };
+    }
+
+    return {
+      ok: false,
+      code: "AMOUNT_MISMATCH",
+      message: partial.message,
+      order: (await getOrderById(order.id)) ?? order,
+      paidBsCents: match.paidBsCents,
+      expectedBsCents,
+      receivedBsCents: partial.receivedBsCents,
+      remainingBsCents: partial.remainingBsCents,
+    };
+  }
+
+  if (match.kind === "matched" && match.notification) {
+    const claimed = await claimNotificationForOrder({
+      notificationId: match.notification.id,
+      orderId: order.id,
+      receiverAccountId: match.notification.receiverAccountId,
+      referenceFull: match.notification.referenceFull ?? cleanRef,
+      amountBsCents: match.notification.amountBsCents ?? expectedBsCents,
+    });
+
+    if (!claimed.ok) {
+      const msg = "Esta referencia bancaria ya fue reclamada por otra operación.";
+      await saveOrderPagoMovilReport(order.id, {
+        lastErrorCode: "DUPLICATE_REFERENCE",
+        lastErrorMessage: msg,
+      });
+      return { ok: false, code: "DUPLICATE_REFERENCE", message: msg };
+    }
+
+    await dispatchPagoMovilConfirmedWebhook({
+      order,
+      notification: claimed.notification,
+      confirmationSource: "bot_auto",
+    });
+
+    const refreshed = (await getOrderById(order.id)) ?? order;
+    const stillPending =
+      refreshed.status === "PENDING_PAYMENT" || refreshed.status === "CREATED";
+    if (stillPending) {
+      const receivedNow = await getReceivedBsCentsForOrder(order.id);
+      const remainingNow = Math.max(0, expectedBsCents - receivedNow);
+      return {
+        ok: false,
+        code: "AMOUNT_MISMATCH",
+        message: `Ya registramos tu abono (Bs ${formatBsAmount(receivedNow)} de Bs ${formatBsAmount(expectedBsCents)}). Faltan Bs ${formatBsAmount(remainingNow)} para liberar tus códigos.`,
+        order: refreshed,
+        expectedBsCents,
+        receivedBsCents: receivedNow,
+        remainingBsCents: remainingNow,
+      };
+    }
+
+    return {
+      ok: true,
+      code: "COMPLETED",
+      message: "¡Pago Móvil verificado! Liberando tus códigos...",
+      order: refreshed,
+      paidBsCents: match.paidBsCents,
+      expectedBsCents,
+    };
+  }
+
+  return {
+    ok: true,
+    code: "WAITING_BANK_CONFIRMATION",
+    message:
+      "Referencia registrada. Esperando confirmación bancaria automática (tarda unos segundos)...",
+    order,
+    expectedBsCents,
+  };
+}
+
+/**
+ * Re-checks a waiting Pago Móvil order against newly arrived bank notifications.
+ * Guarantees zero lost matches if customer verification and bank ingest raced in parallel.
+ */
+export async function reconcileWaitingPagoMovilOrder(
+  orderId: string,
+  actorUser: SessionUser | null = null
+): Promise<{ reconciled: boolean; code?: PagoMovilClaimResolutionCode }> {
+  const [order, report, receivedBsCents, settings] = await Promise.all([
+    getOrderById(orderId),
+    getOrderPagoMovilReport(orderId),
+    getReceivedBsCentsForOrder(orderId),
+    getPagoMovilBotSettings(),
+  ]);
+
+  if (!order) return { reconciled: false };
+  if (order.paymentGateway !== "pagomovil" && order.paymentGateway !== "pablito") {
+    return { reconciled: false };
+  }
+  if (order.status !== "PENDING_PAYMENT" && order.status !== "CREATED") {
+    return { reconciled: false };
+  }
+  if (!report?.reportedReference || report.lastErrorCode) {
+    return { reconciled: false };
+  }
+
+  const nowMs = Date.now();
+  if (order.expiresAt && nowMs >= Date.parse(order.expiresAt)) {
+    return { reconciled: false };
+  }
+  if (
+    receivedBsCents <= 0 &&
+    report.rateExpiresAt &&
+    nowMs >= Date.parse(report.rateExpiresAt)
+  ) {
+    return { reconciled: false };
+  }
+
+  const expectedBsCents =
+    report.amountDueBsCents ??
+    (order.bsRateCents
+      ? Math.round((order.amountDueCents * order.bsRateCents) / 100)
+      : order.totalBsCents ?? 0);
+  const remainingBsCents = Math.max(0, expectedBsCents - receivedBsCents);
+  if (expectedBsCents <= 0 || remainingBsCents <= 0) {
+    return { reconciled: false };
+  }
+
+  const resolution = await resolveSubmittedPagoMovilReference({
+    order,
+    cleanRef: report.reportedReference,
+    senderBank: report.reportedSenderBank ?? null,
+    normalizedPhone: report.reportedSenderPhone ?? null,
+    expectedBsCents,
+    remainingBsCents,
+    toleranceBsCents: settings.amountToleranceBsCents,
+    actorUser,
+  });
+
+  return {
+    reconciled: resolution.code !== "WAITING_BANK_CONFIRMATION",
+    code: resolution.code,
+  };
+}
+
 export async function verifyOrderPagoMovilClaim(params: {
   orderId: string;
   actorUser: SessionUser | null;
@@ -905,23 +1294,7 @@ export async function verifyOrderPagoMovilClaim(params: {
   referenceDigits: string;
   senderBankCode?: string | null;
   senderPhone?: string | null;
-}): Promise<{
-  ok: boolean;
-  code:
-    | "COMPLETED"
-    | "ALREADY_PAID"
-    | "WAITING_BANK_CONFIRMATION"
-    | "DUPLICATE_REFERENCE"
-    | "AMBIGUOUS_REFERENCE"
-    | "AMOUNT_MISMATCH"
-    | "RATE_EXPIRED"
-    | "ORDER_EXPIRED"
-    | "INVALID_INPUT";
-  message: string;
-  order?: OrderDTO;
-  paidBsCents?: number;
-  expectedBsCents?: number;
-}> {
+}): Promise<PagoMovilClaimResolution> {
   const order = await getOrderById(params.orderId);
   if (!order) {
     return { ok: false, code: "INVALID_INPUT", message: "Orden no encontrada." };
@@ -967,12 +1340,15 @@ export async function verifyOrderPagoMovilClaim(params: {
     };
   }
 
-  const [settings, report] = await Promise.all([
+  const [settings, report, alreadyReceivedBsCents] = await Promise.all([
     getPagoMovilBotSettings(),
     getOrderPagoMovilReport(order.id),
+    getReceivedBsCentsForOrder(order.id),
   ]);
 
+  // Once an abono is registered the rate stays frozen so the remaining Bs never drifts
   if (
+    alreadyReceivedBsCents <= 0 &&
     report?.rateExpiresAt &&
     Date.now() >= Date.parse(report.rateExpiresAt)
   ) {
@@ -1022,6 +1398,16 @@ export async function verifyOrderPagoMovilClaim(params: {
     };
   }
 
+  const remainingBsCents = Math.max(0, expectedBsCents - alreadyReceivedBsCents);
+  if (remainingBsCents <= 0) {
+    return {
+      ok: true,
+      code: "ALREADY_PAID",
+      message: "Ya recibimos el monto completo de esta orden.",
+      order,
+    };
+  }
+
   await saveOrderPagoMovilReport(order.id, {
     reportedReference: cleanRef,
     reportedSenderBank: senderBank,
@@ -1031,113 +1417,16 @@ export async function verifyOrderPagoMovilClaim(params: {
     lastErrorMessage: null,
   });
 
-  const orderCreatedMs = Date.parse(order.createdAt);
-  const windowStartMs = Number.isFinite(orderCreatedMs)
-    ? orderCreatedMs - 10 * 60_000
-    : Date.now() - 60 * 60_000;
-  const windowEndMs = Date.now() + 5 * 60_000;
-
-  const match = await findCandidateNotificationsForOrder({
-    orderId: order.id,
-    referenceDigits: cleanRef,
-    amountDueBsCents: expectedBsCents,
-    toleranceBsCents: settings.amountToleranceBsCents,
-    senderBankCode: senderBank,
-    senderPhone: normalizedPhone,
-    windowStartMs,
-    windowEndMs,
-  });
-
-  if (match.kind === "duplicate_used") {
-    const msg = "Esta referencia bancaria ya fue utilizada en otra orden.";
-    await saveOrderPagoMovilReport(order.id, {
-      lastErrorCode: "DUPLICATE_REFERENCE",
-      lastErrorMessage: msg,
-    });
-    await appendAuditLog({
-      actorId: params.actorUser?.id ?? null,
-      actorRole: params.actorUser?.role ?? "customer",
-      action: "pagomovil.duplicate_reference_attempt",
-      targetType: "order",
-      targetId: order.id,
-      metadata: { reportedRef: cleanRef, existingOrderId: match.notification?.matchedOrderId },
-    }).catch(() => {});
-    return { ok: false, code: "DUPLICATE_REFERENCE", message: msg };
-  }
-
-  if (match.kind === "ambiguous") {
-    const msg =
-      "Detectamos más de un pago reciente con terminación similar. Ingresa el número de referencia completo (todos los dígitos) y el banco emisor.";
-    await saveOrderPagoMovilReport(order.id, {
-      lastErrorCode: "AMBIGUOUS_REFERENCE",
-      lastErrorMessage: msg,
-    });
-    return { ok: false, code: "AMBIGUOUS_REFERENCE", message: msg };
-  }
-
-  if (match.kind === "underpaid") {
-    const msg = `Recibimos Bs ${(match.paidBsCents / 100).toFixed(2)}, pero esta orden requiere Bs ${(expectedBsCents / 100).toFixed(2)}. No se liberaron códigos.`;
-    await saveOrderPagoMovilReport(order.id, {
-      lastErrorCode: "AMOUNT_MISMATCH",
-      lastErrorMessage: msg,
-    });
-    await markOrderAttentionFlag(
-      order.id,
-      true,
-      `Pago Móvil insuficiente detectado (Ref ${match.notification?.referenceFull ?? cleanRef}): recibido Bs ${(match.paidBsCents / 100).toFixed(2)} vs esperado Bs ${(expectedBsCents / 100).toFixed(2)}.`
-    );
-    return {
-      ok: false,
-      code: "AMOUNT_MISMATCH",
-      message: msg,
-      paidBsCents: match.paidBsCents,
-      expectedBsCents,
-    };
-  }
-
-  if (match.kind === "matched" && match.notification) {
-    const claimed = await claimNotificationForOrder({
-      notificationId: match.notification.id,
-      orderId: order.id,
-      receiverAccountId: match.notification.receiverAccountId,
-      referenceFull: match.notification.referenceFull ?? cleanRef,
-      amountBsCents: match.notification.amountBsCents ?? expectedBsCents,
-    });
-
-    if (!claimed.ok) {
-      const msg = "Esta referencia bancaria ya fue reclamada por otra operación.";
-      await saveOrderPagoMovilReport(order.id, {
-        lastErrorCode: "DUPLICATE_REFERENCE",
-        lastErrorMessage: msg,
-      });
-      return { ok: false, code: "DUPLICATE_REFERENCE", message: msg };
-    }
-
-    await dispatchPagoMovilConfirmedWebhook({
-      order,
-      notification: claimed.notification,
-      confirmationSource: "bot_auto",
-    });
-
-    const refreshed = (await getOrderById(order.id)) ?? order;
-    return {
-      ok: true,
-      code: "COMPLETED",
-      message: "¡Pago Móvil verificado! Liberando tus códigos...",
-      order: refreshed,
-      paidBsCents: match.paidBsCents,
-      expectedBsCents,
-    };
-  }
-
-  return {
-    ok: true,
-    code: "WAITING_BANK_CONFIRMATION",
-    message:
-      "Referencia registrada. Esperando confirmación bancaria automática (tarda unos segundos)...",
+  return resolveSubmittedPagoMovilReference({
     order,
+    cleanRef,
+    senderBank,
+    normalizedPhone,
     expectedBsCents,
-  };
+    remainingBsCents,
+    toleranceBsCents: settings.amountToleranceBsCents,
+    actorUser: params.actorUser,
+  });
 }
 
 export async function refreshPagoMovilOrderRate(params: {
@@ -1158,6 +1447,13 @@ export async function refreshPagoMovilOrderRate(params: {
     throw new Error("Solo se puede actualizar la tasa de órdenes pendientes.");
   }
 
+  if ((await getReceivedBsCentsForOrder(order.id)) > 0) {
+    throw new Error(
+      "Ya registraste un abono: la tasa queda congelada para completar la diferencia en Bs."
+    );
+  }
+
+  await syncBsExchangeRateIfNeeded().catch(() => null);
   const [bsRateCents, settings] = await Promise.all([
     getBsRateCents(),
     getPagoMovilBotSettings(),
@@ -1203,6 +1499,12 @@ export interface PagoMovilOrderStatusDTO {
   waitingBankConfirmation: boolean;
   matchedReference: string | null;
   paidBsCents: number | null;
+  /** Total Bs received across all claimed bank notifications (abonos included). */
+  receivedBsCents: number;
+  /** Bs still missing to release the order (0 when fully paid). */
+  remainingBsCents: number;
+  /** Bs received above the amount due. */
+  surplusBsCents: number;
   receiver: {
     bankCode: string;
     bankName: string;
@@ -1229,7 +1531,7 @@ export async function getPagoMovilOrderPublicStatus(params: {
   actorUser: SessionUser | null;
   hasOrderCookie: boolean;
 }): Promise<PagoMovilOrderStatusDTO> {
-  const order = await getOrderById(params.orderId);
+  let order = await getOrderById(params.orderId);
   if (!order) {
     throw new PagoMovilAuthError("Orden no encontrada.", 404);
   }
@@ -1240,12 +1542,25 @@ export async function getPagoMovilOrderPublicStatus(params: {
     throw new PagoMovilAuthError("No autorizado para consultar esta orden.", 403);
   }
 
-  const [receiver, report, matchedNotif, settings] = await Promise.all([
+  const rec = await reconcileWaitingPagoMovilOrder(
+    order.id,
+    params.actorUser
+  ).catch(() => ({ reconciled: false }));
+  if (rec.reconciled) {
+    order = (await getOrderById(order.id)) ?? order;
+  }
+
+  const [receiver, report, matchedNotifs, settings] = await Promise.all([
     getActiveReceiverBankAccount(),
     getOrderPagoMovilReport(order.id),
-    getMatchedNotificationForOrder(order.id),
+    getMatchedNotificationsForOrder(order.id),
     getPagoMovilBotSettings(),
   ]);
+  const matchedNotif = matchedNotifs[0] ?? null;
+  const receivedBsCents = matchedNotifs.reduce(
+    (acc, n) => acc + (n.amountBsCents ?? 0),
+    0
+  );
   const watchdog = await isBotWatchdogHealthy(settings);
 
   const amountDueBsCents =
@@ -1253,10 +1568,14 @@ export async function getPagoMovilOrderPublicStatus(params: {
     (order.bsRateCents
       ? Math.round((order.amountDueCents * order.bsRateCents) / 100)
       : order.totalBsCents ?? 0);
+  const remainingBsCents = Math.max(0, amountDueBsCents - receivedBsCents);
+  const surplusBsCents = Math.max(0, receivedBsCents - amountDueBsCents);
 
   const nowMs = Date.now();
   const rateExpired = Boolean(
-    report?.rateExpiresAt && nowMs >= Date.parse(report.rateExpiresAt)
+    receivedBsCents <= 0 &&
+      report?.rateExpiresAt &&
+      nowMs >= Date.parse(report.rateExpiresAt)
   );
   const orderExpired = Boolean(
     order.status === "EXPIRED" ||
@@ -1289,6 +1608,9 @@ export async function getPagoMovilOrderPublicStatus(params: {
     waitingBankConfirmation,
     matchedReference: matchedNotif?.referenceFull ?? null,
     paidBsCents: matchedNotif?.amountBsCents ?? null,
+    receivedBsCents,
+    remainingBsCents,
+    surplusBsCents,
     receiver: receiver
       ? {
           bankCode: receiver.bankCode,
@@ -1314,6 +1636,7 @@ export async function getPagoMovilOrderPublicStatus(params: {
 }
 
 export async function getPagoMovilAvailabilitySnapshot() {
+  await syncBsExchangeRateIfNeeded().catch(() => null);
   const [providerCfg, receiver, bsRateCents, settings] = await Promise.all([
     getProviderConfig("pagomovil"),
     getActiveReceiverBankAccount(),

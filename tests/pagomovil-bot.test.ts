@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { SANDBOX_DEFAULT_ADMIN_ID } from "@/lib/server/auth";
 import { initiateCheckout } from "@/lib/server/checkout-service";
+import { resolveOrderUnderpayment } from "@/lib/server/fulfillment";
 import {
   getOrderPagoMovilReport,
   getPagoMovilBotSettings,
@@ -24,6 +25,7 @@ import { parseBankNotification } from "@/lib/server/payments/parsers";
 import {
   getOrderById,
   getUserCreditBalanceCents,
+  insertInventoryBatch,
   revealOrderCodes,
   setBsRateCents,
   transitionOrderStatus,
@@ -467,6 +469,176 @@ describe("StoryPay Pago Móvil Verifier Bot Engine", () => {
       expect((await getOrderById(checkoutB.order.id))?.fulfillments.length).toBe(0);
     });
 
+    it("records an abono on underpayment, tells the exact Bs missing, and releases codes once the remaining transfer arrives", async () => {
+      const startBalance = await getUserCreditBalanceCents(CUSTOMER_SESSION.id);
+      const { device, plainSecret } = await setupActivePagoMovilEnvironment(5000);
+      const checkout = await initiateCheckout({
+        email: CUSTOMER_SESSION.email,
+        items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+        applyStoreCredit: false,
+        paymentGateway: "pagomovil",
+        sessionUser: CUSTOMER_SESSION,
+        ipAddress: "127.0.0.1",
+      });
+      // $10.50 at 50 Bs/USD => Bs 525.00
+      const send = async (content: string) => {
+        const rawBody = JSON.stringify({
+          title: "Pago Móvil Recibido",
+          content,
+          app_package: "com.bancamiga.suite",
+        });
+        return ingestBotNotification({
+          rawBody,
+          headers: signBotHeaders({
+            deviceIdentifier: device.deviceIdentifier,
+            secret: plainSecret,
+            rawBody,
+          }),
+        });
+      };
+
+      await send("Has recibido un Pago Movil por Bs. 200,00 Ref: 12123434");
+      const first = await verifyOrderPagoMovilClaim({
+        orderId: checkout.order.id,
+        actorUser: CUSTOMER_SESSION,
+        hasOrderCookie: false,
+        referenceDigits: "12123434",
+      });
+      expect(first.ok).toBe(false);
+      expect(first.code).toBe("AMOUNT_MISMATCH");
+      expect(first.receivedBsCents).toBe(20000);
+      expect(first.remainingBsCents).toBe(32500);
+
+      const afterFirst = await getOrderById(checkout.order.id);
+      expect(afterFirst?.status).toBe("PENDING_PAYMENT");
+      expect(afterFirst?.paidCents).toBe(400);
+      expect(afterFirst?.needsAttention).toBe(true);
+      expect(afterFirst?.attentionReason).toContain("PARCIAL");
+      expect(afterFirst?.fulfillments.length).toBe(0);
+
+      const status = await getPagoMovilOrderPublicStatus({
+        orderId: checkout.order.id,
+        actorUser: CUSTOMER_SESSION,
+        hasOrderCookie: false,
+      });
+      expect(status.receivedBsCents).toBe(20000);
+      expect(status.remainingBsCents).toBe(32500);
+
+      // Rate is frozen once an abono exists
+      await expect(
+        refreshPagoMovilOrderRate({
+          orderId: checkout.order.id,
+          actorUser: CUSTOMER_SESSION,
+          hasOrderCookie: false,
+        })
+      ).rejects.toThrow();
+
+      // Remaining transfer arrives with a NEW reference
+      await send("Has recibido un Pago Movil por Bs. 325,00 Ref: 22223333");
+      const second = await verifyOrderPagoMovilClaim({
+        orderId: checkout.order.id,
+        actorUser: CUSTOMER_SESSION,
+        hasOrderCookie: false,
+        referenceDigits: "22223333",
+      });
+      expect(second.ok).toBe(true);
+      expect(second.code).toBe("COMPLETED");
+
+      const delivered = await getOrderById(checkout.order.id);
+      expect(delivered?.status).toBe("DELIVERED");
+      expect(delivered?.fulfillments.length).toBeGreaterThan(0);
+      expect(delivered?.needsAttention).toBe(false);
+      expect((await getUserCreditBalanceCents(CUSTOMER_SESSION.id)) - startBalance).toBe(0);
+    });
+
+    it("lets the customer convert an underpayment abono into store credit", async () => {
+      const startBalance = await getUserCreditBalanceCents(CUSTOMER_SESSION.id);
+      const { device, plainSecret } = await setupActivePagoMovilEnvironment(5000);
+      const checkout = await initiateCheckout({
+        email: CUSTOMER_SESSION.email,
+        items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+        applyStoreCredit: false,
+        paymentGateway: "pagomovil",
+        sessionUser: CUSTOMER_SESSION,
+        ipAddress: "127.0.0.1",
+      });
+      const rawBody = JSON.stringify({
+        title: "Pago Móvil Recibido",
+        content: "Has recibido un Pago Movil por Bs. 200,00 Ref: 77778888",
+        app_package: "com.bancamiga.suite",
+      });
+      await ingestBotNotification({
+        rawBody,
+        headers: signBotHeaders({
+          deviceIdentifier: device.deviceIdentifier,
+          secret: plainSecret,
+          rawBody,
+        }),
+      });
+      await verifyOrderPagoMovilClaim({
+        orderId: checkout.order.id,
+        actorUser: CUSTOMER_SESSION,
+        hasOrderCookie: false,
+        referenceDigits: "77778888",
+      });
+
+      const res = await resolveOrderUnderpayment({
+        orderId: checkout.order.id,
+        actorUser: CUSTOMER_SESSION,
+        mode: "convert_to_credit_now",
+      });
+      expect(res.outcome).toBe("converted_to_credit");
+      expect((await getUserCreditBalanceCents(CUSTOMER_SESSION.id)) - startBalance).toBe(400);
+    });
+
+    it("alerts the operator on overpayment and exposes the Bs surplus", async () => {
+      const startBalance = await getUserCreditBalanceCents(CUSTOMER_SESSION.id);
+      const { device, plainSecret } = await setupActivePagoMovilEnvironment(5000);
+      const checkout = await initiateCheckout({
+        email: CUSTOMER_SESSION.email,
+        items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+        applyStoreCredit: false,
+        paymentGateway: "pagomovil",
+        sessionUser: CUSTOMER_SESSION,
+        ipAddress: "127.0.0.1",
+      });
+      // Pays Bs 625.00 instead of Bs 525.00 => +Bs 100.00 = +$2.00
+      const rawBody = JSON.stringify({
+        title: "Pago Móvil Recibido",
+        content: "Has recibido un Pago Movil por Bs. 625,00 Ref: 99001122",
+        app_package: "com.bancamiga.suite",
+      });
+      await ingestBotNotification({
+        rawBody,
+        headers: signBotHeaders({
+          deviceIdentifier: device.deviceIdentifier,
+          secret: plainSecret,
+          rawBody,
+        }),
+      });
+      const verification = await verifyOrderPagoMovilClaim({
+        orderId: checkout.order.id,
+        actorUser: CUSTOMER_SESSION,
+        hasOrderCookie: false,
+        referenceDigits: "99001122",
+      });
+      expect(verification.code).toBe("COMPLETED");
+
+      const order = await getOrderById(checkout.order.id);
+      expect(order?.status).toBe("DELIVERED");
+      expect(order?.needsAttention).toBe(true);
+      expect(order?.attentionReason).toContain("Sobrepago");
+      expect((await getUserCreditBalanceCents(CUSTOMER_SESSION.id)) - startBalance).toBe(200);
+
+      const status = await getPagoMovilOrderPublicStatus({
+        orderId: checkout.order.id,
+        actorUser: CUSTOMER_SESSION,
+        hasOrderCookie: false,
+      });
+      expect(status.surplusBsCents).toBe(10000);
+      expect(status.remainingBsCents).toBe(0);
+    });
+
     it("rejects reusing an already claimed bank reference (DUPLICATE_REFERENCE)", async () => {
       const { device, plainSecret } = await setupActivePagoMovilEnvironment(5000);
 
@@ -840,6 +1012,238 @@ Ref: 00654321",
       expect(recoveredIngest.notification.referenceFull).toBe("00654321");
       expect(recoveredIngest.notification.senderPhone).toBe("04121112233");
       expect(recoveredIngest.notification.parserUsed).toBe("bdv_app_v1");
+    });
+  });
+
+  describe("7. Concurrency Hardening: Simultaneous Pago Móvil Pushes & Claiming", () => {
+    it("processes 4 simultaneous Pago Móvil checkouts, verifies, and bank pushes with zero lost writes and distinct codes", async () => {
+      const { device, plainSecret } = await setupActivePagoMovilEnvironment(5000);
+      await insertInventoryBatch({
+        variantId: PSN_10_VARIANT_ID,
+        batchId: "batch-concurrent-pm-4",
+        rows: [
+          { code: "PSN10-CONC-AAAA-0001" },
+          { code: "PSN10-CONC-BBBB-0002" },
+          { code: "PSN10-CONC-CCCC-0003" },
+          { code: "PSN10-CONC-DDDD-0004" },
+        ],
+      });
+
+      const buyers = [0, 1, 2, 3].map((i): SessionUser => ({
+        id: `00000000-0000-4000-8000-00000000c10${i}`,
+        email: `buyer${i}@storycheap.com`,
+        role: "customer",
+        aal: "aal1",
+        isSandbox: true,
+      }));
+
+      // 4 checkouts submitted in parallel
+      const checkouts = await Promise.all(
+        buyers.map((buyer) =>
+          initiateCheckout({
+            email: buyer.email,
+            items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+            applyStoreCredit: false,
+            paymentGateway: "pagomovil",
+            sessionUser: buyer,
+            ipAddress: "127.0.0.1",
+          })
+        )
+      );
+
+      const refs = ["91000001", "91000002", "91000003", "91000004"];
+
+      // 4 customer reference submissions + 4 bank push notifications arriving simultaneously!
+      await Promise.all([
+        ...checkouts.map((c, idx) =>
+          verifyOrderPagoMovilClaim({
+            orderId: c.order.id,
+            actorUser: buyers[idx],
+            hasOrderCookie: false,
+            referenceDigits: refs[idx],
+          })
+        ),
+        ...refs.map((ref, idx) => {
+          const rawBody = JSON.stringify({
+            title: "Pago Móvil Recibido",
+            content: `Has recibido un Pago Movil por Bs. 525,00 Ref: ${ref}`,
+            app_package: "com.bancamiga.suite",
+            event_id: `evt_conc_${idx}_${ref}`,
+          });
+          return ingestBotNotification({
+            rawBody,
+            headers: signBotHeaders({
+              deviceIdentifier: device.deviceIdentifier,
+              secret: plainSecret,
+              rawBody,
+            }),
+          });
+        }),
+      ]);
+
+      // Polling status heals any exact-millisecond interleaving and returns DELIVERED for all 4 orders
+      const finalStatuses = await Promise.all(
+        checkouts.map((c, idx) =>
+          getPagoMovilOrderPublicStatus({
+            orderId: c.order.id,
+            actorUser: buyers[idx],
+            hasOrderCookie: false,
+          })
+        )
+      );
+
+      for (const st of finalStatuses) {
+        expect(st.status).toBe("DELIVERED");
+      }
+
+      const finalOrders = await Promise.all(
+        checkouts.map((c) => getOrderById(c.order.id))
+      );
+      const assignedLast4 = new Set(
+        finalOrders.flatMap((o) => o?.fulfillments.map((f) => f.codeLast4) ?? [])
+      );
+      expect(assignedLast4.size).toBe(4);
+      expect(getSandboxState().pagoMovil.notifications.length).toBe(4);
+    });
+
+    it("deduplicates 4 simultaneous identical webhook pushes and blocks parallel double-claim of the same reference", async () => {
+      const { device, plainSecret } = await setupActivePagoMovilEnvironment(5000);
+      await insertInventoryBatch({
+        variantId: PSN_10_VARIANT_ID,
+        batchId: "batch-dup-guard",
+        rows: [
+          { code: "PSN10-DUPL-AAAA-1001" },
+          { code: "PSN10-DUPL-BBBB-1002" },
+        ],
+      });
+
+      const buyerA: SessionUser = { ...CUSTOMER_SESSION };
+      const buyerB: SessionUser = {
+        id: "00000000-0000-4000-8000-00000000c202",
+        email: "buyer2@storycheap.com",
+        role: "customer",
+        aal: "aal1",
+        isSandbox: true,
+      };
+
+      const [coA, coB] = await Promise.all([
+        initiateCheckout({
+          email: buyerA.email,
+          items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+          applyStoreCredit: false,
+          paymentGateway: "pagomovil",
+          sessionUser: buyerA,
+          ipAddress: "127.0.0.1",
+        }),
+        initiateCheckout({
+          email: buyerB.email,
+          items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+          applyStoreCredit: false,
+          paymentGateway: "pagomovil",
+          sessionUser: buyerB,
+          ipAddress: "127.0.0.1",
+        }),
+      ]);
+
+      // Phone accidentally fires the exact same push 4 times concurrently
+      const dupBody = JSON.stringify({
+        title: "Pago Móvil Recibido",
+        content: "Has recibido un Pago Movil por Bs. 525,00 Ref: 88776655",
+        app_package: "com.bancamiga.suite",
+        event_id: "evt_same_push_hash",
+      });
+      const ingests = await Promise.all(
+        [0, 1, 2, 3].map(() =>
+          ingestBotNotification({
+            rawBody: dupBody,
+            headers: signBotHeaders({
+              deviceIdentifier: device.deviceIdentifier,
+              secret: plainSecret,
+              rawBody: dupBody,
+            }),
+          })
+        )
+      );
+      expect(ingests.filter((r) => !r.duplicate).length).toBe(1);
+      expect(ingests.filter((r) => r.duplicate).length).toBe(3);
+
+      // Two buyers race to claim that exact same reference concurrently: at most 1 wins
+      const [claimA, claimB] = await Promise.all([
+        verifyOrderPagoMovilClaim({
+          orderId: coA.order.id,
+          actorUser: buyerA,
+          hasOrderCookie: false,
+          referenceDigits: "88776655",
+        }),
+        verifyOrderPagoMovilClaim({
+          orderId: coB.order.id,
+          actorUser: buyerB,
+          hasOrderCookie: false,
+          referenceDigits: "88776655",
+        }),
+      ]);
+
+      const completedCount = [claimA, claimB].filter(
+        (c) => c.code === "COMPLETED"
+      ).length;
+      const duplicateCount = [claimA, claimB].filter(
+        (c) => c.code === "DUPLICATE_REFERENCE"
+      ).length;
+      expect(completedCount).toBe(1);
+      expect(duplicateCount).toBe(1);
+    });
+
+    it("self-heals waiting order report + unmatched notification race on status poll", async () => {
+      const { device, plainSecret } = await setupActivePagoMovilEnvironment(5000);
+      const co = await initiateCheckout({
+        email: CUSTOMER_SESSION.email,
+        items: [{ variantId: PSN_10_VARIANT_ID, quantity: 1 }],
+        applyStoreCredit: false,
+        paymentGateway: "pagomovil",
+        sessionUser: CUSTOMER_SESSION,
+        ipAddress: "127.0.0.1",
+      });
+
+      // Simulate exact TOCTOU state where both report & UNMATCHED notification landed without seeing each other
+      await saveOrderPagoMovilReport(co.order.id, {
+        reportedReference: "44556677",
+        reportedAt: new Date().toISOString(),
+        lastErrorCode: null,
+        lastErrorMessage: null,
+      });
+      const rawBody = JSON.stringify({
+        title: "Pago Móvil Recibido",
+        content: "Has recibido un Pago Movil por Bs. 525,00 Ref: 44556677",
+        app_package: "com.bancamiga.suite",
+      });
+      // Inject directly after bypassing report state? Wait: ingest checks report, so save report AFTER or verify even pre-saved unmatched state heals via poll!
+      // Clear report temporarily so ingest leaves UNMATCHED, then re-set report directly to simulate TOCTOU interleaving
+      await saveOrderPagoMovilReport(co.order.id, { reportedReference: null });
+      const ing = await ingestBotNotification({
+        rawBody,
+        headers: signBotHeaders({
+          deviceIdentifier: device.deviceIdentifier,
+          secret: plainSecret,
+          rawBody,
+        }),
+      });
+      expect(ing.autoMatchedOrderId).toBeNull();
+      expect(ing.notification.status).toBe("UNMATCHED");
+
+      await saveOrderPagoMovilReport(co.order.id, {
+        reportedReference: "44556677",
+        reportedAt: new Date().toISOString(),
+        lastErrorCode: null,
+        lastErrorMessage: null,
+      });
+
+      const polled = await getPagoMovilOrderPublicStatus({
+        orderId: co.order.id,
+        actorUser: CUSTOMER_SESSION,
+        hasOrderCookie: false,
+      });
+      expect(polled.status).toBe("DELIVERED");
+      expect(polled.matchedReference).toBe("44556677");
     });
   });
 });

@@ -1,7 +1,7 @@
 import React, { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
-import { getProductBySlug } from "@/lib/server/repository";
+import { getBsRateCents, getProductBySlug } from "@/lib/server/repository";
 import { ensureFreshSupplierCatalogPrices } from "@/lib/server/supplier-sync";
 import { ProductDetailClient } from "./product-detail-client";
 
@@ -13,11 +13,19 @@ async function ProductDetailLoader({
   await connection();
   await ensureFreshSupplierCatalogPrices();
   const { slug } = await params;
-  const product = await getProductBySlug(slug);
+  const [product, bsRateCents] = await Promise.all([
+    getProductBySlug(slug),
+    getBsRateCents(),
+  ]);
   if (!product) {
     notFound();
   }
-  return <ProductDetailClient product={product} />;
+  return (
+    <ProductDetailClient
+      product={product}
+      initialBsRateCents={bsRateCents}
+    />
+  );
 }
 
 export default function ProductDetailPage({

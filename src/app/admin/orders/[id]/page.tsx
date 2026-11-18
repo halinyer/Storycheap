@@ -6,7 +6,7 @@ import { OrderDetailActions } from "@/components/admin/order-detail-actions";
 import { formatCents } from "@/lib/catalog-seed";
 import {
   getActiveReceiverBankAccount,
-  getMatchedNotificationForOrder,
+  getMatchedNotificationsForOrder,
   getOrderPagoMovilReport,
 } from "@/lib/server/pagomovil-store";
 import {
@@ -37,7 +37,7 @@ async function AdminOrderDetailContent({
   if (!order) notFound();
   const snap = getOrderSnapshot(order, actualItemCostCents);
 
-  const [zenoReceiver, zenoProof, activeBank, pmReport, pmNotification] =
+  const [zenoReceiver, zenoProof, activeBank, pmReport, pmNotifications] =
     await Promise.all([
       order.paymentGateway === "zenobank" ? getZenoBinanceReceiver() : Promise.resolve(null),
       order.paymentGateway === "zenobank"
@@ -50,9 +50,21 @@ async function AdminOrderDetailContent({
         ? getOrderPagoMovilReport(order.id)
         : Promise.resolve(null),
       order.paymentGateway !== "zenobank"
-        ? getMatchedNotificationForOrder(order.id)
-        : Promise.resolve(null),
+        ? getMatchedNotificationsForOrder(order.id)
+        : Promise.resolve([]),
     ]);
+
+  const pmExpectedBsCents =
+    pmReport?.amountDueBsCents ??
+    (order.bsRateCents
+      ? Math.round((order.amountDueCents * order.bsRateCents) / 100)
+      : order.totalBsCents ?? 0);
+  const pmReceivedBsCents = pmNotifications.reduce(
+    (acc, n) => acc + (n.amountBsCents ?? 0),
+    0
+  );
+  const pmSurplusBsCents = Math.max(0, pmReceivedBsCents - pmExpectedBsCents);
+  const pmMissingBsCents = Math.max(0, pmExpectedBsCents - pmReceivedBsCents);
 
   return (
     <div className="space-y-6">
@@ -97,6 +109,52 @@ async function AdminOrderDetailContent({
             <div>
               <span className="font-black block">Motivo de alerta:</span>
               <span>{order.attentionReason ?? "Revisión operativa requerida"}</span>
+            </div>
+          </div>
+        )}
+
+        {order.paidCents > order.amountDueCents && (
+          <div className="rounded-2xl bg-emerald-500/15 border border-emerald-400/35 p-4 flex items-start gap-3 text-xs text-emerald-100">
+            <AlertTriangle className="w-5 h-5 text-emerald-300 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="font-black text-emerald-200">
+                Sobrepago detectado y acreditado al saldo del cliente
+              </div>
+              <div className="leading-relaxed tabular-nums">
+                Recibido:{" "}
+                <strong className="text-white">
+                  {formatCents(order.paidCents)} USD
+                </strong>{" "}
+                · Esperado:{" "}
+                <strong className="text-white">
+                  {formatCents(order.amountDueCents)} USD
+                </strong>{" "}
+                · Excedente acreditado:{" "}
+                <strong className="text-emerald-200">
+                  +{formatCents(order.paidCents - order.amountDueCents)} USD
+                </strong>
+                {order.paymentGateway !== "zenobank" && pmSurplusBsCents > 0 && (
+                  <>
+                    {" "}
+                    (recibido{" "}
+                    <strong className="text-white">
+                      {formatBsCents(pmReceivedBsCents)}
+                    </strong>{" "}
+                    vs esperado{" "}
+                    <strong className="text-white">
+                      {formatBsCents(pmExpectedBsCents)}
+                    </strong>{" "}
+                    · excedente{" "}
+                    <strong className="text-emerald-200">
+                      +{formatBsCents(pmSurplusBsCents)}
+                    </strong>
+                    {order.bsRateCents
+                      ? ` a tasa congelada ${formatBsRate(order.bsRateCents)}`
+                      : ""}
+                    )
+                  </>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -221,7 +279,53 @@ async function AdminOrderDetailContent({
                     Sobrepago: +{formatCents(order.paidCents - order.amountDueCents)} USD acreditado
                   </span>
                 )}
-                {order.paidCents > 0 && order.paidCents < order.amountDueCents && (
+                {order.paidCents > order.amountDueCents && (
+          <div className="rounded-2xl bg-emerald-500/15 border border-emerald-400/35 p-4 flex items-start gap-3 text-xs text-emerald-100">
+            <AlertTriangle className="w-5 h-5 text-emerald-300 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="font-black text-emerald-200">
+                Sobrepago detectado y acreditado al saldo del cliente
+              </div>
+              <div className="leading-relaxed tabular-nums">
+                Recibido:{" "}
+                <strong className="text-white">
+                  {formatCents(order.paidCents)} USD
+                </strong>{" "}
+                · Esperado:{" "}
+                <strong className="text-white">
+                  {formatCents(order.amountDueCents)} USD
+                </strong>{" "}
+                · Excedente acreditado:{" "}
+                <strong className="text-emerald-200">
+                  +{formatCents(order.paidCents - order.amountDueCents)} USD
+                </strong>
+                {order.paymentGateway !== "zenobank" && pmSurplusBsCents > 0 && (
+                  <>
+                    {" "}
+                    (recibido{" "}
+                    <strong className="text-white">
+                      {formatBsCents(pmReceivedBsCents)}
+                    </strong>{" "}
+                    vs esperado{" "}
+                    <strong className="text-white">
+                      {formatBsCents(pmExpectedBsCents)}
+                    </strong>{" "}
+                    · excedente{" "}
+                    <strong className="text-emerald-200">
+                      +{formatBsCents(pmSurplusBsCents)}
+                    </strong>
+                    {order.bsRateCents
+                      ? ` a tasa congelada ${formatBsRate(order.bsRateCents)}`
+                      : ""}
+                    )
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {order.paidCents > 0 && order.paidCents < order.amountDueCents && (
                   <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/35 text-[10px] font-black text-amber-200">
                     Pago parcial: {formatCents(order.paidCents)} de {formatCents(order.amountDueCents)} USD
                   </span>
@@ -321,8 +425,23 @@ async function AdminOrderDetailContent({
         ) : (
           <div className="space-y-3 text-xs">
             <div className="p-4 rounded-2xl bg-sky-500/10 border border-sky-500/25 space-y-1">
-              <div className="text-[11px] uppercase font-bold text-sky-300">
-                Cuenta Bancaria Receptora (Pago Móvil)
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] uppercase font-bold text-sky-300">
+                  Cuenta Bancaria Receptora (Pago Móvil)
+                </div>
+                {order.paidCents > order.amountDueCents && (
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/35 text-[10px] font-black text-emerald-200 tabular-nums">
+                    Sobrepago: +{formatCents(order.paidCents - order.amountDueCents)} USD
+                    {pmSurplusBsCents > 0 ? ` (+${formatBsCents(pmSurplusBsCents)})` : ""}
+                  </span>
+                )}
+                {order.paidCents > 0 && order.paidCents < order.amountDueCents && (
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/35 text-[10px] font-black text-amber-200 tabular-nums">
+                    Pago parcial: {formatBsCents(pmReceivedBsCents)} de{" "}
+                    {formatBsCents(pmExpectedBsCents)} · Faltan{" "}
+                    {formatBsCents(pmMissingBsCents)}
+                  </span>
+                )}
               </div>
               {activeBank ? (
                 <div className="font-bold text-white">
@@ -334,25 +453,32 @@ async function AdminOrderDetailContent({
               )}
             </div>
 
-            {pmNotification ? (
-              <div className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 space-y-1">
-                <div className="font-bold text-emerald-300">
-                  Notificación bancaria emparejada ({pmNotification.sourceType})
-                </div>
-                <div className="text-white">
-                  Referencia: <strong>#{pmNotification.referenceFull ?? "N/A"}</strong> •
-                  Monto:{" "}
-                  <strong>
-                    {pmNotification.amountBsCents
-                      ? formatBsCents(pmNotification.amountBsCents)
-                      : "N/A"}
-                  </strong>
-                </div>
-                <div className="text-slate-300 text-[11px]">
-                  Emisor: {pmNotification.senderBankCode ?? "?"} • Tel:{" "}
-                  {pmNotification.senderPhone ?? "?"} • CI:{" "}
-                  {pmNotification.senderDni ?? "?"}
-                </div>
+            {pmNotifications.length > 0 ? (
+              <div className="space-y-2">
+                {pmNotifications.map((pmNotif) => (
+                  <div
+                    key={pmNotif.id}
+                    className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 space-y-1"
+                  >
+                    <div className="font-bold text-emerald-300">
+                      Notificación bancaria emparejada ({pmNotif.sourceType})
+                    </div>
+                    <div className="text-white tabular-nums">
+                      Referencia: <strong>#{pmNotif.referenceFull ?? "N/A"}</strong> •
+                      Monto:{" "}
+                      <strong>
+                        {pmNotif.amountBsCents
+                          ? formatBsCents(pmNotif.amountBsCents)
+                          : "N/A"}
+                      </strong>
+                    </div>
+                    <div className="text-slate-300 text-[11px]">
+                      Emisor: {pmNotif.senderBankCode ?? "?"} • Tel:{" "}
+                      {pmNotif.senderPhone ?? "?"} • CI:{" "}
+                      {pmNotif.senderDni ?? "?"}
+                    </div>
+                  </div>
+                ))}
               </div>
             ) : pmReport?.reportedReference ? (
               <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-1">

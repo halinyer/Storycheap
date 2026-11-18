@@ -22,6 +22,8 @@ async function AdminOverviewContent() {
       actualItemCostCents={snap.actualItemCostCents}
       matchedBsByOrder={snap.matchedBsByOrder}
       bsRateCents={snap.bsRateCents}
+      bsRatePolicy={snap.bsRatePolicy}
+      liveRates={snap.liveRates}
       includeTestOrders={snap.includeTestOrders}
       unreviewedPagoMovilCount={snap.unreviewedPagoMovilCount}
       historicalTestCandidateCount={historicalTestCandidateCount}

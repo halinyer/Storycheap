@@ -598,13 +598,16 @@ export function ReceiverLedgersSection({
                             : "Validado / Aprobado en cuenta receptora"}
                         </div>
                       </div>
-                      <div className="text-right shrink-0">
+                      <div className="text-right shrink-0 font-mono tabular-nums">
                         <div className="font-bold text-sky-300">
                           {bsCents > 0 ? formatBsCents(bsCents) : formatCents(cashPaid)}
                         </div>
-                        <div className="text-[10px] text-slate-500">
-                          {formatCents(cashPaid)} ·{" "}
-                          {new Date(order.createdAt).toLocaleDateString()}
+                        <div className="text-[10px] text-slate-400">
+                          {formatCents(cashPaid)}
+                          {order.bsRateCents
+                            ? ` · Tasa congelada Bs ${(order.bsRateCents / 100).toFixed(2)}/$`
+                            : ""}{" "}
+                          · {new Date(order.createdAt).toLocaleDateString()}
                         </div>
                       </div>
                     </div>

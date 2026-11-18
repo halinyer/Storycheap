@@ -28,11 +28,13 @@ import type {
   TreasuryAccountId,
   TreasuryMovementDTO,
   TreasuryMovementType,
+  VolumeDiscountTier,
   WebhookEventDTO,
 } from "@/types";
 import { decryptCode, encryptCode, extractLast4, sha256CodeHash } from "./crypto";
 import { suggestProductImageUrl } from "@/lib/brand-theme";
 import { CATALOG_SEED } from "@/lib/catalog-seed";
+import { normalizeVolumeDiscountTiers } from "@/lib/volume-discounts";
 import { isDemoSandboxEnabled, isStorePreviewMode } from "./env";
 import {
   buildSandboxCatalogSnapshot,
@@ -164,9 +166,7 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
   const [centralOneBalanceCents, fazerCardsBalanceCents, pricingMetaMap] = await Promise.all([
     anyUsesCentralOne ? getCachedCentralOneBalanceCents() : Promise.resolve(null),
     anyUsesFazerCards ? getCachedFazerCardsBalanceCents() : Promise.resolve(null),
-    anyUsesCentralOne || anyUsesFazerCards
-      ? getVariantPricingMetaMap()
-      : Promise.resolve({} as Record<string, VariantPricingMeta>),
+    getVariantPricingMetaMap(),
   ]);
 
   const variantsByProduct = new Map<string, ProductVariantDTO[]>();
@@ -220,6 +220,10 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       ? null
       : manualCount + (c1Capacity ?? 0);
 
+    const volumeDiscounts = normalizeVolumeDiscountTiers(
+      pricingMetaMap[v.id]?.volumeDiscounts,
+      v.sale_price_cents
+    );
     const dto: ProductVariantDTO = {
       id: v.id,
       productId: v.product_id,
@@ -237,6 +241,7 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       supplierStock: usesSupplierApi ? c1Capacity : null,
       deliverableStock,
       inStock: manualCount > 0 || reloadlyAvail || centralOneAvail,
+      ...(volumeDiscounts.length > 0 ? { volumeDiscounts } : {}),
     };
     const arr = variantsByProduct.get(v.product_id) ?? [];
     arr.push(dto);
@@ -1244,17 +1249,30 @@ export async function releaseExpiredReservations(): Promise<{
         order.expiresAt &&
         Date.parse(order.expiresAt) < nowMs
       ) {
-        if (order.creditAppliedCents > 0) {
+        const refundableCents = order.creditAppliedCents + order.paidCents;
+        if (refundableCents > 0) {
           const userId =
             order.userId ?? (await ensureCustomerProfile(order.email));
-          await appendCreditLedgerEntry({
-            userId,
-            orderId: order.id,
-            deltaCents: order.creditAppliedCents,
-            reason: "fulfillment_refund",
-            note: `Devolución automática de saldo aplicado al vencer orden (${order.orderNumber})`,
-            createdBy: null,
-          });
+          if (order.creditAppliedCents > 0) {
+            await appendCreditLedgerEntry({
+              userId,
+              orderId: order.id,
+              deltaCents: order.creditAppliedCents,
+              reason: "fulfillment_refund",
+              note: `Devolución automática de saldo aplicado al vencer orden (${order.orderNumber})`,
+              createdBy: null,
+            });
+          }
+          if (order.paidCents > 0) {
+            await appendCreditLedgerEntry({
+              userId,
+              orderId: order.id,
+              deltaCents: order.paidCents,
+              reason: "partial_payment",
+              note: `Abono parcial acreditado al vencer orden (${order.orderNumber})`,
+              createdBy: null,
+            });
+          }
           order.status = "REFUNDED_CREDIT";
         } else {
           order.status = "EXPIRED";
@@ -1266,34 +1284,48 @@ export async function releaseExpiredReservations(): Promise<{
     return { releasedCodes, expiredOrders };
   }
 
-  // Before running SQL expiration, refund pre-applied store credit on expired PENDING_PAYMENT orders
+  // Before running SQL expiration, settle pre-applied store credit or partial payments on expired PENDING_PAYMENT orders
   const nowIso = new Date().toISOString();
-  const { data: expiredWithCredit } = await ctx.admin
+  const { data: expiredWithFunds } = await ctx.admin
     .from("orders")
     .select("id, order_number, user_id, email, credit_applied_cents, paid_cents")
     .eq("status", "PENDING_PAYMENT")
-    .gt("credit_applied_cents", 0)
+    .or("credit_applied_cents.gt.0,paid_cents.gt.0")
     .lt("expires_at", nowIso);
 
-  for (const row of expiredWithCredit ?? []) {
+  for (const row of expiredWithFunds ?? []) {
+    const appliedCredit = Number(row.credit_applied_cents ?? 0);
+    const paidPart = Number(row.paid_cents ?? 0);
     const transitioned = await transitionOrderStatus({
       orderId: row.id,
       expectedStatuses: ["PENDING_PAYMENT"],
       nextStatus: "REFUNDED_CREDIT",
-      paidCents: Number(row.paid_cents ?? 0),
+      paidCents: paidPart,
     });
     if (transitioned) {
       await releaseReservedCodesForOrder(row.id);
       const userId =
         row.user_id ?? (await ensureCustomerProfile(String(row.email)));
-      await appendCreditLedgerEntry({
-        userId,
-        orderId: row.id,
-        deltaCents: Number(row.credit_applied_cents),
-        reason: "fulfillment_refund",
-        note: `Devolución automática de saldo aplicado al vencer orden (${row.order_number})`,
-        createdBy: null,
-      });
+      if (appliedCredit > 0) {
+        await appendCreditLedgerEntry({
+          userId,
+          orderId: row.id,
+          deltaCents: appliedCredit,
+          reason: "fulfillment_refund",
+          note: `Devolución automática de saldo aplicado al vencer orden (${row.order_number})`,
+          createdBy: null,
+        });
+      }
+      if (paidPart > 0) {
+        await appendCreditLedgerEntry({
+          userId,
+          orderId: row.id,
+          deltaCents: paidPart,
+          reason: "partial_payment",
+          note: `Abono parcial acreditado al vencer orden (${row.order_number})`,
+          createdBy: null,
+        });
+      }
     }
   }
 
@@ -1303,7 +1335,7 @@ export async function releaseExpiredReservations(): Promise<{
   return {
     releasedCodes: Number(first?.released_codes ?? 0),
     expiredOrders:
-      Number(first?.expired_orders ?? 0) + (expiredWithCredit?.length ?? 0),
+      Number(first?.expired_orders ?? 0) + (expiredWithFunds?.length ?? 0),
   };
 }
 
@@ -1557,9 +1589,8 @@ export interface VariantPricingMeta {
   lastSyncedAt?: string | null;
   supplierAvailable?: boolean | null;
   supplierStockCount?: number | null;
+  volumeDiscounts?: VolumeDiscountTier[];
 }
-
-const sandboxVariantPricingMeta: Record<string, VariantPricingMeta> = {};
 
 const SUPPLIER_PRICING_POLICY_KEY = "supplier_pricing_policy";
 const SUPPLIER_SYNC_STATE_KEY = "supplier_sync_state";
@@ -1622,7 +1653,7 @@ export async function getVariantPricingMetaMap(): Promise<
 > {
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") {
-    return { ...sandboxVariantPricingMeta };
+    return { ...getSandboxState().variantPricingMeta };
   }
 
   const data = await readSettingJson<{ variants?: Record<string, VariantPricingMeta> }>(
@@ -1652,7 +1683,7 @@ export async function batchSaveVariantPricingMeta(
 
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") {
-    Object.assign(sandboxVariantPricingMeta, next);
+    getSandboxState().variantPricingMeta = next;
     return;
   }
 
@@ -1676,8 +1707,9 @@ export async function removeVariantPricingMeta(
   if (variantIds.length === 0) return;
   const ctx = assertDbOrSandbox();
   if (ctx.mode === "sandbox") {
+    const state = getSandboxState();
     for (const id of variantIds) {
-      delete sandboxVariantPricingMeta[id];
+      delete state.variantPricingMeta[id];
     }
     return;
   }
@@ -2927,7 +2959,7 @@ export async function findConsumedBinancePayTxIds(
   const targetEventIds = Array.from(normalizedTargets).map(
     (id) => `binance_pay_tx:${id}`
   );
-  const [directRes, recentRes] = await Promise.all([
+  const [directRes, recentRes, manualAuditRes] = await Promise.all([
     ctx.admin
       .from("webhook_events")
       .select("event_id, status")
@@ -2941,6 +2973,16 @@ export async function findConsumedBinancePayTxIds(
       .eq("status", "processed")
       .order("processed_at", { ascending: false })
       .limit(250),
+    ctx.admin
+      .from("audit_log")
+      .select("metadata")
+      .in("action", [
+        "order.admin_manual_zeno_confirm",
+        "order.admin_manual_zeno_partial",
+        "order.admin_manual_zeno_credited",
+      ])
+      .order("created_at", { ascending: false })
+      .limit(100),
   ]);
 
   for (const row of directRes.data ?? []) {
@@ -2954,6 +2996,15 @@ export async function findConsumedBinancePayTxIds(
     for (const t of extractZenoTransactionsFromPayload(row.payload)) {
       const up = t.transactionId.trim().toUpperCase();
       if (normalizedTargets.has(up)) consumed.add(up);
+      const uidUp = t.uid.trim().toUpperCase();
+      if (normalizedTargets.has(uidUp)) consumed.add(uidUp);
+    }
+  }
+  for (const row of manualAuditRes.data ?? []) {
+    const meta = (row.metadata as { txReference?: unknown } | null) ?? null;
+    if (typeof meta?.txReference === "string" && meta.txReference.trim()) {
+      const refUp = meta.txReference.trim().toUpperCase();
+      if (normalizedTargets.has(refUp)) consumed.add(refUp);
     }
   }
 

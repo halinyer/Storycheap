@@ -1,4 +1,5 @@
 import "server-only";
+import { resolveVolumeTierPrice } from "@/lib/volume-discounts";
 import type { ProductDTO, ProductVariantDTO, SupplierPricingPolicy } from "@/types";
 import {
   getProviderConfig,
@@ -29,6 +30,7 @@ export interface ValidatedCheckoutLine {
   product: ProductDTO;
   variant: ProductVariantDTO;
   quantity: number;
+  effectiveUnitPriceCents: number;
   lineTotalCents: number;
 }
 
@@ -278,24 +280,42 @@ export async function validateAndPriceCart(
       }
     }
 
+    // Filter out any volume tier that would sell below current live supplier cost if supplier price spiked
+    const costFloorCents =
+      typeof effectiveVariant.unitCostCents === "number" &&
+      effectiveVariant.unitCostCents > 0
+        ? effectiveVariant.unitCostCents
+        : null;
+    const safeVolumeDiscounts = effectiveVariant.volumeDiscounts?.filter(
+      (tier) => costFloorCents === null || tier.unitPriceCents >= costFloorCents
+    );
+
+    const tierPricing = resolveVolumeTierPrice({
+      baseUnitPriceCents: effectiveVariant.salePriceCents,
+      quantity,
+      volumeDiscounts: safeVolumeDiscounts,
+    });
+    const effectiveUnitPriceCents = tierPricing.effectiveUnitPriceCents;
+
     const expectedUnitPrice = expectedPriceByVariant.get(variantId);
     if (
       typeof expectedUnitPrice === "number" &&
-      expectedUnitPrice !== effectiveVariant.salePriceCents
+      expectedUnitPrice !== effectiveUnitPriceCents
     ) {
       throw new CheckoutValidationError(
         "PRICE_UPDATED",
-        `El precio de ${product.name} (${effectiveVariant.denominationLabel}) cambió a $${(effectiveVariant.salePriceCents / 100).toFixed(2)}. Actualizamos tu carrito.`,
+        `El precio de ${product.name} (${effectiveVariant.denominationLabel}) cambió a $${(effectiveUnitPriceCents / 100).toFixed(2)}. Actualizamos tu carrito.`,
         409
       );
     }
 
-    const lineTotalCents = effectiveVariant.salePriceCents * quantity;
+    const lineTotalCents = tierPricing.lineTotalCents;
     subtotalCents += lineTotalCents;
     validatedLines.push({
       product,
       variant: effectiveVariant,
       quantity,
+      effectiveUnitPriceCents,
       lineTotalCents,
     });
   }

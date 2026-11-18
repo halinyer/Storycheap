@@ -3,6 +3,7 @@ import crypto from "crypto";
 import type { OrderDTO, ProductVariantDTO, SessionUser } from "@/types";
 import { encryptCode, extractLast4 } from "./crypto";
 import { sendCreditAdjustmentEmail, sendOrderReadyEmail } from "./email";
+import { isBinancePayConfigured } from "./env";
 import {
   getMatchedNotificationForOrder,
   getOrderPagoMovilReport,
@@ -40,6 +41,7 @@ import {
   getVariantsLookupByIds,
   getZenoBinanceReceiver,
   insertFulfillmentRecord,
+  listOrdersAdmin,
   listPendingSupplierOrders,
   listPendingSupplierOrdersForOrder,
   markOrderAttentionFlag,
@@ -879,6 +881,32 @@ export async function processVerifiedWebhookEvent(
     authoritativeStatus === "EXPIRED" ||
     authoritativeStatus === "CANCELLED"
   ) {
+    // Before expiring a ZenoBank order with $0 reported by ZenoBank, check if the customer sent an overpayment/deposit directly in Binance Pay
+    if (
+      event.gateway === "zenobank" &&
+      authoritativeStatus !== "CANCELLED" &&
+      authoritativePaidCents < matchedOrder.amountDueCents
+    ) {
+      const autoBinance = await autoReconcileBinancePayForOrder({
+        orderId: matchedOrder.id,
+        source: "webhook_expiry_check",
+        minAgeMs: 0,
+      }).catch(() => null);
+
+      if (autoBinance?.matched) {
+        await updateWebhookEventStatus(recordId, "processed");
+        return {
+          outcome:
+            autoBinance.mode === "fulfilled"
+              ? "delivered_or_fulfilling"
+              : autoBinance.mode === "partial_credited"
+                ? "partial_underpaid_credited"
+                : "partial_pending",
+          orderId: matchedOrder.id,
+        };
+      }
+    }
+
     if (authoritativePaidCents > 0 || matchedOrder.creditAppliedCents > 0) {
       await settleUnderpaymentToCredit({
         order: matchedOrder,
@@ -1025,6 +1053,33 @@ export async function reconcileGatewaySession(params: {
   const { order, session, source } = params;
   const hasNewPartialPayment =
     session.status === "OPEN" && session.paidCents > order.paidCents;
+
+  // When ZenoBank hasn't detected the full payment (e.g. customer sent extra / overpaid in Binance Pay),
+  // check Binance Pay directly via API Key + Secret Key before leaving it open or expiring it.
+  if (
+    order.paymentGateway === "zenobank" &&
+    session.status !== "COMPLETED" &&
+    session.status !== "CANCELLED" &&
+    session.paidCents < order.amountDueCents
+  ) {
+    const autoBinance = await autoReconcileBinancePayForOrder({
+      orderId: order.id,
+      source: "auto_poll_reconcile",
+      minAgeMs: session.status === "EXPIRED" ? 0 : 8_000,
+    }).catch(() => null);
+
+    if (autoBinance?.matched) {
+      return {
+        reconciled: true,
+        outcome:
+          autoBinance.mode === "fulfilled"
+            ? "delivered_or_fulfilling"
+            : autoBinance.mode === "partial_credited"
+              ? "partial_underpaid_credited"
+              : "partial_pending",
+      };
+    }
+  }
 
   if (
     session.status !== "COMPLETED" &&
@@ -1531,6 +1586,255 @@ export async function applyVerifiedBinancePayTxToOrder(params: {
     );
     throw err;
   }
+}
+
+export async function autoReconcileBinancePayForOrder(params: {
+  orderId: string;
+  actorUser?: SessionUser | null;
+  source?:
+    | "auto_poll_reconcile"
+    | "customer_auto_verify"
+    | "admin_tx_verify"
+    | "cron_auto_reconcile"
+    | "webhook_expiry_check";
+  minAgeMs?: number;
+}): Promise<
+  | { matched: false; reason: string }
+  | {
+      matched: true;
+      mode: "fulfilled" | "partial_pending" | "partial_credited";
+      receivedCents: number;
+      missingCents: number;
+      surplusCents: number;
+      nextStatus: OrderDTO["status"];
+      order: OrderDTO;
+      tx: BinancePayIncomingTx;
+    }
+> {
+  if (!isBinancePayConfigured() && process.env.NODE_ENV !== "test") {
+    return { matched: false, reason: "not_configured" };
+  }
+
+  const order = await getOrderById(params.orderId);
+  if (!order) {
+    return { matched: false, reason: "order_not_found" };
+  }
+  if (order.paymentGateway !== "zenobank") {
+    return { matched: false, reason: "not_zenobank" };
+  }
+  if (
+    order.status !== "PENDING_PAYMENT" &&
+    order.status !== "CREATED" &&
+    order.status !== "EXPIRED"
+  ) {
+    return { matched: false, reason: `status_${order.status}` };
+  }
+
+  const orderCreatedMs = Date.parse(order.createdAt);
+  if (
+    order.status === "EXPIRED" &&
+    Number.isFinite(orderCreatedMs) &&
+    Date.now() - orderCreatedMs > 24 * 3600_000
+  ) {
+    return { matched: false, reason: "expired_too_old" };
+  }
+
+  const remainingDueCents = Math.max(0, order.amountDueCents - order.paidCents);
+  if (remainingDueCents <= 0) {
+    return { matched: false, reason: "already_paid" };
+  }
+
+  const minTxTimeMs = Number.isFinite(orderCreatedMs)
+    ? orderCreatedMs - 15_000
+    : Date.now() - 3600_000;
+  const orderExpiresMs =
+    order.expiresAt && Number.isFinite(Date.parse(order.expiresAt))
+      ? Date.parse(order.expiresAt)
+      : (Number.isFinite(orderCreatedMs) ? orderCreatedMs : Date.now()) +
+        60 * 60_000;
+  const maxTxTimeMs = orderExpiresMs + 20 * 60_000;
+
+  const expectedReceiverBinanceId =
+    await resolveConfiguredBinanceReceiverNumericId();
+
+  const incomingList = await fetchBinancePayIncomingTransactions({
+    startTimeMs: minTxTimeMs,
+    limit: 50,
+    expectedReceiverBinanceId,
+  });
+
+  const windowTxs = incomingList.filter(
+    (tx) =>
+      tx.usdCents > 0 &&
+      tx.transactionTime >= minTxTimeMs &&
+      tx.transactionTime <= maxTxTimeMs
+  );
+
+  if (windowTxs.length === 0) {
+    return { matched: false, reason: "no_tx_in_window" };
+  }
+
+  const allTokens: string[] = [];
+  for (const tx of windowTxs) {
+    allTokens.push(tx.transactionId);
+    if (tx.orderId) allTokens.push(tx.orderId);
+  }
+  const [consumed, recentZenoOrders] = await Promise.all([
+    findConsumedBinancePayTxIds(allTokens),
+    listOrdersAdmin()
+      .then((list) => list.filter((o) => o.paymentGateway === "zenobank"))
+      .catch(() => [] as OrderDTO[]),
+  ]);
+
+  const unconsumed = windowTxs
+    .filter((tx) => {
+      const txIdUp = tx.transactionId.trim().toUpperCase();
+      const ordIdUp = tx.orderId.trim().toUpperCase();
+      if (consumed.has(txIdUp) || (ordIdUp && consumed.has(ordIdUp))) {
+        return false;
+      }
+
+      // Guard against historical orders manually confirmed by admin without a saved txReference
+      const claimedByManualConfirmOrder = recentZenoOrders.some((other) => {
+        if (other.id === order.id) return false;
+        if (
+          other.status !== "DELIVERED" &&
+          other.status !== "PAID" &&
+          other.status !== "FULFILLING" &&
+          other.status !== "PARTIAL"
+        ) {
+          return false;
+        }
+        if (other.paidCents !== tx.usdCents) return false;
+        const otherCreatedMs = Date.parse(other.createdAt);
+        const otherUpdatedMs = Date.parse(other.updatedAt);
+        if (!Number.isFinite(otherCreatedMs)) return false;
+        const inOtherWindow =
+          tx.transactionTime >= otherCreatedMs - 15_000 &&
+          (!Number.isFinite(otherUpdatedMs) ||
+            tx.transactionTime <= otherUpdatedMs + 5 * 60_000);
+        if (!inOtherWindow) return false;
+        return (
+          Math.abs(tx.transactionTime - otherCreatedMs) <=
+          Math.abs(tx.transactionTime - orderCreatedMs)
+        );
+      });
+
+      return !claimedByManualConfirmOrder;
+    })
+    .sort((a, b) => a.transactionTime - b.transactionTime);
+
+  if (unconsumed.length === 0) {
+    return { matched: false, reason: "all_tx_consumed" };
+  }
+
+  const emailPrefix = order.email.split("@")[0]?.trim().toLowerCase() ?? "";
+  const maxAutoOverpayCents = Math.max(
+    remainingDueCents * 5,
+    remainingDueCents + 5000
+  );
+
+  for (const tx of unconsumed) {
+    const ageMs = Math.max(0, Date.now() - tx.transactionTime);
+    const isOverpayment = tx.usdCents > remainingDueCents;
+    const requiredAgeMs =
+      params.minAgeMs === 0
+        ? 0
+        : isOverpayment
+          ? Math.min(params.minAgeMs ?? 3_000, 3_000)
+          : (params.minAgeMs ?? 8_000);
+
+    if (ageMs < requiredAgeMs) {
+      continue;
+    }
+
+    const noteUpper = (tx.note ?? "").toUpperCase();
+    const explicitNoteMatch =
+      Boolean(order.orderNumber && noteUpper.includes(order.orderNumber.toUpperCase())) ||
+      noteUpper.includes(order.id.toUpperCase()) ||
+      Boolean(
+        order.gatewayCheckoutId &&
+          noteUpper.includes(order.gatewayCheckoutId.toUpperCase())
+      );
+
+    // Find any other unpaid ZenoBank orders active at the exact timestamp of this transaction
+    const concurrentUnpaidOrders = recentZenoOrders.filter((other) => {
+      if (other.id === order.id) return false;
+      if (
+        other.status !== "PENDING_PAYMENT" &&
+        other.status !== "CREATED" &&
+        !(other.status === "EXPIRED" && other.paidCents < other.amountDueCents)
+      ) {
+        return false;
+      }
+      const ocMs = Date.parse(other.createdAt);
+      const oeMs =
+        other.expiresAt && Number.isFinite(Date.parse(other.expiresAt))
+          ? Date.parse(other.expiresAt)
+          : ocMs + 60 * 60_000;
+      return (
+        Number.isFinite(ocMs) &&
+        tx.transactionTime >= ocMs - 15_000 &&
+        tx.transactionTime <= oeMs + 15 * 60_000
+      );
+    });
+
+    const payerLower = (tx.payerName ?? "").trim().toLowerCase();
+    const payerMatchesCustomer =
+      payerLower.length >= 3 &&
+      emailPrefix.length >= 3 &&
+      (emailPrefix.includes(payerLower) || payerLower.includes(emailPrefix));
+
+    let isMatch = false;
+    if (explicitNoteMatch) {
+      isMatch = true;
+    } else if (tx.usdCents >= remainingDueCents && tx.usdCents <= maxAutoOverpayCents) {
+      if (concurrentUnpaidOrders.length === 0 || payerMatchesCustomer) {
+        isMatch = true;
+      } else {
+        // Disambiguate among concurrent orders by closest covered amountDueCents
+        const mySurplus = tx.usdCents - remainingDueCents;
+        const closerCompetitor = concurrentUnpaidOrders.some((other) => {
+          const otherRem = Math.max(0, other.amountDueCents - other.paidCents);
+          if (otherRem <= 0 || tx.usdCents < otherRem) return false;
+          const otherSurplus = tx.usdCents - otherRem;
+          return otherSurplus <= mySurplus;
+        });
+        if (!closerCompetitor && mySurplus <= 1000) {
+          isMatch = true;
+        }
+      }
+    } else if (
+      tx.usdCents > 0 &&
+      tx.usdCents < remainingDueCents &&
+      tx.usdCents >= Math.min(10, Math.floor(remainingDueCents * 0.1)) &&
+      (concurrentUnpaidOrders.length === 0 ||
+        payerMatchesCustomer ||
+        params.source === "customer_auto_verify" ||
+        params.source === "admin_tx_verify")
+    ) {
+      isMatch = true;
+    }
+
+    if (!isMatch) continue;
+
+    const applied = await applyVerifiedBinancePayTxToOrder({
+      orderId: order.id,
+      transactionId: tx.transactionId,
+      actorUser: params.actorUser ?? null,
+      source:
+        params.source === "admin_tx_verify"
+          ? "admin_tx_verify"
+          : "customer_tx_verify",
+    });
+
+    return {
+      matched: true,
+      ...applied,
+    };
+  }
+
+  return { matched: false, reason: "no_unambiguous_match" };
 }
 
 function isCentralOneReadyStatus(status: string): boolean {

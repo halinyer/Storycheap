@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useStore } from "@/context/store-context";
@@ -17,13 +17,13 @@ import {
   Receipt,
   Search,
   Shield,
-  ShieldCheck,
   ShoppingBag,
   User,
   Wallet,
   X,
-  Zap,
 } from "lucide-react";
+
+const EMPTY_SUBSCRIBE = () => () => {};
 
 const SUBNAV_ITEMS: Array<{
   label: string;
@@ -44,8 +44,21 @@ const SUBNAV_ITEMS: Array<{
 export function Navbar() {
   const pathname = usePathname();
   const router = useRouter();
-  const [mounted, setMounted] = useState(false);
-  const [profileOpen, setProfileOpen] = useState(false);
+  const mounted = useSyncExternalStore(
+    EMPTY_SUBSCRIBE,
+    () => true,
+    () => false
+  );
+  const [openAtPathname, setOpenAtPathname] = useState<string | null>(null);
+  const profileOpen = openAtPathname === pathname;
+  const setProfileOpen = (next: boolean | ((prev: boolean) => boolean)) => {
+    setOpenAtPathname((prevPath) => {
+      const currentlyOpen = prevPath === pathname;
+      const shouldOpen =
+        typeof next === "function" ? next(currentlyOpen) : next;
+      return shouldOpen ? pathname : null;
+    });
+  };
   const profileRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -59,16 +72,10 @@ export function Navbar() {
     setSearchQuery,
     selectedCategory,
     setSelectedCategory,
+    displayCurrency,
+    setDisplayCurrency,
+    bsRateCents,
   } = useStore();
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  // Close profile dropdown on outside click or route change
-  useEffect(() => {
-    setProfileOpen(false);
-  }, [pathname]);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -76,7 +83,7 @@ export function Navbar() {
         profileRef.current &&
         !profileRef.current.contains(e.target as Node)
       ) {
-        setProfileOpen(false);
+        setOpenAtPathname(null);
       }
     }
     document.addEventListener("mousedown", handleClickOutside);
@@ -181,15 +188,46 @@ export function Navbar() {
             <HelpCircle className="w-4 h-4" />
           </Link>
 
-          <div className="hidden lg:flex items-center gap-2.5 text-xs font-bold text-slate-300 border-l border-r border-white/10 px-3 py-1">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-4 h-4 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 flex items-center justify-center text-[9px] font-black">
-                $
-              </span>
-              <span>USD</span>
-            </span>
-            <span className="text-white/20">|</span>
-            <span className="text-slate-400">ES</span>
+          <div className="flex items-center border-r border-white/10 pr-2 sm:pr-3">
+            {mounted && bsRateCents && bsRateCents > 0 ? (
+              <div
+                role="group"
+                aria-label="Moneda de visualización"
+                title={`Tasa tienda: Bs ${(bsRateCents / 100).toLocaleString("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / USD`}
+                className="inline-flex items-center rounded-full bg-[#171923] border border-white/10 p-0.5 text-[11px] font-bold"
+              >
+                <button
+                  type="button"
+                  onClick={() => setDisplayCurrency("USD")}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full transition-all ${
+                    displayCurrency === "USD"
+                      ? "bg-white text-slate-950 font-black shadow-sm"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  <span>$</span>
+                  <span className="hidden sm:inline">USD</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDisplayCurrency("VES")}
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full transition-all ${
+                    displayCurrency === "VES"
+                      ? "bg-white text-slate-950 font-black shadow-sm"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  <span>Bs</span>
+                </button>
+              </div>
+            ) : (
+              <div className="hidden lg:flex items-center gap-2 text-xs font-bold text-slate-300 border-l border-white/10 pl-3 py-1">
+                <span className="w-4 h-4 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 flex items-center justify-center text-[9px] font-black">
+                  $
+                </span>
+                <span>USD</span>
+              </div>
+            )}
           </div>
 
           {/* Typical User Profile Trigger + Dropdown */}

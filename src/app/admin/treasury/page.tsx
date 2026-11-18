@@ -5,6 +5,10 @@ import { connection } from "next/server";
 import type { MatchedPagoMovilSummary } from "@/components/admin/receiver-ledgers-section";
 import { TreasuryConsole } from "@/components/admin/treasury-console";
 import { isZenoBankConfigured } from "@/lib/server/env";
+import {
+  fetchLiveVenezuelaRates,
+  getBsRateAutoSyncPolicy,
+} from "@/lib/server/exchange-rates";
 import { getAdminIncludeTestsPreference } from "@/lib/server/admin-preferences";
 import {
   getActiveReceiverBankAccount,
@@ -59,6 +63,8 @@ async function AdminTreasuryContent() {
     zenoReceiver,
     zenoProofs,
     actualItemCostCents,
+    liveRates,
+    bsRatePolicy,
   ] = await Promise.all([
     listOrdersAdmin(),
     listTreasuryMovementsAdmin(),
@@ -75,7 +81,12 @@ async function AdminTreasuryContent() {
     getZenoBinanceReceiver(),
     listZenoPaymentProofsAdmin(),
     listSupplierItemCostsAdmin(),
+    fetchLiveVenezuelaRates().catch(() => null),
+    getBsRateAutoSyncPolicy(),
   ]);
+
+  const replacementUsdtRateCents =
+    liveRates?.replacementUsdtRateCents ?? bsRateCents;
 
   const matchedNotificationByOrder: Record<string, MatchedPagoMovilSummary> = {};
   const matchedBsByOrder: Record<string, number | null> = {};
@@ -104,6 +115,7 @@ async function AdminTreasuryContent() {
     matchedBsByOrder,
     includeTestOrders,
     bsRateCents,
+    replacementUsdtRateCents,
   });
 
   const suppliers = await fetchSuppliersPortfolioSnapshot({
@@ -132,6 +144,7 @@ async function AdminTreasuryContent() {
     creditLiabilityUsdCents,
     includeTestOrders,
     bsRateCents,
+    replacementUsdtRateCents,
   });
 
   return (
@@ -140,6 +153,9 @@ async function AdminTreasuryContent() {
       movements={movements}
       suppliers={suppliers}
       position={position}
+      bsRateCents={bsRateCents}
+      bsRatePolicy={bsRatePolicy}
+      liveRates={liveRates}
       snapshots={snapshots}
       sqlMigrationApplied={schemaStatus.sqlMigrationApplied}
       migrationSqlSnippet={readMigration0006Sql()}

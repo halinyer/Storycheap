@@ -6,6 +6,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useStore } from "@/context/store-context";
 import { formatCents } from "@/lib/catalog-seed";
+import { formatBsFromUsdCents, formatBsNumber } from "@/lib/currency";
+import { resolveVolumeTierPrice } from "@/lib/volume-discounts";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -38,6 +40,10 @@ export default function CheckoutPage() {
   const {
     cartItems,
     cartSubtotalCents,
+    cartRegularSubtotalCents,
+    cartSavingsCents,
+    displayCurrency,
+    bsRateCents: storeBsRateCents,
     clearCart,
     syncCartPrices,
     sessionUser,
@@ -119,11 +125,18 @@ export default function CheckoutPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: sessionUser.email,
-          items: cartItems.map((it) => ({
-            variantId: it.variantId,
-            quantity: it.quantity,
-            expectedUnitPriceCents: it.unitPriceCents,
-          })),
+          items: cartItems.map((it) => {
+            const tier = resolveVolumeTierPrice({
+              baseUnitPriceCents: it.unitPriceCents,
+              quantity: it.quantity,
+              volumeDiscounts: it.volumeDiscounts,
+            });
+            return {
+              variantId: it.variantId,
+              quantity: it.quantity,
+              expectedUnitPriceCents: tier.effectiveUnitPriceCents,
+            };
+          }),
           applyStoreCredit: Boolean(sessionUser && applyCredit),
           paymentGateway: amountDueCents === 0 ? "zenobank" : paymentGateway,
         }),
@@ -165,14 +178,24 @@ export default function CheckoutPage() {
         return;
       }
 
-      // If sandbox/local hosted URL (/pay/pagomovil/[id]), navigate via Next router; if external ZenoBank URL, redirect browser immediately
+      // If sandbox/local hosted URL (/pay/pagomovil/[id]), navigate via Next router;
+      // if external ZenoBank URL, open ZenoBank in a new tab while keeping /order/[id] live to auto-reconcile Binance Pay overpayments
       if (data.checkoutUrl.startsWith("/")) {
         router.push(data.checkoutUrl);
       } else if (data.checkoutUrl.startsWith(window.location.origin)) {
         const rel = data.checkoutUrl.slice(window.location.origin.length);
         router.push(rel);
       } else {
-        window.location.assign(data.checkoutUrl);
+        const popup = window.open(
+          data.checkoutUrl,
+          "_blank",
+          "noopener,noreferrer"
+        );
+        if (popup) {
+          router.push(`/order/${data.orderId}?zenoOpened=1`);
+        } else {
+          window.location.assign(data.checkoutUrl);
+        }
       }
     } catch (err) {
       toast.error(
@@ -449,14 +472,7 @@ export default function CheckoutPage() {
                         {pmAvailability?.available
                           ? `Transferencia directa a ${pmAvailability.receiverBankName ?? "Pago Móvil"} con verificación automática 24/7.${
                               pmAvailability.bsRateCents
-                                ? ` Estimado: Bs ${(
-                                    Math.round(
-                                      (amountDueCents * pmAvailability.bsRateCents) / 100
-                                    ) / 100
-                                  ).toLocaleString("es-VE", {
-                                    minimumFractionDigits: 2,
-                                    maximumFractionDigits: 2,
-                                  })}.`
+                                ? ` Estimado: ${formatBsFromUsdCents(amountDueCents, pmAvailability.bsRateCents)}.`
                                 : ""
                             }`
                           : !pmAvailability
@@ -519,37 +535,72 @@ export default function CheckoutPage() {
           <h2 className="text-base font-black text-white">Resumen de tu orden</h2>
 
           <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
-            {cartItems.map((it) => (
-              <div
-                key={it.variantId}
-                className="flex items-center gap-3 py-2 border-b border-white/[0.06]"
-              >
-                <div className="w-12 h-14 rounded-lg bg-slate-950 border border-white/10 p-1 flex items-center justify-center shrink-0">
-                  <img
-                    src={it.imageUrl}
-                    alt={it.productName}
-                    className="max-h-full max-w-full object-contain"
-                  />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-extrabold text-white truncate">
-                    {it.productName}
+            {cartItems.map((it) => {
+              const tier = resolveVolumeTierPrice({
+                baseUnitPriceCents: it.unitPriceCents,
+                quantity: it.quantity,
+                volumeDiscounts: it.volumeDiscounts,
+              });
+              return (
+                <div
+                  key={it.variantId}
+                  className="flex items-center gap-3 py-2 border-b border-white/[0.06]"
+                >
+                  <div className="w-12 h-14 rounded-lg bg-slate-950 border border-white/10 p-1 flex items-center justify-center shrink-0">
+                    <img
+                      src={it.imageUrl}
+                      alt={it.productName}
+                      className="max-h-full max-w-full object-contain"
+                    />
                   </div>
-                  <div className="text-[11px] text-slate-400">
-                    {it.denominationLabel} × {it.quantity} • {it.region}
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-extrabold text-white truncate">
+                      {it.productName}
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      {it.denominationLabel} × {it.quantity} • {it.region}
+                    </div>
+                    {tier.appliedTier && (
+                      <div className="text-[10px] font-medium text-slate-300 mt-0.5 tabular-nums">
+                        {tier.appliedTier.minQuantity}+ u. ({formatCents(tier.effectiveUnitPriceCents)}/u · -{tier.discountPct}%)
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-right tabular-nums">
+                    {tier.lineSavingsCents > 0 && (
+                      <div className="text-[10px] text-slate-500 line-through">
+                        {formatCents(tier.regularLineTotalCents)}
+                      </div>
+                    )}
+                    <div className="text-xs font-black text-white">
+                      {formatCents(tier.lineTotalCents)}
+                    </div>
                   </div>
                 </div>
-                <div className="text-xs font-black text-white">
-                  {formatCents(it.unitPriceCents * it.quantity)}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="space-y-2 text-xs pt-1">
+            {cartSavingsCents > 0 && (
+              <>
+                <div className="flex justify-between text-slate-400">
+                  <span>Precio regular</span>
+                  <span className="line-through tabular-nums">
+                    {formatCents(cartRegularSubtotalCents)} USD
+                  </span>
+                </div>
+                <div className="flex justify-between text-slate-200 font-semibold">
+                  <span>Ahorro por volumen</span>
+                  <span className="tabular-nums">
+                    -{formatCents(cartSavingsCents)} USD
+                  </span>
+                </div>
+              </>
+            )}
             <div className="flex justify-between text-slate-300">
               <span>Subtotal</span>
-              <span>{formatCents(cartSubtotalCents)} USD</span>
+              <span className="tabular-nums">{formatCents(cartSubtotalCents)} USD</span>
             </div>
             {usableCreditCents > 0 && (
               <div className="flex justify-between text-emerald-400 font-bold">
@@ -557,42 +608,58 @@ export default function CheckoutPage() {
                 <span>-{formatCents(usableCreditCents)} USD</span>
               </div>
             )}
-            <div className="flex justify-between items-baseline pt-3 border-t border-white/[0.08]">
-              <span className="text-sm font-bold text-white">Total a pagar</span>
-              <span className="text-2xl font-black text-white">
-                {formatCents(amountDueCents)} USD
-              </span>
-            </div>
-            {paymentGateway === "pagomovil" &&
-              pmAvailability?.bsRateCents &&
-              amountDueCents > 0 && (
-                <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3.5 py-2.5 flex items-center justify-between">
-                  <div>
-                    <div className="text-[11px] font-bold text-emerald-300">
-                      Total estimado en Bolívares
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      Tasa: Bs{" "}
-                      {(pmAvailability.bsRateCents / 100).toLocaleString("es-VE", {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}{" "}
-                      / USD
+            {(() => {
+              const rateCents = pmAvailability?.bsRateCents ?? storeBsRateCents;
+              const dueBsText = formatBsFromUsdCents(amountDueCents, rateCents);
+              const showBsPrimary =
+                displayCurrency === "VES" && Boolean(dueBsText);
+
+              return (
+                <>
+                  <div className="flex justify-between items-baseline pt-3 border-t border-white/[0.08]">
+                    <span className="text-sm font-bold text-white">
+                      Total a pagar
+                    </span>
+                    <div className="text-right tabular-nums">
+                      <span className="text-2xl font-black text-white block">
+                        {showBsPrimary && dueBsText
+                          ? dueBsText
+                          : `${formatCents(amountDueCents)} USD`}
+                      </span>
+                      {showBsPrimary ? (
+                        <span className="text-xs text-slate-400 block">
+                          ≈ {formatCents(amountDueCents)} USD
+                        </span>
+                      ) : (
+                        dueBsText &&
+                        paymentGateway !== "pagomovil" && (
+                          <span className="text-xs text-slate-400 block">
+                            ≈ {dueBsText}
+                          </span>
+                        )
+                      )}
                     </div>
                   </div>
-                  <div className="text-base font-black text-emerald-300 font-mono">
-                    Bs{" "}
-                    {(
-                      Math.round(
-                        (amountDueCents * pmAvailability.bsRateCents) / 100
-                      ) / 100
-                    ).toLocaleString("es-VE", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
-                  </div>
-                </div>
-              )}
+                  {paymentGateway === "pagomovil" &&
+                    rateCents &&
+                    amountDueCents > 0 && (
+                      <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/25 px-3.5 py-2.5 flex items-center justify-between">
+                        <div>
+                          <div className="text-[11px] font-bold text-emerald-300">
+                            Total estimado en Bolívares
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            Tasa: Bs {formatBsNumber(rateCents)} / USD
+                          </div>
+                        </div>
+                        <div className="text-base font-black text-emerald-300 font-mono tabular-nums">
+                          {dueBsText}
+                        </div>
+                      </div>
+                    )}
+                </>
+              );
+            })()}
           </div>
 
           {sessionUser ? (

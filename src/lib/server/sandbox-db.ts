@@ -1,9 +1,11 @@
 import "server-only";
 import { CATALOG_SEED } from "@/lib/catalog-seed";
+import { normalizeVolumeDiscountTiers } from "@/lib/volume-discounts";
 import type {
   AuditLogEntryDTO,
   BankPaymentNotificationDTO,
   BotDeviceDTO,
+  BsRateAutoSyncPolicy,
   CreditLedgerEntryDTO,
   CustomerSummaryDTO,
   InventoryStatus,
@@ -15,6 +17,7 @@ import type {
   ReceiverBankAccountDTO,
   SupportTicketDTO,
   TreasuryMovementDTO,
+  VolumeDiscountTier,
   WebhookEventDTO,
 } from "@/types";
 import {
@@ -101,9 +104,24 @@ export interface SandboxState {
   auditLog: AuditLogEntryDTO[];
   profiles: SandboxProfile[];
   bsRateCents: number | null;
+  bsRatePolicy?: BsRateAutoSyncPolicy;
   pagoMovil: SandboxPagoMovilState;
   treasuryMovements: TreasuryMovementDTO[];
   supportTickets: SupportTicketDTO[];
+  variantPricingMeta: Record<
+    string,
+    {
+      exactCostUsd?: string | null;
+      centraloneProductName?: string | null;
+      centraloneSku?: string | null;
+      centraloneRegion?: string | null;
+      previousExactCostUsd?: string | null;
+      lastSyncedAt?: string | null;
+      supplierAvailable?: boolean | null;
+      supplierStockCount?: number | null;
+      volumeDiscounts?: VolumeDiscountTier[];
+    }
+  >;
 }
 
 declare global {
@@ -227,6 +245,7 @@ function createInitialSandboxState(): SandboxState {
     auditLog: [],
     profiles,
     bsRateCents: null,
+    variantPricingMeta: {},
     pagoMovil: {
       devices: [],
       receiverAccounts: [
@@ -312,10 +331,15 @@ export function buildSandboxCatalogSnapshot(includeInactive = false): ProductDTO
             Boolean(reloadlyCfg?.enabled) &&
             v.sourcePriority !== "manual_only" &&
             Boolean(v.reloadlyProductId);
+          const volumeDiscounts = normalizeVolumeDiscountTiers(
+            state.variantPricingMeta?.[v.id]?.volumeDiscounts ?? v.volumeDiscounts,
+            v.salePriceCents
+          );
           return {
             ...v,
             availableStock: manualCount,
             inStock: manualCount > 0 || reloadlyAvailable,
+            ...(volumeDiscounts.length > 0 ? { volumeDiscounts } : {}),
           };
         }),
     }))

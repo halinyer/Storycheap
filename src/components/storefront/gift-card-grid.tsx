@@ -9,9 +9,13 @@ import { SearchX, ShieldCheck } from "lucide-react";
 
 interface GiftCardGridProps {
   initialProducts: ProductDTO[];
+  initialBsRateCents?: number | null;
 }
 
-export function GiftCardGrid({ initialProducts }: GiftCardGridProps) {
+export function GiftCardGrid({
+  initialProducts,
+  initialBsRateCents = null,
+}: GiftCardGridProps) {
   const {
     selectedCategory,
     selectedRegion,
@@ -19,7 +23,17 @@ export function GiftCardGrid({ initialProducts }: GiftCardGridProps) {
     setSearchQuery,
     setSelectedCategory,
     setSelectedRegion,
+    bsRateCents,
+    hydrateBsRateCents,
   } = useStore();
+
+  useEffect(() => {
+    if (typeof initialBsRateCents === "number" && initialBsRateCents > 0) {
+      hydrateBsRateCents(initialBsRateCents);
+    }
+  }, [initialBsRateCents, hydrateBsRateCents]);
+
+  const effectiveBsRateCents = bsRateCents ?? initialBsRateCents;
 
   const [fetchedProducts, setFetchedProducts] = useState<ProductDTO[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -31,9 +45,12 @@ export function GiftCardGrid({ initialProducts }: GiftCardGridProps) {
     let active = true;
     fetch("/api/catalog", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { products?: ProductDTO[] } | null) => {
+      .then((data: { products?: ProductDTO[]; bsRateCents?: number | null } | null) => {
         if (active && data?.products) {
           setFetchedProducts(data.products);
+        }
+        if (active && typeof data?.bsRateCents === "number" && data.bsRateCents > 0) {
+          hydrateBsRateCents(data.bsRateCents);
         }
       })
       .catch(() => {})
@@ -43,7 +60,7 @@ export function GiftCardGrid({ initialProducts }: GiftCardGridProps) {
     return () => {
       active = false;
     };
-  }, []);
+  }, [hydrateBsRateCents]);
 
   const filteredProducts = products.filter((prod) => {
     if (!prod.active || !prod.variants.some((v) => v.active)) {
@@ -95,7 +112,11 @@ export function GiftCardGrid({ initialProducts }: GiftCardGridProps) {
       ) : filteredProducts.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
           {filteredProducts.map((product) => (
-            <GiftCardCard key={product.id} product={product} />
+            <GiftCardCard
+              key={product.id}
+              product={product}
+              bsRateCents={effectiveBsRateCents}
+            />
           ))}
         </div>
       ) : (

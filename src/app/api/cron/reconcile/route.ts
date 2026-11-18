@@ -10,6 +10,7 @@ import {
   listPendingSupplierOrders,
   releaseExpiredReservations,
 } from "@/lib/server/repository";
+import { syncBsExchangeRateIfNeeded } from "@/lib/server/exchange-rates";
 import { syncSupplierCatalogCosts } from "@/lib/server/supplier-sync";
 
 export async function GET(request: NextRequest) {
@@ -111,6 +112,23 @@ export async function GET(request: NextRequest) {
     };
   }
 
+  // 4) Auto-sync Bs/USD exchange rate when auto-sync policy is enabled
+  let bsRateSync: {
+    synced: boolean;
+    bsRateCents: number | null;
+  } | null = null;
+  try {
+    const rateRes = await syncBsExchangeRateIfNeeded({
+      updatedBy: "cron:reconcile",
+    });
+    bsRateSync = {
+      synced: rateRes.synced,
+      bsRateCents: rateRes.bsRateCents,
+    };
+  } catch {
+    bsRateSync = null;
+  }
+
   return NextResponse.json({
     ok: true,
     releasedCodes,
@@ -118,5 +136,6 @@ export async function GET(request: NextRequest) {
     reconciledCount,
     centralOneSyncedCount,
     priceSync,
+    bsRateSync,
   });
 }

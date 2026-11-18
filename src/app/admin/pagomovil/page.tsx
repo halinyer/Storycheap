@@ -3,6 +3,10 @@ import { connection } from "next/server";
 import { PagoMovilBotConsole } from "@/components/admin/pagomovil-bot-console";
 import { getSiteUrl } from "@/lib/server/env";
 import {
+  fetchLiveVenezuelaRates,
+  getBsRateAutoSyncPolicy,
+} from "@/lib/server/exchange-rates";
+import {
   getPagoMovilBotSettings,
   isBotWatchdogHealthy,
   listBankNotifications,
@@ -20,6 +24,8 @@ async function AdminPagoMovilContent() {
   const [
     providerCfg,
     bsRateCents,
+    bsRatePolicy,
+    liveRates,
     settings,
     receiverAccounts,
     devices,
@@ -28,6 +34,8 @@ async function AdminPagoMovilContent() {
   ] = await Promise.all([
     getProviderConfig("pagomovil"),
     getBsRateCents(),
+    getBsRateAutoSyncPolicy(),
+    fetchLiveVenezuelaRates().catch(() => null),
     getPagoMovilBotSettings(),
     listReceiverBankAccounts(),
     listBotDevices(),
@@ -59,6 +67,8 @@ async function AdminPagoMovilContent() {
         siteUrl={getSiteUrl()}
         providerEnabled={Boolean(providerCfg?.enabled)}
         bsRateCents={bsRateCents}
+        initialBsRatePolicy={bsRatePolicy}
+        initialLiveRates={liveRates}
         watchdog={watchdog}
         settings={settings}
         receiverAccounts={receiverAccounts}

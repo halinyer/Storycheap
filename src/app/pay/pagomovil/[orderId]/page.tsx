@@ -47,6 +47,9 @@ interface PagoMovilStatusPayload {
   waitingBankConfirmation: boolean;
   matchedReference: string | null;
   paidBsCents: number | null;
+  receivedBsCents: number;
+  remainingBsCents: number;
+  surplusBsCents: number;
   receiver: {
     bankCode: string;
     bankName: string;
@@ -95,8 +98,13 @@ function PagoMovilHostedCheckoutContent() {
     setData(body);
     setLoadError(null);
 
+    const hasPartialAbono =
+      (body.receivedBsCents ?? 0) > 0 &&
+      body.lastErrorCode === "AMOUNT_MISMATCH";
+
+    // After an abono the customer must type the NEW reference of the remaining transfer
     setReferenceDigits((prev) =>
-      prev ? prev : body.reportedReference ?? ""
+      hasPartialAbono ? prev : prev ? prev : body.reportedReference ?? ""
     );
     setSenderBankCode((prev) =>
       prev ? prev : body.reportedSenderBank ?? ""
@@ -107,7 +115,10 @@ function PagoMovilHostedCheckoutContent() {
 
     if (body.lastErrorCode && body.lastErrorMessage) {
       setVerifyFeedback({
-        type: body.lastErrorCode === "AMBIGUOUS_REFERENCE" ? "warning" : "error",
+        type:
+          body.lastErrorCode === "AMBIGUOUS_REFERENCE" || hasPartialAbono
+            ? "warning"
+            : "error",
         code: body.lastErrorCode,
         message: body.lastErrorMessage,
       });
@@ -231,6 +242,13 @@ function PagoMovilHostedCheckoutContent() {
         (data.expiresAt && nowMs >= Date.parse(data.expiresAt)))
   );
 
+  const hasAbono = Boolean(data && data.receivedBsCents > 0);
+  const amountToTransferBsCents = data
+    ? hasAbono
+      ? data.remainingBsCents
+      : data.amountDueBsCents
+    : 0;
+
   const copyField = async (key: string, value: string, label: string) => {
     try {
       await navigator.clipboard.writeText(value);
@@ -246,7 +264,7 @@ function PagoMovilHostedCheckoutContent() {
 
   const handleCopyAll = () => {
     if (!data?.receiver) return;
-    const exactBs = (data.amountDueBsCents / 100).toFixed(2);
+    const exactBs = (amountToTransferBsCents / 100).toFixed(2);
     const lines = [
       `Banco: ${data.receiver.bankCode} - ${data.receiver.bankName}`,
       `Teléfono: ${data.receiver.phone}`,
@@ -326,6 +344,15 @@ function PagoMovilHostedCheckoutContent() {
         return;
       }
 
+      if (body.code === "AMOUNT_MISMATCH") {
+        // Abono registered: keep the form clean for the NEW reference of the remaining transfer
+        setReferenceDigits("");
+        setVerifyFeedback({ type: "warning", code: body.code, message: msg });
+        toast.warning("Abono registrado. Falta una parte del pago.");
+        await loadStatus();
+        return;
+      }
+
       setVerifyFeedback({
         type: body.code === "AMBIGUOUS_REFERENCE" ? "warning" : "error",
         code: body.code,
@@ -377,7 +404,7 @@ function PagoMovilHostedCheckoutContent() {
     );
   }
 
-  const exactCopyBs = (data.amountDueBsCents / 100).toFixed(2);
+  const exactCopyBs = (amountToTransferBsCents / 100).toFixed(2);
   const cancelableOrderSnapshot: Pick<
     OrderDTO,
     | "id"
@@ -442,11 +469,17 @@ function PagoMovilHostedCheckoutContent() {
             {/* Hero Amount */}
             <div className="space-y-1">
               <div className="text-xs font-medium text-slate-500">
-                Total a transferir
+                {hasAbono ? "Falta por transferir" : "Total a transferir"}
               </div>
               <div className="text-3xl sm:text-4xl font-bold tracking-tight text-[#0a2540] font-mono tabular-nums">
-                Bs. {formatBsNumber(data.amountDueBsCents)}
+                Bs. {formatBsNumber(amountToTransferBsCents)}
               </div>
+              {hasAbono && data && (
+                <div className="text-[11px] text-emerald-700 font-medium tabular-nums">
+                  Abono recibido Bs. {formatBsNumber(data.receivedBsCents)} de Bs.{" "}
+                  {formatBsNumber(data.amountDueBsCents)}
+                </div>
+              )}
               <div className="text-xs text-slate-500 flex flex-wrap items-center gap-1.5 pt-0.5 tabular-nums">
                 <span className="font-medium text-slate-700">
                   {formatCents(data.amountDueCents)} USD
@@ -634,6 +667,28 @@ function PagoMovilHostedCheckoutContent() {
             </div>
           ) : (
             <div className="space-y-6">
+              {hasAbono && data && (
+                <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 space-y-2">
+                  <div className="text-xs font-bold text-amber-900">
+                    Abono registrado: Bs. {formatBsNumber(data.receivedBsCents)}
+                  </div>
+                  <p className="text-[11px] text-amber-900/90 leading-relaxed">
+                    Faltan{" "}
+                    <strong className="tabular-nums">
+                      Bs. {formatBsNumber(data.remainingBsCents)}
+                    </strong>{" "}
+                    para liberar tus códigos. Envía solo la diferencia por Pago
+                    Móvil y pega la <strong>nueva</strong> referencia abajo. La tasa
+                    queda congelada para que el monto no cambie.
+                  </p>
+                  <Link
+                    href={`/order/${orderId}`}
+                    className="inline-flex text-[11px] font-semibold text-amber-900 underline underline-offset-2"
+                  >
+                    Prefiero convertir mi abono en saldo a favor
+                  </Link>
+                </div>
+              )}
               {/* Component 1: Unified Stripe Bank Details Box */}
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
@@ -852,8 +907,8 @@ function PagoMovilHostedCheckoutContent() {
                   ) : (
                     <span>
                       {data.waitingBankConfirmation
-                        ? `Actualizar referencia · Bs. ${formatBsNumber(data.amountDueBsCents)}`
-                        : `Confirmar Pago Móvil · Bs. ${formatBsNumber(data.amountDueBsCents)}`}
+                        ? `Actualizar referencia · Bs. ${formatBsNumber(amountToTransferBsCents)}`
+                        : `Confirmar Pago Móvil · Bs. ${formatBsNumber(amountToTransferBsCents)}`}
                     </span>
                   )}
                 </button>

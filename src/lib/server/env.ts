@@ -118,10 +118,7 @@ export function getCronSecret(): string | null {
 }
 
 export function isBinancePayConfigured(): boolean {
-  return Boolean(
-    process.env.BINANCE_API_KEY?.trim() &&
-      process.env.BINANCE_API_SECRET?.trim()
-  );
+  return Boolean(getBinancePayCredentials());
 }
 
 export function getBinancePayCredentials(): {
@@ -129,8 +126,17 @@ export function getBinancePayCredentials(): {
   apiSecret: string;
   baseUrl: string;
 } | null {
-  const apiKey = process.env.BINANCE_API_KEY?.trim();
-  const apiSecret = process.env.BINANCE_API_SECRET?.trim();
+  const apiKey = (
+    process.env.BINANCE_API_KEY ??
+    process.env.BINANCE_KEY ??
+    ""
+  ).trim();
+  const apiSecret = (
+    process.env.BINANCE_API_SECRET ??
+    process.env.BINANCE_SECRET_KEY ??
+    process.env.BINANCE_SECRET ??
+    ""
+  ).trim();
   if (!apiKey || !apiSecret) return null;
   const configured = process.env.BINANCE_API_BASE_URL?.trim();
   return {

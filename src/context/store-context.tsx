@@ -10,7 +10,12 @@ import React, {
   useSyncExternalStore,
 } from "react";
 import { useRouter } from "next/navigation";
+import { type DisplayCurrency } from "@/lib/currency";
 import { createSupabaseBrowserClient } from "@/lib/supabase";
+import {
+  computeCartTotals,
+  MAX_ORDER_QUANTITY_PER_LINE,
+} from "@/lib/volume-discounts";
 import type {
   CartItem,
   Category,
@@ -21,6 +26,31 @@ import type {
 
 const CART_STORAGE_KEY = "storycheap_cart_v2";
 const CART_EVENT = "storycheap-cart-change";
+const CURRENCY_STORAGE_KEY = "storycheap_currency_v1";
+const CURRENCY_EVENT = "storycheap-currency-change";
+
+function getCurrencySnapshot(): DisplayCurrency {
+  if (typeof window === "undefined") return "USD";
+  const raw = window.localStorage.getItem(CURRENCY_STORAGE_KEY);
+  return raw === "VES" ? "VES" : "USD";
+}
+
+function subscribeCurrency(listener: () => void) {
+  if (typeof window === "undefined") return () => {};
+  const handler = () => listener();
+  window.addEventListener("storage", handler);
+  window.addEventListener(CURRENCY_EVENT, handler);
+  return () => {
+    window.removeEventListener("storage", handler);
+    window.removeEventListener(CURRENCY_EVENT, handler);
+  };
+}
+
+function writeCurrencyToStorage(currency: DisplayCurrency) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(CURRENCY_STORAGE_KEY, currency);
+  window.dispatchEvent(new Event(CURRENCY_EVENT));
+}
 
 function readCartFromStorage(): CartItem[] {
   if (typeof window === "undefined") return [];
@@ -77,10 +107,18 @@ interface StoreContextValue {
   selectedRegion: Region | "ALL";
   setSelectedRegion: (reg: Region | "ALL") => void;
 
+  // Storefront currency display (USD primary vs Bs primary)
+  displayCurrency: DisplayCurrency;
+  setDisplayCurrency: (currency: DisplayCurrency) => void;
+  bsRateCents: number | null;
+  hydrateBsRateCents: (rateCents: number | null) => void;
+
   // Cart
   cartItems: CartItem[];
   cartCount: number;
   cartSubtotalCents: number;
+  cartRegularSubtotalCents: number;
+  cartSavingsCents: number;
   cartDrawerOpen: boolean;
   setCartDrawerOpen: (open: boolean) => void;
   addToCart: (item: Omit<CartItem, "quantity">, qty?: number) => void;
@@ -118,6 +156,42 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [creditBalanceCents, setCreditBalanceCents] = useState(0);
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
   const [isSessionLoading, setIsSessionLoading] = useState(true);
+  const displayCurrency = useSyncExternalStore(
+    subscribeCurrency,
+    getCurrencySnapshot,
+    () => "USD" as const
+  );
+  const [bsRateCents, setBsRateCents] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let active = true;
+    fetch("/api/payments/pagomovil/availability", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { bsRateCents?: number | null } | null) => {
+        if (
+          active &&
+          typeof data?.bsRateCents === "number" &&
+          data.bsRateCents > 0
+        ) {
+          setBsRateCents(data.bsRateCents);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const setDisplayCurrency = useCallback((currency: DisplayCurrency) => {
+    writeCurrencyToStorage(currency);
+  }, []);
+
+  const hydrateBsRateCents = useCallback((rateCents: number | null) => {
+    if (typeof rateCents === "number" && Number.isFinite(rateCents) && rateCents > 0) {
+      setBsRateCents(rateCents);
+    }
+  }, []);
 
   const refreshSession = useCallback(async () => {
     try {
@@ -299,11 +373,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       if (idx >= 0) {
         next = current.map((c, i) =>
           i === idx
-            ? { ...c, quantity: Math.min(10, c.quantity + qty) }
+            ? {
+                ...c,
+                unitPriceCents: item.unitPriceCents,
+                volumeDiscounts: item.volumeDiscounts,
+                quantity: Math.min(MAX_ORDER_QUANTITY_PER_LINE, c.quantity + qty),
+              }
             : c
         );
       } else {
-        next = [...current, { ...item, quantity: Math.min(10, Math.max(1, qty)) }];
+        next = [
+          ...current,
+          {
+            ...item,
+            quantity: Math.min(MAX_ORDER_QUANTITY_PER_LINE, Math.max(1, qty)),
+          },
+        ];
       }
       writeCartToStorage(next);
     },
@@ -340,7 +425,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     try {
       const res = await fetch("/api/catalog", { cache: "no-store" });
       if (!res.ok) return { changedCount: 0, removedCount: 0 };
-      const payload = (await res.json()) as { products?: ProductDTO[] };
+      const payload = (await res.json()) as {
+        products?: ProductDTO[];
+        bsRateCents?: number | null;
+      };
+      if (
+        typeof payload.bsRateCents === "number" &&
+        payload.bsRateCents > 0
+      ) {
+        setBsRateCents(payload.bsRateCents);
+      }
       const products = payload.products ?? [];
       const lookup = new Map<
         string,
@@ -361,7 +455,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           removedCount += 1;
           continue;
         }
-        if (match.variant.salePriceCents !== item.unitPriceCents) {
+        const nextTiersJson = JSON.stringify(match.variant.volumeDiscounts ?? []);
+        const prevTiersJson = JSON.stringify(item.volumeDiscounts ?? []);
+        if (
+          match.variant.salePriceCents !== item.unitPriceCents ||
+          nextTiersJson !== prevTiersJson
+        ) {
           changedCount += 1;
         }
         next.push({
@@ -369,6 +468,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           productName: match.product.name,
           denominationLabel: match.variant.denominationLabel,
           unitPriceCents: match.variant.salePriceCents,
+          volumeDiscounts: match.variant.volumeDiscounts,
           imageUrl: match.product.imageUrl,
           region: match.product.region,
         });
@@ -410,10 +510,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [cartItems]
   );
 
-  const cartSubtotalCents = useMemo(
-    () => cartItems.reduce((acc, it) => acc + it.unitPriceCents * it.quantity, 0),
+  const cartTotals = useMemo(
+    () => computeCartTotals(cartItems),
     [cartItems]
   );
+  const cartSubtotalCents = cartTotals.subtotalCents;
+  const cartRegularSubtotalCents = cartTotals.regularSubtotalCents;
+  const cartSavingsCents = cartTotals.totalSavingsCents;
 
   const value = useMemo<StoreContextValue>(
     () => ({
@@ -423,9 +526,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setSelectedCategory,
       selectedRegion,
       setSelectedRegion,
+      displayCurrency,
+      setDisplayCurrency,
+      bsRateCents,
+      hydrateBsRateCents,
       cartItems,
       cartCount,
       cartSubtotalCents,
+      cartRegularSubtotalCents,
+      cartSavingsCents,
       cartDrawerOpen,
       setCartDrawerOpen,
       addToCart,
@@ -445,9 +554,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       searchQuery,
       selectedCategory,
       selectedRegion,
+      displayCurrency,
+      setDisplayCurrency,
+      bsRateCents,
+      hydrateBsRateCents,
       cartItems,
       cartCount,
       cartSubtotalCents,
+      cartRegularSubtotalCents,
+      cartSavingsCents,
       cartDrawerOpen,
       addToCart,
       updateQuantity,

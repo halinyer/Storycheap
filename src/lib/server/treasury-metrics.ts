@@ -35,6 +35,7 @@ export interface ComputeTreasuryPositionInput {
   creditLiabilityUsdCents?: number;
   includeTestOrders?: boolean;
   bsRateCents?: number | null;
+  replacementUsdtRateCents?: number | null;
 }
 
 /**
@@ -54,6 +55,7 @@ export function computeTreasuryPosition({
   creditLiabilityUsdCents = 0,
   includeTestOrders = false,
   bsRateCents = null,
+  replacementUsdtRateCents = null,
 }: ComputeTreasuryPositionInput): TreasuryPositionSummary {
   const activeOrdersMetrics = summarizeOrdersMetrics(orders, actualItemCostCents, {
     includeTestOrders,
@@ -133,10 +135,12 @@ export function computeTreasuryPosition({
       case "INTERNAL_TRANSFER": {
         if (m.sourceAccount === "pagomovil" && m.targetAccount === "zenobank") {
           pagomovilBalanceBsCents -= bs;
-          // Book USD released from Bancamiga using weighted sale rate (or real amount if no Bs passed)
+          // Book USD released from receiver bank using weighted sale rate (or exact remaining book USD when all Bs are swapped)
           const releasedBookUsdCents =
             bs > 0 && weightedBookBsRateCents
-              ? Math.round((bs * 100) / weightedBookBsRateCents)
+              ? pagomovilBalanceBsCents <= 0 && pagomovilBalanceUsdCents > 0
+                ? pagomovilBalanceUsdCents
+                : Math.round((bs * 100) / weightedBookBsRateCents)
               : usd;
           pagomovilBalanceUsdCents -= releasedBookUsdCents;
           zenobankBalanceUsdCents += usd;
@@ -248,6 +252,42 @@ export function computeTreasuryPosition({
   const suppliersDiscrepancyUsdCents =
     totalSuppliersUsdCents - theoreticalSuppliersUsdCents;
 
+  const pagomovilSalesCostUsdCents = activeOrdersMetrics.pagomovilCostCents;
+  const pagomovilNominalProfitUsdCents =
+    activeOrdersMetrics.pagomovilCents - pagomovilSalesCostUsdCents;
+
+  const effectiveReplacementRateCents =
+    replacementUsdtRateCents && replacementUsdtRateCents > 0
+      ? replacementUsdtRateCents
+      : bsRateCents && bsRateCents > 0
+        ? bsRateCents
+        : weightedBookBsRateCents;
+
+  const pagomovilMarkToMarketUsdtCents =
+    pagomovilBalanceBsCents > 0
+      ? effectiveReplacementRateCents && effectiveReplacementRateCents > 0
+        ? Math.round((pagomovilBalanceBsCents * 100) / effectiveReplacementRateCents)
+        : pagomovilBalanceUsdCents
+      : 0;
+
+  const unrealizedExchangeDiffUsdCents =
+    pagomovilBalanceBsCents > 0
+      ? pagomovilMarkToMarketUsdtCents - pagomovilBalanceUsdCents
+      : 0;
+
+  const pagomovilRealNetProfitUsdCents =
+    pagomovilNominalProfitUsdCents +
+    exchangeDiffUsdCents +
+    unrealizedExchangeDiffUsdCents;
+
+  const pagomovilBreakEvenRateCents =
+    pagomovilSalesCostUsdCents > 0 && activeOrdersMetrics.pagomovilBsCents > 0
+      ? Math.floor(
+          (activeOrdersMetrics.pagomovilBsCents * 100) /
+            pagomovilSalesCostUsdCents
+        )
+      : null;
+
   return {
     zenobankBalanceUsdCents,
     pagomovilBalanceUsdCents,
@@ -275,6 +315,14 @@ export function computeTreasuryPosition({
     zenobankSalesGrossUsdCents: activeOrdersMetrics.zenobankCents,
     pagomovilSalesGrossUsdCents: activeOrdersMetrics.pagomovilCents,
     pagomovilSalesGrossBsCents: activeOrdersMetrics.pagomovilBsCents,
+    pagomovilSalesCostUsdCents,
+    pagomovilNominalProfitUsdCents,
+    weightedBookBsRateCents,
+    replacementUsdtRateCents: effectiveReplacementRateCents,
+    pagomovilMarkToMarketUsdtCents,
+    unrealizedExchangeDiffUsdCents,
+    pagomovilRealNetProfitUsdCents,
+    pagomovilBreakEvenRateCents,
     creditAppliedSalesUsdCents: activeOrdersMetrics.creditAppliedCents,
     fundedBySupplierUsdCents,
   };

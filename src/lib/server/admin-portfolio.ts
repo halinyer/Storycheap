@@ -1,5 +1,9 @@
 import "server-only";
 import { getAdminIncludeTestsPreference } from "@/lib/server/admin-preferences";
+import {
+  fetchLiveVenezuelaRates,
+  getBsRateAutoSyncPolicy,
+} from "@/lib/server/exchange-rates";
 import { listBankNotifications } from "@/lib/server/pagomovil-store";
 import {
   getBsRateCents,
@@ -28,6 +32,8 @@ export async function loadAdminPortfolioSnapshot(options?: {
     actualItemCostCents,
     includeTestOrders,
     pagoMovilNotifications,
+    liveRates,
+    bsRatePolicy,
   ] = await Promise.all([
     listOrdersAdmin(),
     listTreasuryMovementsAdmin(),
@@ -39,7 +45,12 @@ export async function loadAdminPortfolioSnapshot(options?: {
     listSupplierItemCostsAdmin(),
     getAdminIncludeTestsPreference(),
     listBankNotifications(150),
+    fetchLiveVenezuelaRates().catch(() => null),
+    getBsRateAutoSyncPolicy(),
   ]);
+
+  const replacementUsdtRateCents =
+    liveRates?.replacementUsdtRateCents ?? bsRateCents;
 
   const matchedBsByOrder: Record<string, number | null> = {};
   let unreviewedPagoMovilCount = 0;
@@ -65,6 +76,7 @@ export async function loadAdminPortfolioSnapshot(options?: {
     creditLiabilityUsdCents,
     includeTestOrders,
     bsRateCents,
+    replacementUsdtRateCents,
   });
 
   const suppliers = await fetchSuppliersPortfolioSnapshot({
@@ -88,6 +100,7 @@ export async function loadAdminPortfolioSnapshot(options?: {
     creditLiabilityUsdCents,
     includeTestOrders,
     bsRateCents,
+    replacementUsdtRateCents,
   });
 
   return {
@@ -98,6 +111,8 @@ export async function loadAdminPortfolioSnapshot(options?: {
     providers,
     customers,
     bsRateCents,
+    bsRatePolicy,
+    liveRates,
     actualItemCostCents,
     includeTestOrders,
     matchedBsByOrder,

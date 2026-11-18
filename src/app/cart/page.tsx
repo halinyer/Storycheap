@@ -5,6 +5,11 @@ import React from "react";
 import Link from "next/link";
 import { useStore } from "@/context/store-context";
 import { formatCents } from "@/lib/catalog-seed";
+import { formatBsFromUsdCents } from "@/lib/currency";
+import {
+  MAX_ORDER_QUANTITY_PER_LINE,
+  resolveVolumeTierPrice,
+} from "@/lib/volume-discounts";
 import {
   ArrowLeft,
   ArrowRight,
@@ -20,6 +25,10 @@ export default function CartPage() {
     cartItems,
     cartCount,
     cartSubtotalCents,
+    cartRegularSubtotalCents,
+    cartSavingsCents,
+    displayCurrency,
+    bsRateCents,
     updateQuantity,
     removeFromCart,
     clearCart,
@@ -76,85 +85,147 @@ export default function CartPage() {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           <div className="lg:col-span-8 space-y-4">
-            {cartItems.map((item) => (
-              <div
-                key={item.variantId}
-                className="rounded-2xl apple-glass p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center gap-4"
-              >
-                <div className="w-20 h-24 rounded-xl bg-slate-950 border border-white/10 p-2 flex items-center justify-center shrink-0">
-                  <img
-                    src={item.imageUrl}
-                    alt={item.productName}
-                    className="max-h-full max-w-full object-contain rounded"
-                  />
-                </div>
+            {cartItems.map((item) => {
+              const tier = resolveVolumeTierPrice({
+                baseUnitPriceCents: item.unitPriceCents,
+                quantity: item.quantity,
+                volumeDiscounts: item.volumeDiscounts,
+              });
+              const lineBs = formatBsFromUsdCents(tier.lineTotalCents, bsRateCents);
+              const showBsPrimary = displayCurrency === "VES" && Boolean(lineBs);
 
-                <div className="flex-1 min-w-0">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    {item.brand} • Región {item.region}
-                  </span>
-                  <Link
-                    href={`/card/${item.productSlug}`}
-                    className="block text-base font-extrabold text-white hover:text-sky-300 truncate"
-                  >
-                    {item.productName}
-                  </Link>
-                  <p className="text-xs text-sky-400 font-bold mt-1">
-                    {item.denominationLabel} — {formatCents(item.unitPriceCents)} c/u
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between sm:justify-end gap-4">
-                  <div className="flex items-center gap-1.5 rounded-xl bg-slate-950 border border-white/10 p-1">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateQuantity(item.variantId, item.quantity - 1)
-                      }
-                      className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/10"
-                    >
-                      <Minus className="w-3.5 h-3.5" />
-                    </button>
-                    <span className="w-7 text-center text-xs font-black text-white">
-                      {item.quantity}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateQuantity(item.variantId, item.quantity + 1)
-                      }
-                      className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/10"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                    </button>
+              return (
+                <div
+                  key={item.variantId}
+                  className="rounded-2xl apple-glass p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center gap-4"
+                >
+                  <div className="w-20 h-24 rounded-xl bg-slate-950 border border-white/10 p-2 flex items-center justify-center shrink-0">
+                    <img
+                      src={item.imageUrl}
+                      alt={item.productName}
+                      className="max-h-full max-w-full object-contain rounded"
+                    />
                   </div>
 
-                  <div className="text-right min-w-[72px]">
-                    <div className="text-base font-black text-white">
-                      {formatCents(item.unitPriceCents * item.quantity)}
+                  <div className="flex-1 min-w-0">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      {item.brand} • Región {item.region}
+                    </span>
+                    <Link
+                      href={`/card/${item.productSlug}`}
+                      className="block text-base font-extrabold text-white hover:text-sky-300 truncate"
+                    >
+                      {item.productName}
+                    </Link>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      <p className="text-xs text-sky-400 font-bold">
+                        {item.denominationLabel} —{" "}
+                        {tier.appliedTier ? (
+                          <>
+                            <span className="line-through text-slate-500 font-normal mr-1">
+                              {formatCents(item.unitPriceCents)}
+                            </span>
+                            <span className="text-white font-semibold">
+                              {formatCents(tier.effectiveUnitPriceCents)} USD c/u
+                            </span>
+                          </>
+                        ) : (
+                          `${formatCents(item.unitPriceCents)} c/u`
+                        )}
+                      </p>
+                      {tier.appliedTier && (
+                        <span className="px-2 py-0.5 rounded-full bg-white/[0.08] border border-white/15 text-[10px] font-semibold text-slate-200 tabular-nums">
+                          {tier.appliedTier.minQuantity}+ u. · -{tier.discountPct}%
+                        </span>
+                      )}
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => removeFromCart(item.variantId)}
-                    aria-label="Eliminar"
-                    className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-rose-500/10"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center justify-between sm:justify-end gap-4">
+                    <div className="flex items-center gap-1.5 rounded-xl bg-slate-950 border border-white/10 p-1">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateQuantity(item.variantId, item.quantity - 1)
+                        }
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/10"
+                      >
+                        <Minus className="w-3.5 h-3.5" />
+                      </button>
+                      <span className="w-7 text-center text-xs font-black text-white tabular-nums">
+                        {item.quantity}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={item.quantity >= MAX_ORDER_QUANTITY_PER_LINE}
+                        onClick={() =>
+                          updateQuantity(item.variantId, item.quantity + 1)
+                        }
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/10 disabled:opacity-35"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="text-right min-w-[84px] tabular-nums">
+                      {tier.lineSavingsCents > 0 && (
+                        <div className="text-[11px] text-slate-500 line-through">
+                          {formatCents(tier.regularLineTotalCents)}
+                        </div>
+                      )}
+                      <div className="text-base font-black text-white">
+                        {showBsPrimary ? lineBs : formatCents(tier.lineTotalCents)}
+                      </div>
+                      {showBsPrimary ? (
+                        <div className="text-[11px] text-slate-400">
+                          ≈ {formatCents(tier.lineTotalCents)} USD
+                        </div>
+                      ) : (
+                        lineBs && (
+                          <div className="text-[11px] text-slate-400">
+                            ≈ {lineBs}
+                          </div>
+                        )
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => removeFromCart(item.variantId)}
+                      aria-label="Eliminar"
+                      className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-rose-500/10"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="lg:col-span-4 rounded-3xl apple-glass p-6 space-y-5">
             <h2 className="text-base font-black text-white">Resumen</h2>
 
             <div className="space-y-2.5 text-xs border-b border-white/[0.08] pb-4">
+              {cartSavingsCents > 0 && (
+                <>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Precio regular</span>
+                    <span className="line-through tabular-nums">
+                      {formatCents(cartRegularSubtotalCents)} USD
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-slate-200 font-semibold">
+                    <span>Ahorro por volumen</span>
+                    <span className="tabular-nums">
+                      -{formatCents(cartSavingsCents)} USD
+                    </span>
+                  </div>
+                </>
+              )}
               <div className="flex justify-between text-slate-300">
                 <span>Subtotal ({cartCount} ítem{cartCount === 1 ? "" : "s"})</span>
-                <span className="font-bold text-white">
+                <span className="font-bold text-white tabular-nums">
                   {formatCents(cartSubtotalCents)} USD
                 </span>
               </div>
@@ -164,12 +235,33 @@ export default function CartPage() {
               </div>
             </div>
 
-            <div className="flex items-baseline justify-between">
-              <span className="text-sm font-bold text-slate-200">Total estimado</span>
-              <span className="text-2xl font-black text-white">
-                {formatCents(cartSubtotalCents)} USD
-              </span>
-            </div>
+            {(() => {
+              const totalBs = formatBsFromUsdCents(cartSubtotalCents, bsRateCents);
+              const showBsPrimary = displayCurrency === "VES" && Boolean(totalBs);
+              return (
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-sm font-bold text-slate-200">
+                    Total estimado
+                  </span>
+                  <div className="text-right tabular-nums">
+                    <span className="text-2xl font-black text-white block">
+                      {showBsPrimary ? totalBs : `${formatCents(cartSubtotalCents)} USD`}
+                    </span>
+                    {showBsPrimary ? (
+                      <span className="text-xs text-slate-400 block mt-0.5">
+                        ≈ {formatCents(cartSubtotalCents)} USD
+                      </span>
+                    ) : (
+                      totalBs && (
+                        <span className="text-xs text-slate-400 block mt-0.5">
+                          ≈ {totalBs}
+                        </span>
+                      )
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
             <Link
               href="/checkout"

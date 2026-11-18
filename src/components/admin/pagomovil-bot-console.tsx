@@ -40,6 +40,7 @@ import {
   toggleProviderConfigAction,
   updateBsRateAction,
 } from "@/app/admin/actions";
+import { BsExchangeDeskCard } from "@/components/admin/bs-exchange-desk-card";
 import {
   BANK_BY_CODE,
   DEFAULT_ANDROID_PACKAGES_BY_BANK,
@@ -49,6 +50,8 @@ import { formatCents } from "@/lib/catalog-seed";
 import type {
   BankPaymentNotificationDTO,
   BotDeviceDTO,
+  BsRateAutoSyncPolicy,
+  LiveVenezuelaRatesSnapshot,
   OrderDTO,
   PagoMovilBotSettingsDTO,
   ReceiverBankAccountDTO,
@@ -58,6 +61,8 @@ interface PagoMovilBotConsoleProps {
   siteUrl: string;
   providerEnabled: boolean;
   bsRateCents: number | null;
+  initialBsRatePolicy?: BsRateAutoSyncPolicy;
+  initialLiveRates?: LiveVenezuelaRatesSnapshot | null;
   watchdog: {
     online: boolean;
     activeDevicesCount: number;
@@ -111,12 +116,11 @@ export function PagoMovilBotConsole(props: PagoMovilBotConsoleProps) {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  // Live Venezuela rates preview
-  const [liveRates, setLiveRates] = useState<{
-    officialBcv: number | null;
-    paralelo: number | null;
-    source: string;
-  } | null>(null);
+  // Live Venezuela rates preview (USD BCV, EUR BCV, Paralelo, Binance P2P USDT)
+  const [liveRates, setLiveRates] = useState<LiveVenezuelaRatesSnapshot | null>(
+    props.initialLiveRates ?? null
+  );
+  const ratePolicyMode = props.initialBsRatePolicy?.mode ?? "manual";
 
   // Receiver Account form
   const [bankCode, setBankCode] = useState(primaryAccount?.bankCode ?? "0102");
@@ -225,7 +229,7 @@ export function PagoMovilBotConsole(props: PagoMovilBotConsoleProps) {
     try {
       const rates = await fetchLiveVenezuelaRatesAction();
       setLiveRates(rates);
-      toast.success("Tasas consultadas desde ve.dolarapi.com");
+      toast.success("Tasas consultadas (Binance P2P USDT, Euro BCV y Dólar BCV)");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Error consultando tasas");
     } finally {
@@ -490,46 +494,93 @@ function checkBankEmails() {
         </div>
 
         {/* Card 3: Live Bs/USD Rate Helper */}
-        <div className="rounded-3xl apple-glass p-5 space-y-2 border border-white/10">
-          <div className="flex items-center justify-between">
+        <div className="rounded-3xl apple-glass p-5 space-y-2.5 border border-white/10">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
               Tasa Bs/USD Aplicada
             </span>
-            <Banknote className="w-4 h-4 text-emerald-400" />
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                  ratePolicyMode === "auto"
+                    ? "bg-emerald-500/15 text-emerald-300"
+                    : "bg-white/10 text-slate-300"
+                }`}
+              >
+                {ratePolicyMode === "auto" ? "AUTO-SYNC" : "MANUAL"}
+              </span>
+              <Banknote className="w-4 h-4 text-emerald-400" />
+            </div>
           </div>
-          <div className="text-xl font-black text-emerald-300 font-mono">
-            {props.bsRateCents
-              ? `Bs ${(props.bsRateCents / 100).toFixed(2)}`
-              : "No configurada"}
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="text-xl font-black text-emerald-300 font-mono tabular-nums">
+              {props.bsRateCents
+                ? `Bs ${(props.bsRateCents / 100).toFixed(2)}`
+                : "No configurada"}
+            </div>
             <button
               type="button"
               disabled={busyKey === "live_rates"}
               onClick={() => void handleFetchLiveRates()}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-400/30 text-[10px] font-bold text-emerald-300"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-[10px] font-bold text-slate-200"
             >
               <RefreshCw
-                className={`w-3 h-3 ${busyKey === "live_rates" ? "animate-spin" : ""}`}
+                className={`w-3 h-3 ${busyKey === "live_rates" ? "animate-spin text-emerald-400" : ""}`}
               />
-              <span>Consultar BCV/Paralelo</span>
+              <span>Actualizar</span>
             </button>
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            {liveRates?.binanceP2p && (
+              <button
+                type="button"
+                onClick={() => void handleApplyBsRate(liveRates.binanceP2p)}
+                title="Aplicar promedio líquido de Binance P2P USDT"
+                className="flex items-center justify-between px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-400/30 text-[10px] font-bold text-amber-200"
+              >
+                <span>USDT P2P</span>
+                <span className="font-mono tabular-nums font-black text-white">
+                  {liveRates.binanceP2p.toFixed(2)}
+                </span>
+              </button>
+            )}
+            {liveRates?.euroBcv && (
+              <button
+                type="button"
+                onClick={() => void handleApplyBsRate(liveRates.euroBcv)}
+                title="Aplicar tasa oficial Euro BCV"
+                className="flex items-center justify-between px-2 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-400/30 text-[10px] font-bold text-indigo-200"
+              >
+                <span>EUR BCV</span>
+                <span className="font-mono tabular-nums font-black text-white">
+                  {liveRates.euroBcv.toFixed(2)}
+                </span>
+              </button>
+            )}
             {liveRates?.officialBcv && (
               <button
                 type="button"
                 onClick={() => void handleApplyBsRate(liveRates.officialBcv)}
-                className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-[10px] font-bold text-white"
+                title="Aplicar tasa oficial Dólar BCV"
+                className="flex items-center justify-between px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-[10px] font-bold text-slate-200"
               >
-                BCV {liveRates.officialBcv.toFixed(2)}
+                <span>USD BCV</span>
+                <span className="font-mono tabular-nums font-black text-white">
+                  {liveRates.officialBcv.toFixed(2)}
+                </span>
               </button>
             )}
             {liveRates?.paralelo && (
               <button
                 type="button"
                 onClick={() => void handleApplyBsRate(liveRates.paralelo)}
-                className="px-2 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-[10px] font-bold text-sky-200"
+                title="Aplicar promedio Paralelo"
+                className="flex items-center justify-between px-2 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/30 text-[10px] font-bold text-sky-200"
               >
-                Par {liveRates.paralelo.toFixed(2)}
+                <span>Paralelo</span>
+                <span className="font-mono tabular-nums font-black text-white">
+                  {liveRates.paralelo.toFixed(2)}
+                </span>
               </button>
             )}
           </div>
@@ -1091,6 +1142,15 @@ function checkBankEmails() {
               <span>Guardar Configuración</span>
             </button>
           </form>
+
+          <div className="lg:col-span-12">
+            <BsExchangeDeskCard
+              compact
+              bsRateCents={props.bsRateCents}
+              initialPolicy={props.initialBsRatePolicy}
+              initialLiveRates={liveRates}
+            />
+          </div>
         </div>
       )}
 

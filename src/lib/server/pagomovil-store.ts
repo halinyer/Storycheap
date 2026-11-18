@@ -21,6 +21,44 @@ const NOTIFICATIONS_KEY = "pagomovil_notifications_ledger";
 const REPORTS_KEY = "pagomovil_order_reports";
 const WEBHOOK_SECRET_KEY = "pagomovil_webhook_secret";
 
+// Disjoint row-per-entity prefixes eliminate concurrent read-modify-write lost updates in store_settings
+const NOTIF_ROW_PREFIX = "pm_notif:";
+const REPORT_ROW_PREFIX = "pm_report:";
+const HEARTBEAT_ROW_PREFIX = "pm_heartbeat:";
+
+interface StoredNotificationValue extends BankPaymentNotificationDTO {
+  _rev?: number;
+}
+
+interface StoredOrderReportValue extends OrderPagoMovilReport {
+  _rev?: number;
+}
+
+interface StoredDeviceHeartbeatValue {
+  deviceId: string;
+  lastHeartbeatAt: string;
+  batteryLevel?: number | null;
+  networkType?: string | null;
+  appVersion?: string | null;
+}
+
+function stripNotifRev(raw: StoredNotificationValue): BankPaymentNotificationDTO {
+  const { _rev: _omit, ...dto } = raw;
+  void _omit;
+  return dto;
+}
+
+function stripReportRev(raw: StoredOrderReportValue): OrderPagoMovilReport {
+  const { _rev: _omit, ...dto } = raw;
+  void _omit;
+  return dto;
+}
+
+function isPgUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  return (err as { code?: string }).code === "23505";
+}
+
 const DEFAULT_BOT_SETTINGS: PagoMovilBotSettingsDTO = {
   rateExpirationMinutes: 20,
   orderExpirationMinutes: 25,
@@ -217,9 +255,44 @@ async function writeDeviceRows(
   await writeSettingValue(DEVICES_KEY, { devices: rows }, updatedBy);
 }
 
+function mergeHeartbeatOntoDevice(
+  device: SandboxBotDeviceRow,
+  hb: StoredDeviceHeartbeatValue | null | undefined
+): SandboxBotDeviceRow {
+  if (!hb?.lastHeartbeatAt) return device;
+  const devMs = device.lastHeartbeatAt ? Date.parse(device.lastHeartbeatAt) : 0;
+  const hbMs = Date.parse(hb.lastHeartbeatAt);
+  if (!Number.isFinite(hbMs) || hbMs < devMs) return device;
+  return {
+    ...device,
+    lastHeartbeatAt: hb.lastHeartbeatAt,
+    batteryLevel:
+      typeof hb.batteryLevel === "number" ? hb.batteryLevel : device.batteryLevel,
+    networkType: hb.networkType ?? device.networkType,
+    appVersion: hb.appVersion ?? device.appVersion,
+  };
+}
+
 export async function listBotDevices(): Promise<BotDeviceDTO[]> {
-  const rows = await readDeviceRows();
-  return rows.map(stripDeviceSecret);
+  const ctx = assertStoreMode();
+  if (ctx.mode === "sandbox") {
+    return getSandboxState().pagoMovil.devices.map(stripDeviceSecret);
+  }
+  const [rows, hbRes] = await Promise.all([
+    readDeviceRows(),
+    ctx.admin
+      .from("store_settings")
+      .select("value")
+      .like("key", `${HEARTBEAT_ROW_PREFIX}%`),
+  ]);
+  const hbById = new Map<string, StoredDeviceHeartbeatValue>();
+  for (const row of hbRes.data ?? []) {
+    const val = row.value as StoredDeviceHeartbeatValue | null;
+    if (val?.deviceId) hbById.set(val.deviceId, val);
+  }
+  return rows.map((d) =>
+    stripDeviceSecret(mergeHeartbeatOntoDevice(d, hbById.get(d.id)))
+  );
 }
 
 export async function getBotDeviceWithSecret(
@@ -230,8 +303,16 @@ export async function getBotDeviceWithSecret(
     (d) => d.id === idOrIdentifier || d.deviceIdentifier === idOrIdentifier
   );
   if (!found) return null;
+  const ctx = assertStoreMode();
+  let merged = found;
+  if (ctx.mode === "supabase") {
+    const hb = await readSettingValue<StoredDeviceHeartbeatValue>(
+      `${HEARTBEAT_ROW_PREFIX}${found.id}`
+    );
+    merged = mergeHeartbeatOntoDevice(found, hb);
+  }
   return {
-    device: stripDeviceSecret(found),
+    device: stripDeviceSecret(merged),
     secret: decryptCode(found.secretCiphertext),
   };
 }
@@ -297,28 +378,55 @@ export async function updateBotDeviceHeartbeat(
     appVersion?: string | null;
   }
 ): Promise<BotDeviceDTO | null> {
+  const ctx = assertStoreMode();
   const rows = await readDeviceRows();
   const idx = rows.findIndex(
     (d) => d.id === idOrIdentifier || d.deviceIdentifier === idOrIdentifier
   );
   if (idx === -1) return null;
 
+  const base = rows[idx];
   const now = new Date().toISOString();
-  const updated: SandboxBotDeviceRow = {
-    ...rows[idx],
+  const nextBattery =
+    typeof patch.batteryLevel === "number"
+      ? Math.min(100, Math.max(0, Math.round(patch.batteryLevel)))
+      : base.batteryLevel;
+
+  if (ctx.mode === "sandbox") {
+    const liveIdx = getSandboxState().pagoMovil.devices.findIndex(
+      (d) => d.id === base.id
+    );
+    if (liveIdx === -1) return null;
+    const live = getSandboxState().pagoMovil.devices[liveIdx];
+    const updated: SandboxBotDeviceRow = {
+      ...live,
+      lastHeartbeatAt: now,
+      batteryLevel:
+        typeof patch.batteryLevel === "number" ? nextBattery : live.batteryLevel,
+      networkType: patch.networkType ?? live.networkType,
+      appVersion: patch.appVersion ?? live.appVersion,
+      updatedAt: now,
+    };
+    getSandboxState().pagoMovil.devices[liveIdx] = updated;
+    return stripDeviceSecret(updated);
+  }
+
+  // Isolate frequent device heartbeats in a disjoint row so sensor phones never overwrite device configs or each other
+  const hbKey = `${HEARTBEAT_ROW_PREFIX}${base.id}`;
+  const existingHb = await readSettingValue<StoredDeviceHeartbeatValue>(hbKey);
+  const hbPayload: StoredDeviceHeartbeatValue = {
+    deviceId: base.id,
     lastHeartbeatAt: now,
     batteryLevel:
       typeof patch.batteryLevel === "number"
-        ? Math.min(100, Math.max(0, Math.round(patch.batteryLevel)))
-        : rows[idx].batteryLevel,
-    networkType: patch.networkType ?? rows[idx].networkType,
-    appVersion: patch.appVersion ?? rows[idx].appVersion,
-    updatedAt: now,
+        ? nextBattery
+        : existingHb?.batteryLevel ?? base.batteryLevel,
+    networkType:
+      patch.networkType ?? existingHb?.networkType ?? base.networkType,
+    appVersion: patch.appVersion ?? existingHb?.appVersion ?? base.appVersion,
   };
-  const next = [...rows];
-  next[idx] = updated;
-  await writeDeviceRows(next);
-  return stripDeviceSecret(updated);
+  await writeSettingValue(hbKey, hbPayload);
+  return stripDeviceSecret(mergeHeartbeatOntoDevice(base, hbPayload));
 }
 
 export async function setBotDeviceActive(
@@ -459,27 +567,78 @@ export async function saveReceiverBankAccount(
 // NOTIFICATIONS LEDGER & ATOMIC CLAIM
 // ============================================================================
 
+async function getNotificationRecordById(notificationId: string): Promise<{
+  dto: BankPaymentNotificationDTO;
+  hasSeparateRow: boolean;
+  rev: number;
+} | null> {
+  const ctx = assertStoreMode();
+  if (ctx.mode === "sandbox") {
+    const found = getSandboxState().pagoMovil.notifications.find(
+      (n) => n.id === notificationId
+    );
+    return found ? { dto: found, hasSeparateRow: true, rev: 1 } : null;
+  }
+
+  const perRowRes = await ctx.admin
+    .from("store_settings")
+    .select("value")
+    .like("key", `${NOTIF_ROW_PREFIX}%`)
+    .contains("value", { id: notificationId })
+    .maybeSingle();
+
+  if (perRowRes.data?.value) {
+    const raw = perRowRes.data.value as StoredNotificationValue;
+    return {
+      dto: stripNotifRev(raw),
+      hasSeparateRow: true,
+      rev: typeof raw._rev === "number" ? raw._rev : 1,
+    };
+  }
+
+  const legacy = await readSettingValue<{
+    notifications?: BankPaymentNotificationDTO[];
+  }>(NOTIFICATIONS_KEY);
+  const foundLegacy = (legacy?.notifications ?? []).find(
+    (n) => n.id === notificationId
+  );
+  return foundLegacy
+    ? { dto: foundLegacy, hasSeparateRow: false, rev: 0 }
+    : null;
+}
+
 async function readNotificationRows(): Promise<BankPaymentNotificationDTO[]> {
   const ctx = assertStoreMode();
   if (ctx.mode === "sandbox") {
-    return getSandboxState().pagoMovil.notifications;
+    return [...getSandboxState().pagoMovil.notifications];
   }
-  const saved = await readSettingValue<{ notifications?: BankPaymentNotificationDTO[] }>(
-    NOTIFICATIONS_KEY
-  );
-  return Array.isArray(saved?.notifications) ? saved.notifications : [];
-}
+  const [perRowRes, legacy] = await Promise.all([
+    ctx.admin
+      .from("store_settings")
+      .select("value, updated_at")
+      .like("key", `${NOTIF_ROW_PREFIX}%`)
+      .order("updated_at", { ascending: false })
+      .limit(500),
+    readSettingValue<{ notifications?: BankPaymentNotificationDTO[] }>(
+      NOTIFICATIONS_KEY
+    ),
+  ]);
 
-async function writeNotificationRows(
-  rows: BankPaymentNotificationDTO[]
-): Promise<void> {
-  const capped = rows.slice(0, 500);
-  const ctx = assertStoreMode();
-  if (ctx.mode === "sandbox") {
-    getSandboxState().pagoMovil.notifications = capped;
-    return;
+  const byHash = new Map<string, BankPaymentNotificationDTO>();
+  // Legacy rows first, then disjoint per-row entries override with newer state
+  for (const n of legacy?.notifications ?? []) {
+    if (n?.rawContentHash) byHash.set(n.rawContentHash, n);
   }
-  await writeSettingValue(NOTIFICATIONS_KEY, { notifications: capped });
+  for (const row of perRowRes.data ?? []) {
+    const raw = row.value as StoredNotificationValue | null;
+    if (raw?.rawContentHash) {
+      byHash.set(raw.rawContentHash, stripNotifRev(raw));
+    }
+  }
+
+  return Array.from(byHash.values())
+    .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
+    .slice(0, 500);
 }
 
 export async function listBankNotifications(
@@ -492,17 +651,69 @@ export async function listBankNotifications(
 export async function getBankNotificationById(
   notificationId: string
 ): Promise<BankPaymentNotificationDTO | null> {
-  const rows = await readNotificationRows();
-  return rows.find((n) => n.id === notificationId) ?? null;
+  const rec = await getNotificationRecordById(notificationId);
+  return rec?.dto ?? null;
 }
 
 export async function getMatchedNotificationForOrder(
   orderId: string
 ): Promise<BankPaymentNotificationDTO | null> {
-  const rows = await readNotificationRows();
-  return (
-    rows.find((n) => n.matchedOrderId === orderId && n.status === "MATCHED") ?? null
-  );
+  const list = await getMatchedNotificationsForOrder(orderId);
+  return list[0] ?? null;
+}
+
+/** All bank notifications claimed by an order (supports multiple partial Pago Móvil payments). */
+export async function getMatchedNotificationsForOrder(
+  orderId: string
+): Promise<BankPaymentNotificationDTO[]> {
+  const ctx = assertStoreMode();
+  if (ctx.mode === "sandbox") {
+    return getSandboxState().pagoMovil.notifications.filter(
+      (n) => n.matchedOrderId === orderId && n.status === "MATCHED"
+    );
+  }
+
+  const [perRowRes, legacy] = await Promise.all([
+    ctx.admin
+      .from("store_settings")
+      .select("value")
+      .like("key", `${NOTIF_ROW_PREFIX}%`)
+      .contains("value", { matchedOrderId: orderId, status: "MATCHED" }),
+    readSettingValue<{ notifications?: BankPaymentNotificationDTO[] }>(
+      NOTIFICATIONS_KEY
+    ),
+  ]);
+
+  const byId = new Map<string, BankPaymentNotificationDTO>();
+  for (const n of legacy?.notifications ?? []) {
+    if (n.matchedOrderId === orderId && n.status === "MATCHED") {
+      byId.set(n.id, n);
+    }
+  }
+  for (const row of perRowRes.data ?? []) {
+    const raw = row.value as StoredNotificationValue | null;
+    if (raw && raw.matchedOrderId === orderId && raw.status === "MATCHED") {
+      byId.set(raw.id, stripNotifRev(raw));
+    }
+  }
+  return Array.from(byId.values());
+}
+
+function sumMatchedBsForOrderRows(
+  rows: BankPaymentNotificationDTO[],
+  orderId: string
+): number {
+  return rows
+    .filter((n) => n.matchedOrderId === orderId && n.status === "MATCHED")
+    .reduce((acc, n) => acc + (n.amountBsCents ?? 0), 0);
+}
+
+/** Total Bs (cents) already received and claimed for an order across all partial payments. */
+export async function getReceivedBsCentsForOrder(
+  orderId: string
+): Promise<number> {
+  const matched = await getMatchedNotificationsForOrder(orderId);
+  return matched.reduce((acc, n) => acc + (n.amountBsCents ?? 0), 0);
 }
 
 export function buildNotificationContentHash(args: {
@@ -521,20 +732,84 @@ export function buildNotificationContentHash(args: {
 export async function insertBankNotification(
   input: Omit<BankPaymentNotificationDTO, "id" | "createdAt">
 ): Promise<{ notification: BankPaymentNotificationDTO; isDuplicate: boolean }> {
-  const rows = await readNotificationRows();
-  const existing = rows.find((n) => n.rawContentHash === input.rawContentHash);
-  if (existing) {
-    return { notification: existing, isDuplicate: true };
+  const ctx = assertStoreMode();
+  if (ctx.mode === "sandbox") {
+    // Synchronously check & prepend so concurrent Promise.all inserts never overwrite each other
+    const list = getSandboxState().pagoMovil.notifications;
+    const existing = list.find((n) => n.rawContentHash === input.rawContentHash);
+    if (existing) {
+      return { notification: existing, isDuplicate: true };
+    }
+    const created: BankPaymentNotificationDTO = {
+      ...input,
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    list.unshift(created);
+    if (list.length > 500) list.length = 500;
+    return { notification: created, isDuplicate: false };
   }
 
-  const created: BankPaymentNotificationDTO = {
+  const rowKey = `${NOTIF_ROW_PREFIX}${input.rawContentHash}`;
+  const created: StoredNotificationValue = {
     ...input,
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
+    _rev: 1,
   };
 
-  await writeNotificationRows([created, ...rows]);
-  return { notification: created, isDuplicate: false };
+  // Atomic INSERT against unique PK `pm_notif:<rawContentHash>`: disjoint across different notifications & deduplicated across identical concurrent webhooks
+  const { error } = await ctx.admin.from("store_settings").insert({
+    key: rowKey,
+    value: created,
+  });
+
+  if (!error) {
+    return { notification: stripNotifRev(created), isDuplicate: false };
+  }
+
+  if (isPgUniqueViolation(error)) {
+    const existing = await readSettingValue<StoredNotificationValue>(rowKey);
+    if (existing) {
+      return { notification: stripNotifRev(existing), isDuplicate: true };
+    }
+  }
+
+  throw error;
+}
+
+async function getWebhookLockOwnerOrderId(
+  gateway: string,
+  eventId: string
+): Promise<{ orderId: string | null; notificationId: string | null } | null> {
+  const ctx = assertStoreMode();
+  if (ctx.mode === "sandbox") {
+    const found = getSandboxState().webhookEvents.find(
+      (w) => w.gateway === gateway && w.eventId === eventId
+    );
+    if (!found) return null;
+    const notifId =
+      typeof (found.payload as { notificationId?: unknown })?.notificationId ===
+      "string"
+        ? String((found.payload as { notificationId: string }).notificationId)
+        : null;
+    return { orderId: found.orderId ?? null, notificationId: notifId };
+  }
+
+  const { data } = await ctx.admin
+    .from("webhook_events")
+    .select("order_id, payload")
+    .eq("gateway", gateway)
+    .eq("event_id", eventId)
+    .maybeSingle();
+
+  if (!data) return null;
+  const payload = (data.payload as { notificationId?: unknown } | null) ?? null;
+  return {
+    orderId: data.order_id ? String(data.order_id) : null,
+    notificationId:
+      typeof payload?.notificationId === "string" ? payload.notificationId : null,
+  };
 }
 
 export async function claimNotificationForOrder(params: {
@@ -547,11 +822,10 @@ export async function claimNotificationForOrder(params: {
   | { ok: true; notification: BankPaymentNotificationDTO }
   | { ok: false; reason: "DUPLICATE_REFERENCE" | "ALREADY_CLAIMED" | "NOT_FOUND" }
 > {
-  const rows = await readNotificationRows();
-  const idx = rows.findIndex((n) => n.id === params.notificationId);
-  if (idx === -1) return { ok: false, reason: "NOT_FOUND" };
+  const initial = await getNotificationRecordById(params.notificationId);
+  if (!initial) return { ok: false, reason: "NOT_FOUND" };
 
-  const target = rows[idx];
+  const target = initial.dto;
   if (target.status === "MATCHED") {
     if (target.matchedOrderId === params.orderId) {
       return { ok: true, notification: target };
@@ -562,12 +836,12 @@ export async function claimNotificationForOrder(params: {
     return { ok: false, reason: "ALREADY_CLAIMED" };
   }
 
-  // Postgres unique lock (`unique (gateway, event_id)` on `webhook_events`) prevents reusing any reference across orders
+  // Lock 1: unique Postgres lock (`unique (gateway, event_id)`) prevents reusing a bank reference+amount across orders
   const refNorm = normalizeReferenceDigits(params.referenceFull);
-  const claimEventId = `${params.receiverAccountId ?? "default"}:${refNorm}:${params.amountBsCents}`;
-  const lock = await recordWebhookEventOnce({
+  const refEventId = `${params.receiverAccountId ?? "default"}:${refNorm}:${params.amountBsCents}`;
+  const refLock = await recordWebhookEventOnce({
     gateway: "pagomovil_ref_claim",
-    eventId: claimEventId,
+    eventId: refEventId,
     eventType: "reference.claimed",
     orderId: params.orderId,
     gatewayCheckoutId: `pm_${params.orderId}`,
@@ -580,34 +854,125 @@ export async function claimNotificationForOrder(params: {
     status: "processed",
   });
 
-  if (lock.isDuplicate) {
-    // Allow idempotent re-entry if already claimed by this exact same order
-    if (target.matchedOrderId === params.orderId) {
-      return { ok: true, notification: target };
-    }
-    const existingClaim = rows.find(
-      (n) =>
-        n.matchedOrderId === params.orderId &&
-        n.status === "MATCHED" &&
-        referencesMatch(n.referenceFull, refNorm)
+  if (refLock.isDuplicate) {
+    const owner = await getWebhookLockOwnerOrderId(
+      "pagomovil_ref_claim",
+      refEventId
     );
-    if (existingClaim) {
-      return { ok: true, notification: existingClaim };
+    if (owner?.orderId !== params.orderId) {
+      return { ok: false, reason: "DUPLICATE_REFERENCE" };
     }
-    return { ok: false, reason: "DUPLICATE_REFERENCE" };
+    if (
+      owner.notificationId &&
+      owner.notificationId !== params.notificationId
+    ) {
+      return { ok: false, reason: "DUPLICATE_REFERENCE" };
+    }
+    const ownMatched = (await getMatchedNotificationsForOrder(params.orderId)).find(
+      (n) => referencesMatch(n.referenceFull, refNorm)
+    );
+    if (ownMatched && ownMatched.id === params.notificationId) {
+      return { ok: true, notification: ownMatched };
+    }
+  }
+
+  // Lock 2: unique Postgres lock per notification ID prevents two concurrent orders from ever claiming the same push
+  const notifLock = await recordWebhookEventOnce({
+    gateway: "pagomovil_notif_claim",
+    eventId: params.notificationId,
+    eventType: "notification.claimed",
+    orderId: params.orderId,
+    gatewayCheckoutId: `pm_${params.orderId}`,
+    signatureValid: true,
+    payload: {
+      notificationId: params.notificationId,
+      referenceFull: refNorm,
+      amountBsCents: params.amountBsCents,
+    },
+    status: "processed",
+  });
+
+  if (notifLock.isDuplicate) {
+    const owner = await getWebhookLockOwnerOrderId(
+      "pagomovil_notif_claim",
+      params.notificationId
+    );
+    if (owner?.orderId !== params.orderId) {
+      return { ok: false, reason: "ALREADY_CLAIMED" };
+    }
   }
 
   const now = new Date().toISOString();
-  const updated: BankPaymentNotificationDTO = {
+  const ctx = assertStoreMode();
+  if (ctx.mode === "sandbox") {
+    // Re-read live index after async webhook lock calls so concurrent claims never overwrite other notifications
+    const list = getSandboxState().pagoMovil.notifications;
+    const liveIdx = list.findIndex((n) => n.id === params.notificationId);
+    if (liveIdx === -1) return { ok: false, reason: "NOT_FOUND" };
+    const live = list[liveIdx];
+    if (live.status === "MATCHED") {
+      return live.matchedOrderId === params.orderId
+        ? { ok: true, notification: live }
+        : { ok: false, reason: "ALREADY_CLAIMED" };
+    }
+    if (live.status !== "UNMATCHED" && live.status !== "UNPARSED") {
+      return { ok: false, reason: "ALREADY_CLAIMED" };
+    }
+    const updated: BankPaymentNotificationDTO = {
+      ...live,
+      status: "MATCHED",
+      matchedOrderId: params.orderId,
+      matchedAt: now,
+    };
+    list[liveIdx] = updated;
+    return { ok: true, notification: updated };
+  }
+
+  const rowKey = `${NOTIF_ROW_PREFIX}${target.rawContentHash}`;
+  const updated: StoredNotificationValue = {
     ...target,
     status: "MATCHED",
     matchedOrderId: params.orderId,
     matchedAt: now,
+    _rev: initial.rev + 1,
   };
-  const next = [...rows];
-  next[idx] = updated;
-  await writeNotificationRows(next);
-  return { ok: true, notification: updated };
+
+  if (!initial.hasSeparateRow) {
+    const { error } = await ctx.admin.from("store_settings").insert({
+      key: rowKey,
+      value: updated,
+    });
+    if (!error) {
+      return { ok: true, notification: stripNotifRev(updated) };
+    }
+    if (!isPgUniqueViolation(error)) throw error;
+  }
+
+  const { data: casData, error: casErr } = await ctx.admin
+    .from("store_settings")
+    .update({ value: updated })
+    .eq("key", rowKey)
+    .contains("value", { status: target.status })
+    .select("value")
+    .maybeSingle();
+
+  if (casErr) throw casErr;
+  if (casData?.value) {
+    return {
+      ok: true,
+      notification: stripNotifRev(casData.value as StoredNotificationValue),
+    };
+  }
+
+  const reread = await readSettingValue<StoredNotificationValue>(rowKey);
+  if (
+    reread &&
+    reread.status === "MATCHED" &&
+    reread.matchedOrderId === params.orderId
+  ) {
+    return { ok: true, notification: stripNotifRev(reread) };
+  }
+  return { ok: false, reason: "ALREADY_CLAIMED" };
 }
 
 export async function markNotificationStatus(
@@ -615,19 +980,34 @@ export async function markNotificationStatus(
   status: BankPaymentNotificationDTO["status"],
   matchedOrderId?: string | null
 ): Promise<void> {
-  const rows = await readNotificationRows();
+  const ctx = assertStoreMode();
   const now = new Date().toISOString();
-  const next = rows.map((n) =>
-    n.id === notificationId
-      ? {
-          ...n,
-          status,
-          matchedOrderId: matchedOrderId ?? n.matchedOrderId,
-          matchedAt: status === "MATCHED" ? now : n.matchedAt,
-        }
-      : n
-  );
-  await writeNotificationRows(next);
+  if (ctx.mode === "sandbox") {
+    const list = getSandboxState().pagoMovil.notifications;
+    const idx = list.findIndex((n) => n.id === notificationId);
+    if (idx === -1) return;
+    const cur = list[idx];
+    list[idx] = {
+      ...cur,
+      status,
+      matchedOrderId: matchedOrderId ?? cur.matchedOrderId,
+      matchedAt: status === "MATCHED" ? now : cur.matchedAt,
+    };
+    return;
+  }
+
+  const rec = await getNotificationRecordById(notificationId);
+  if (!rec) return;
+
+  const rowKey = `${NOTIF_ROW_PREFIX}${rec.dto.rawContentHash}`;
+  const nextVal: StoredNotificationValue = {
+    ...rec.dto,
+    status,
+    matchedOrderId: matchedOrderId ?? rec.dto.matchedOrderId,
+    matchedAt: status === "MATCHED" ? now : rec.dto.matchedAt,
+    _rev: rec.rev + 1,
+  };
+  await writeSettingValue(rowKey, nextVal);
 }
 
 export interface CandidateMatchResult {
@@ -769,30 +1149,8 @@ export async function findCandidateNotificationsForOrder(params: {
 // PER-ORDER PAGO MOVIL REPORT STATE
 // ============================================================================
 
-async function readAllOrderReports(): Promise<Record<string, OrderPagoMovilReport>> {
-  const ctx = assertStoreMode();
-  if (ctx.mode === "sandbox") {
-    return getSandboxState().pagoMovil.orderReports;
-  }
-  const saved = await readSettingValue<{
-    reports?: Record<string, OrderPagoMovilReport>;
-  }>(REPORTS_KEY);
-  return saved?.reports && typeof saved.reports === "object" ? saved.reports : {};
-}
-
-export async function getOrderPagoMovilReport(
-  orderId: string
-): Promise<OrderPagoMovilReport | null> {
-  const all = await readAllOrderReports();
-  return all[orderId] ?? null;
-}
-
-export async function saveOrderPagoMovilReport(
-  orderId: string,
-  patch: Partial<OrderPagoMovilReport>
-): Promise<OrderPagoMovilReport> {
-  const all = await readAllOrderReports();
-  const prev = all[orderId] ?? {
+function defaultEmptyOrderReport(orderId: string): OrderPagoMovilReport {
+  return {
     orderId,
     amountDueBsCents: null,
     rateExpiresAt: null,
@@ -803,31 +1161,134 @@ export async function saveOrderPagoMovilReport(
     lastErrorCode: null,
     lastErrorMessage: null,
   };
+}
 
-  const nextReport: OrderPagoMovilReport = {
-    ...prev,
-    ...patch,
-    orderId,
-  };
-
+async function readAllOrderReports(): Promise<Record<string, OrderPagoMovilReport>> {
   const ctx = assertStoreMode();
   if (ctx.mode === "sandbox") {
-    getSandboxState().pagoMovil.orderReports[orderId] = nextReport;
+    return getSandboxState().pagoMovil.orderReports;
+  }
+  const [perRowRes, legacy] = await Promise.all([
+    ctx.admin
+      .from("store_settings")
+      .select("key, value, updated_at")
+      .like("key", `${REPORT_ROW_PREFIX}%`)
+      .order("updated_at", { ascending: false })
+      .limit(500),
+    readSettingValue<{ reports?: Record<string, OrderPagoMovilReport> }>(
+      REPORTS_KEY
+    ),
+  ]);
+
+  const merged: Record<string, OrderPagoMovilReport> = {
+    ...(legacy?.reports && typeof legacy.reports === "object"
+      ? legacy.reports
+      : {}),
+  };
+  for (const row of perRowRes.data ?? []) {
+    const raw = row.value as StoredOrderReportValue | null;
+    if (raw?.orderId) {
+      merged[raw.orderId] = stripReportRev(raw);
+    }
+  }
+  return merged;
+}
+
+export async function getOrderPagoMovilReport(
+  orderId: string
+): Promise<OrderPagoMovilReport | null> {
+  const ctx = assertStoreMode();
+  if (ctx.mode === "sandbox") {
+    return getSandboxState().pagoMovil.orderReports[orderId] ?? null;
+  }
+  const raw = await readSettingValue<StoredOrderReportValue>(
+    `${REPORT_ROW_PREFIX}${orderId}`
+  );
+  if (raw?.orderId) {
+    return stripReportRev(raw);
+  }
+  const legacy = await readSettingValue<{
+    reports?: Record<string, OrderPagoMovilReport>;
+  }>(REPORTS_KEY);
+  return legacy?.reports?.[orderId] ?? null;
+}
+
+export async function saveOrderPagoMovilReport(
+  orderId: string,
+  patch: Partial<OrderPagoMovilReport>
+): Promise<OrderPagoMovilReport> {
+  const ctx = assertStoreMode();
+  if (ctx.mode === "sandbox") {
+    const map = getSandboxState().pagoMovil.orderReports;
+    const nextReport: OrderPagoMovilReport = {
+      ...(map[orderId] ?? defaultEmptyOrderReport(orderId)),
+      ...patch,
+      orderId,
+    };
+    map[orderId] = nextReport;
     return nextReport;
   }
 
-  // Prune reports older than 30 days to keep store_settings lean
-  const thirtyDaysAgoMs = Date.now() - 30 * 24 * 60 * 60_000;
-  const pruned: Record<string, OrderPagoMovilReport> = {};
-  for (const [k, v] of Object.entries(all)) {
-    const ts = v.reportedAt ? Date.parse(v.reportedAt) : Date.now();
-    if (k === orderId || !Number.isFinite(ts) || ts >= thirtyDaysAgoMs) {
-      pruned[k] = v;
+  // Disjoint row `pm_report:<orderId>` eliminates cross-order contention; CAS retries serialize same-order updates safely
+  const rowKey = `${REPORT_ROW_PREFIX}${orderId}`;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const { data: existingRow } = await ctx.admin
+      .from("store_settings")
+      .select("value, updated_at")
+      .eq("key", rowKey)
+      .maybeSingle();
+
+    const existingVal = existingRow?.value as StoredOrderReportValue | null;
+    const base =
+      existingVal ??
+      (
+        await readSettingValue<{
+          reports?: Record<string, OrderPagoMovilReport>;
+        }>(REPORTS_KEY)
+      )?.reports?.[orderId] ??
+      defaultEmptyOrderReport(orderId);
+
+    const prevRev = typeof existingVal?._rev === "number" ? existingVal._rev : 0;
+    const mergedDto: OrderPagoMovilReport = {
+      ...stripReportRev(base),
+      ...patch,
+      orderId,
+    };
+    const nextStored: StoredOrderReportValue = {
+      ...mergedDto,
+      _rev: prevRev + 1,
+    };
+
+    if (!existingRow) {
+      const { error: insErr } = await ctx.admin.from("store_settings").insert({
+        key: rowKey,
+        value: nextStored,
+      });
+      if (!insErr) return mergedDto;
+      if (isPgUniqueViolation(insErr)) continue;
+      throw insErr;
     }
+
+    let query = ctx.admin
+      .from("store_settings")
+      .update({ value: nextStored })
+      .eq("key", rowKey);
+
+    query =
+      typeof existingVal?._rev === "number"
+        ? query.contains("value", { _rev: prevRev })
+        : query.eq("updated_at", String(existingRow.updated_at));
+
+    const { data: updData, error: updErr } = await query
+      .select("key")
+      .maybeSingle();
+    if (updErr) throw updErr;
+    if (updData) return mergedDto;
   }
-  pruned[orderId] = nextReport;
-  await writeSettingValue(REPORTS_KEY, { reports: pruned });
-  return nextReport;
+
+  throw new Error(
+    `Concurrent update conflict saving Pago Móvil report for order ${orderId}`
+  );
 }
 
 export async function findOrdersWaitingForBankNotification(params: {
@@ -838,6 +1299,7 @@ export async function findOrdersWaitingForBankNotification(params: {
   orders: OrderDTO[];
 }): Promise<Array<{ order: OrderDTO; report: OrderPagoMovilReport }>> {
   const allReports = await readAllOrderReports();
+  const notificationRows = await readNotificationRows();
   const results: Array<{ order: OrderDTO; report: OrderPagoMovilReport }> = [];
 
   for (const order of params.orders) {
@@ -859,8 +1321,11 @@ export async function findOrdersWaitingForBankNotification(params: {
     ) {
       continue;
     }
-    const expectedBs =
-      report.amountDueBsCents ?? order.totalBsCents ?? 0;
+    const expectedBs = Math.max(
+      0,
+      (report.amountDueBsCents ?? order.totalBsCents ?? 0) -
+        sumMatchedBsForOrderRows(notificationRows, order.id)
+    );
     if (expectedBs <= 0) continue;
     if (params.amountBsCents + params.toleranceBsCents < expectedBs) {
       continue;
@@ -878,13 +1343,22 @@ export async function findOrdersWaitingWithInsufficientAmount(params: {
   senderBankCode?: string | null;
   orders: OrderDTO[];
 }): Promise<
-  Array<{ order: OrderDTO; report: OrderPagoMovilReport; expectedBsCents: number }>
+  Array<{
+    order: OrderDTO;
+    report: OrderPagoMovilReport;
+    /** Full order amount in Bs. */
+    expectedBsCents: number;
+    /** Bs still missing (full amount minus already-claimed partial payments). */
+    remainingBsCents: number;
+  }>
 > {
   const allReports = await readAllOrderReports();
+  const notificationRows = await readNotificationRows();
   const results: Array<{
     order: OrderDTO;
     report: OrderPagoMovilReport;
     expectedBsCents: number;
+    remainingBsCents: number;
   }> = [];
 
   for (const order of params.orders) {
@@ -912,8 +1386,13 @@ export async function findOrdersWaitingWithInsufficientAmount(params: {
         ? Math.round((order.amountDueCents * order.bsRateCents) / 100)
         : order.totalBsCents ?? 0);
     if (expectedBsCents <= 0) continue;
-    if (params.amountBsCents + params.toleranceBsCents < expectedBsCents) {
-      results.push({ order, report, expectedBsCents });
+    const remainingBsCents = Math.max(
+      0,
+      expectedBsCents - sumMatchedBsForOrderRows(notificationRows, order.id)
+    );
+    if (remainingBsCents <= 0) continue;
+    if (params.amountBsCents + params.toleranceBsCents < remainingBsCents) {
+      results.push({ order, report, expectedBsCents, remainingBsCents });
     }
   }
 

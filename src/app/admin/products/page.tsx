@@ -1,6 +1,7 @@
 import React, { Suspense } from "react";
 import { connection } from "next/server";
 import { ProductsConsole } from "@/components/admin/products-console";
+import { fetchLiveVenezuelaRates } from "@/lib/server/exchange-rates";
 import {
   getBsRateCents,
   getSupplierPricingPolicy,
@@ -30,6 +31,7 @@ async function AdminProductsContent({
     bsRateCents,
     pricingPolicy,
     syncState,
+    liveRates,
   ] = await Promise.all([
     searchParams,
     listCatalog(true),
@@ -40,6 +42,7 @@ async function AdminProductsContent({
     getBsRateCents(),
     getSupplierPricingPolicy(),
     getSupplierSyncState(),
+    fetchLiveVenezuelaRates().catch(() => null),
   ]);
   const reloadlyEnabled = Boolean(
     providers.find((p) => p.id === "reloadly")?.enabled
@@ -61,6 +64,11 @@ async function AdminProductsContent({
       fazerCardsEnabled={fazerCardsEnabled}
       fazerCardsBalanceCents={fazerCardsBalanceCents}
       bsRateCents={bsRateCents}
+      usdtP2pRateCents={
+        liveRates?.binanceP2pCents ??
+        liveRates?.replacementUsdtRateCents ??
+        bsRateCents
+      }
       initialProductId={sp.product ?? null}
       initialPricingPolicy={pricingPolicy}
       initialSyncState={syncState}

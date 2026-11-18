@@ -2,6 +2,7 @@
 
 import React, { useMemo, useState } from "react";
 import Link from "next/link";
+import { BsExchangeDeskCard } from "@/components/admin/bs-exchange-desk-card";
 import { SupplierPortfolioList } from "@/components/admin/supplier-portfolio-list";
 import {
   TreasuryMovementModal,
@@ -15,6 +16,8 @@ import {
   summarizeOrdersMetrics,
 } from "@/lib/server/sales-metrics";
 import type {
+  BsRateAutoSyncPolicy,
+  LiveVenezuelaRatesSnapshot,
   OrderDTO,
   SupplierPortfolioRow,
   TreasuryMovementDTO,
@@ -111,6 +114,8 @@ export function OverviewConsole({
   actualItemCostCents,
   matchedBsByOrder,
   bsRateCents,
+  bsRatePolicy = null,
+  liveRates = null,
   includeTestOrders,
   unreviewedPagoMovilCount,
   historicalTestCandidateCount,
@@ -122,6 +127,8 @@ export function OverviewConsole({
   actualItemCostCents: Record<string, number>;
   matchedBsByOrder: Record<string, number | null>;
   bsRateCents: number | null;
+  bsRatePolicy?: BsRateAutoSyncPolicy | null;
+  liveRates?: LiveVenezuelaRatesSnapshot | null;
   includeTestOrders: boolean;
   unreviewedPagoMovilCount: number;
   historicalTestCandidateCount: number;
@@ -660,21 +667,23 @@ export function OverviewConsole({
                 </div>
                 <div className="min-w-0">
                   <div className="text-xs font-bold text-white truncate">
-                    Pago Móvil (Bancamiga Bs)
+                    Pago Móvil (Bs en Banco)
                   </div>
-                  <div className="text-[11px] text-slate-400 truncate">
-                    {bsRateCents
-                      ? `Tasa ${(bsRateCents / 100).toFixed(2)} Bs/$`
-                      : "Sin tasa activa"}
+                  <div className="text-[11px] text-slate-400 truncate font-mono tabular-nums">
+                    {position.weightedBookBsRateCents
+                      ? `Cobrado a Bs ${(position.weightedBookBsRateCents / 100).toFixed(2)}/$ (congelado)`
+                      : "Se congela a la tasa de cada cobro"}
                   </div>
                 </div>
               </div>
-              <div className="text-right shrink-0">
-                <div className="text-sm font-black font-mono text-white">
-                  {formatCents(position.pagomovilBalanceUsdCents)}
-                </div>
-                <div className="text-[11px] font-mono text-sky-300">
+              <div className="text-right shrink-0 font-mono tabular-nums">
+                <div className="text-sm font-black text-white">
                   {formatBsCents(position.pagomovilBalanceBsCents)}
+                </div>
+                <div className="text-[11px] text-sky-300">
+                  {position.pagomovilBalanceBsCents > 0
+                    ? `Hoy ≈ ${formatCents(position.pagomovilMarkToMarketUsdtCents)} USDT`
+                    : formatCents(position.pagomovilBalanceUsdCents)}
                 </div>
               </div>
             </div>
@@ -877,12 +886,34 @@ export function OverviewConsole({
         </section>
       </div>
 
+      {/* Dedicated, Comfortable Space for Bolívares Rate (+% Cushion) & P2P Balance */}
+      <BsExchangeDeskCard
+        bsRateCents={bsRateCents}
+        initialPolicy={bsRatePolicy}
+        initialLiveRates={liveRates}
+        position={position}
+        onOpenSwapModal={() =>
+          openModal({
+            movementType: "INTERNAL_TRANSFER",
+            sourceAccount: "pagomovil",
+            targetAccount: "zenobank",
+          })
+        }
+      />
+
       {/* Quick Movement Modal */}
       <TreasuryMovementModal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         suppliers={suppliers}
         preset={modalPreset}
+        receiverBalances={{
+          zenobankUsdCents: position.zenobankBalanceUsdCents,
+          pagomovilUsdCents: position.pagomovilBalanceUsdCents,
+          pagomovilBsCents: position.pagomovilBalanceBsCents,
+          weightedBookBsRateCents: position.weightedBookBsRateCents,
+          liveP2pRateCents: position.replacementUsdtRateCents,
+        }}
       />
     </div>
   );

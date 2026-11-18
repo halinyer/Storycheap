@@ -1,4 +1,5 @@
 import { resolveBrandTheme } from "@/lib/brand-theme";
+import { formatBsNumber } from "@/lib/currency";
 import type { CartItem, OrderItemDTO, Region } from "@/types";
 
 const VALID_REGIONS: ReadonlySet<string> = new Set([
@@ -8,12 +9,7 @@ const VALID_REGIONS: ReadonlySet<string> = new Set([
   "Europa",
 ]);
 
-export function formatBsNumber(cents: number): string {
-  return (cents / 100).toLocaleString("es-VE", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
+export { formatBsNumber };
 
 export function formatCountdown(
   targetIso: string | null | undefined,

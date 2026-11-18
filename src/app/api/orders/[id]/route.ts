@@ -1,12 +1,17 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServerSessionUser } from "@/lib/server/auth";
-import { isZenoBankConfigured } from "@/lib/server/env";
 import {
+  isBinancePayConfigured,
+  isZenoBankConfigured,
+} from "@/lib/server/env";
+import {
+  autoReconcileBinancePayForOrder,
   reconcileGatewaySession,
   syncCentralOneOrderProgress,
 } from "@/lib/server/fulfillment";
 import { hasOrderAccessCookie } from "@/lib/server/order-access";
 import { getPaymentGateway } from "@/lib/server/payments";
+import { reconcileWaitingPagoMovilOrder } from "@/lib/server/payments/pagomovil-bot";
 import {
   getOrderById,
   getUserCreditBalanceCents,
@@ -41,34 +46,69 @@ export async function GET(
   }
 
   // Opportunistic live reconciliation when returning from ZenoBank (works locally & as webhook fallback)
-  const shouldPollZeno =
+  const isEligibleZenoState =
     order.paymentGateway === "zenobank" &&
-    Boolean(order.gatewayCheckoutId) &&
-    isZenoBankConfigured() &&
     (order.status === "PENDING_PAYMENT" ||
+      order.status === "CREATED" ||
       (order.status === "EXPIRED" &&
-        order.paidCents === 0 &&
+        order.paidCents < order.amountDueCents &&
         Date.now() - Date.parse(order.createdAt) < 24 * 60 * 60_000));
 
-  if (shouldPollZeno && order.gatewayCheckoutId) {
+  if (isEligibleZenoState) {
     const now = Date.now();
     const prev = lastPollReconcileAt.get(order.id) ?? 0;
     if (now - prev >= 4_000) {
       lastPollReconcileAt.set(order.id, now);
-      try {
-        const gw = getPaymentGateway("zenobank");
-        const liveSession = await gw.getCheckout(order.gatewayCheckoutId);
-        const rec = await reconcileGatewaySession({
-          order,
-          session: liveSession,
-          source: "order_poll_reconcile",
-        });
-        if (rec.reconciled) {
-          order = (await getOrderById(id)) ?? order;
+      let reconciled = false;
+
+      if (order.gatewayCheckoutId && isZenoBankConfigured()) {
+        try {
+          const gw = getPaymentGateway("zenobank");
+          const liveSession = await gw.getCheckout(order.gatewayCheckoutId);
+          const rec = await reconcileGatewaySession({
+            order,
+            session: liveSession,
+            source: "order_poll_reconcile",
+          });
+          if (rec.reconciled) {
+            reconciled = true;
+            order = (await getOrderById(id)) ?? order;
+          }
+        } catch {
+          // Non-blocking: fall through to direct Binance Pay check if ZenoBank polling temporarily fails
         }
-      } catch {
-        // Non-blocking: return latest known order state if ZenoBank polling temporarily fails
       }
+
+      if (!reconciled && isBinancePayConfigured()) {
+        try {
+          const autoRes = await autoReconcileBinancePayForOrder({
+            orderId: order.id,
+            actorUser: sessionUser,
+            source: "auto_poll_reconcile",
+            minAgeMs: order.status === "EXPIRED" ? 0 : 8_000,
+          });
+          if (autoRes.matched) {
+            order = autoRes.order;
+          }
+        } catch {
+          // Non-blocking
+        }
+      }
+    }
+  }
+
+  // Opportunistic reconciliation for waiting Pago Móvil orders (heals parallel verify/ingest races)
+  if (
+    (order.paymentGateway === "pagomovil" || order.paymentGateway === "pablito") &&
+    (order.status === "PENDING_PAYMENT" || order.status === "CREATED")
+  ) {
+    try {
+      const rec = await reconcileWaitingPagoMovilOrder(order.id, sessionUser);
+      if (rec.reconciled) {
+        order = (await getOrderById(id)) ?? order;
+      }
+    } catch {
+      // Non-blocking
     }
   }
 
