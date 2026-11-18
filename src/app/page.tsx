@@ -5,6 +5,7 @@ import { CatalogFilters } from "@/components/storefront/catalog-filters";
 import { GiftCardGrid } from "@/components/storefront/gift-card-grid";
 import { HeroSection } from "@/components/storefront/hero-section";
 import { PayYourWay } from "@/components/storefront/pay-your-way";
+import { PromoCountdownBanner } from "@/components/storefront/promo-countdown-banner";
 import { getBsRateCents, listCatalog } from "@/lib/server/repository";
 import { ensureFreshSupplierCatalogPrices } from "@/lib/server/supplier-sync";
 import { isStorePreviewMode } from "@/lib/server/env";
@@ -28,6 +29,7 @@ async function CatalogSectionLoader() {
 export default function HomePage() {
   return (
     <div className="min-h-screen pb-16">
+      <PromoCountdownBanner />
       <HeroSection />
       <PayYourWay variant="strip" />
 
