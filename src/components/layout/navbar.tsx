@@ -37,7 +37,7 @@ const SUBNAV_ITEMS: Array<{
   { label: "Streaming y Música", category: "streaming" },
   { label: "Apple y Tiendas USA", category: "shopping" },
   { label: "Cripto USDT", category: "crypto" },
-  { label: "Mi Bóveda", href: "/account" },
+  { label: "Tus Pedidos", href: "/account" },
   { label: "Soporte y Ayuda", href: "/ayuda" },
 ];
 
@@ -312,7 +312,7 @@ export function Navbar() {
                     className="flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-slate-200 hover:text-white hover:bg-white/[0.06] transition-colors"
                   >
                     <KeyRound className="w-4 h-4 text-sky-400" />
-                    <span>Mi Bóveda y Códigos</span>
+                    <span>Tus Pedidos y Códigos</span>
                   </Link>
 
                   <Link

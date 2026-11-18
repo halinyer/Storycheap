@@ -181,7 +181,7 @@ export default function AccountPage() {
       <div className="rounded-3xl apple-glass p-6 sm:p-8 flex flex-wrap items-center justify-between gap-6">
         <div>
           <span className="text-[11px] font-black uppercase tracking-wider text-sky-400">
-            Mi Cuenta • Bóveda Segura
+            Mi Cuenta • Tus Pedidos
           </span>
           <h1 className="text-2xl sm:text-3xl font-black text-white mt-1">
             {sessionUser?.email ?? "Cargando..."}

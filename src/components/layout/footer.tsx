@@ -33,7 +33,7 @@ export function Footer() {
               </li>
               <li>
                 <Link href="/account" className="hover:text-white transition-colors">
-                  Mis Órdenes y Bóveda de Códigos
+                  Tus Pedidos y Códigos
                 </Link>
               </li>
               <li>
