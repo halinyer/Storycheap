@@ -9,6 +9,12 @@ import { formatCents } from "@/lib/catalog-seed";
 import { formatBsFromUsdCents, formatBsNumber } from "@/lib/currency";
 import { resolveVolumeTierPrice } from "@/lib/volume-discounts";
 import {
+  closeZenoWindow,
+  navigateZenoWindow,
+  openAndTrackZenoWindow,
+  preOpenZenoWindow,
+} from "@/lib/zenobank-window";
+import {
   ArrowLeft,
   CheckCircle2,
   Coins,
@@ -26,11 +32,9 @@ import { toast } from "sonner";
 interface PagoMovilAvailability {
   enabled: boolean;
   configured: boolean;
+  bdvApiConfigured: boolean;
   available: boolean;
   bsRateCents: number | null;
-  watchdogOnline: boolean;
-  watchdogRequired: boolean;
-  activeDevices: number;
   receiverBankName: string | null;
   receiverAccountType: "natural" | "juridical" | null;
 }
@@ -99,6 +103,9 @@ export default function CheckoutPage() {
       ? Math.min(Math.max(0, creditBalanceCents), cartSubtotalCents)
       : 0;
   const amountDueCents = Math.max(0, cartSubtotalCents - usableCreditCents);
+  const hasDirectTopupItems = cartItems.some((it) =>
+    Boolean(it.requiresTarget || it.targetPayload)
+  );
 
   const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,10 +120,19 @@ export default function CheckoutPage() {
     }
     if (!acceptedRegionPolicy) {
       toast.error(
-        "Por favor confirma que verificaste la región compatible de tus tarjetas."
+        hasDirectTopupItems
+          ? "Por favor confirma que verificaste el ID/servidor de recarga y la región de tus productos."
+          : "Por favor confirma que verificaste la región compatible de tus tarjetas."
       );
       return;
     }
+
+    // Open the ZenoBank child tab synchronously on user click (without `noopener`)
+    // so StoryCheap can stay alive on /order/[id] and auto-redirect the ZenoBank
+    // window straight to the receipt as soon as payment or Binance Pay overpayment settles.
+    const shouldPreOpenZeno =
+      amountDueCents > 0 && paymentGateway === "zenobank";
+    const preOpenedZenoWin = shouldPreOpenZeno ? preOpenZenoWindow() : null;
 
     setSubmitting(true);
     try {
@@ -135,6 +151,10 @@ export default function CheckoutPage() {
               variantId: it.variantId,
               quantity: it.quantity,
               expectedUnitPriceCents: tier.effectiveUnitPriceCents,
+              ...(it.targetPayload ? { targetPayload: it.targetPayload } : {}),
+              ...(it.verifiedPlayerName
+                ? { verifiedPlayerName: it.verifiedPlayerName }
+                : {}),
             };
           }),
           applyStoreCredit: Boolean(sessionUser && applyCredit),
@@ -155,6 +175,7 @@ export default function CheckoutPage() {
       }
 
       if (!res.ok || !data.orderId) {
+        closeZenoWindow(preOpenedZenoWin);
         throw new Error(
           data.error ?? "No se pudo iniciar tu orden. Intenta nuevamente."
         );
@@ -174,30 +195,33 @@ export default function CheckoutPage() {
       void refreshSession();
 
       if (targetMode === "vault" || !data.checkoutUrl) {
+        closeZenoWindow(preOpenedZenoWin);
         router.push(`/order/${data.orderId}`);
         return;
       }
 
       // If sandbox/local hosted URL (/pay/pagomovil/[id]), navigate via Next router;
-      // if external ZenoBank URL, open ZenoBank in a new tab while keeping /order/[id] live to auto-reconcile Binance Pay overpayments
+      // if external ZenoBank URL, load it in our tracked child tab while keeping /order/[id] live
+      // so Binance Pay overpayments & exact payments automatically redirect the ZenoBank tab back.
       if (data.checkoutUrl.startsWith("/")) {
+        closeZenoWindow(preOpenedZenoWin);
         router.push(data.checkoutUrl);
       } else if (data.checkoutUrl.startsWith(window.location.origin)) {
+        closeZenoWindow(preOpenedZenoWin);
         const rel = data.checkoutUrl.slice(window.location.origin.length);
         router.push(rel);
       } else {
-        const popup = window.open(
-          data.checkoutUrl,
-          "_blank",
-          "noopener,noreferrer"
+        const opened = navigateZenoWindow(
+          data.orderId,
+          preOpenedZenoWin,
+          data.checkoutUrl
         );
-        if (popup) {
-          router.push(`/order/${data.orderId}?zenoOpened=1`);
-        } else {
-          window.location.assign(data.checkoutUrl);
-        }
+        router.push(
+          `/order/${data.orderId}?${opened ? "zenoOpened=1" : "zenoPending=1"}`
+        );
       }
     } catch (err) {
+      closeZenoWindow(preOpenedZenoWin);
       toast.error(
         err instanceof Error ? err.message : "Error inesperado en el checkout"
       );
@@ -236,17 +260,31 @@ export default function CheckoutPage() {
           </div>
           <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
             {(isZeno || isPagoMovil) && redirecting.checkoutUrl && (
-              <a
-                href={redirecting.checkoutUrl}
-                className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs transition-colors"
-              >
-                <span>
-                  {isPagoMovil
-                    ? "Abrir ventana Pago Móvil"
-                    : "Abrir ZenoBank ahora"}
-                </span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
+              isZeno ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (redirecting.checkoutUrl) {
+                      openAndTrackZenoWindow(
+                        redirecting.orderId,
+                        redirecting.checkoutUrl
+                      );
+                    }
+                  }}
+                  className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs transition-colors"
+                >
+                  <span>Abrir ZenoBank ahora</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </button>
+              ) : (
+                <a
+                  href={redirecting.checkoutUrl}
+                  className="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-white hover:bg-sky-300 text-slate-950 font-black text-xs transition-colors"
+                >
+                  <span>Abrir ventana Pago Móvil</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              )
             )}
             <Link
               href={`/order/${redirecting.orderId}`}
@@ -470,7 +508,7 @@ export default function CheckoutPage() {
                       </div>
                       <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
                         {pmAvailability?.available
-                          ? `Transferencia directa a ${pmAvailability.receiverBankName ?? "Pago Móvil"} con verificación automática 24/7.${
+                          ? `Transferencia directa a ${pmAvailability.receiverBankName ?? "Banco de Venezuela"} con verificación instantánea API BDV 24/7.${
                               pmAvailability.bsRateCents
                                 ? ` Estimado: ${formatBsFromUsdCents(amountDueCents, pmAvailability.bsRateCents)}.`
                                 : ""
@@ -479,12 +517,9 @@ export default function CheckoutPage() {
                             ? "Verificando disponibilidad..."
                             : !pmAvailability.enabled
                               ? "Desactivado temporalmente en Consola Admin."
-                              : !pmAvailability.configured
-                                ? "Requiere tasa Bs y cuenta bancaria configurada."
-                                : pmAvailability.watchdogRequired &&
-                                    !pmAvailability.watchdogOnline
-                                  ? "Sensor Watchdog offline: no recibió latido reciente del teléfono."
-                                  : "Servicio de verificación bancaria temporalmente no disponible."}
+                              : !pmAvailability.bdvApiConfigured
+                                ? "API Key del Banco de Venezuela pendiente de configuración."
+                                : "Requiere tasa Bs y cuenta bancaria BDV configurada."}
                       </p>
                     </div>
                   </div>
@@ -516,7 +551,9 @@ export default function CheckoutPage() {
                 className="mt-0.5 h-4 w-4 rounded border-white/20 bg-slate-950 text-sky-500 focus:ring-sky-500"
               />
               <span className="leading-relaxed">
-                Confirmo que verifiqué la región compatible de cada gift card y acepto la{" "}
+                {hasDirectTopupItems
+                  ? "Confirmo que verifiqué el ID de jugador / servidor de recarga y la región compatible de cada producto, y acepto la "
+                  : "Confirmo que verifiqué la región compatible de cada gift card y acepto la "}
                 <Link
                   href="/ayuda"
                   target="_blank"
@@ -543,7 +580,7 @@ export default function CheckoutPage() {
               });
               return (
                 <div
-                  key={it.variantId}
+                  key={it.cartKey ?? it.variantId}
                   className="flex items-center gap-3 py-2 border-b border-white/[0.06]"
                 >
                   <div className="w-12 h-14 rounded-lg bg-slate-950 border border-white/10 p-1 flex items-center justify-center shrink-0">
@@ -554,12 +591,25 @@ export default function CheckoutPage() {
                     />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-xs font-extrabold text-white truncate">
-                      {it.productName}
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-xs font-extrabold text-white truncate">
+                        {it.productName}
+                      </span>
+                      {(it.requiresTarget || it.targetPayload) && (
+                        <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/30 text-[9px] font-black uppercase text-cyan-200 shrink-0">
+                          Recarga ID
+                        </span>
+                      )}
                     </div>
                     <div className="text-[11px] text-slate-400">
                       {it.denominationLabel} × {it.quantity} • {it.region}
                     </div>
+                    {it.targetSummary && (
+                      <div className="text-[10px] font-mono text-emerald-300 mt-0.5 truncate">
+                        {it.targetValidationStatus === "valid" ? "✓ " : ""}
+                        {it.targetSummary}
+                      </div>
+                    )}
                     {tier.appliedTier && (
                       <div className="text-[10px] font-medium text-slate-300 mt-0.5 tabular-nums">
                         {tier.appliedTier.minQuantity}+ u. ({formatCents(tier.effectiveUnitPriceCents)}/u · -{tier.discountPct}%)

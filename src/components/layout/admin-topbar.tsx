@@ -13,13 +13,14 @@ import { formatCents } from "@/lib/catalog-seed";
 import type { LiveVenezuelaRatesSnapshot } from "@/types";
 import {
   Bell,
+  Building2,
   Check,
   DollarSign,
   ExternalLink,
   FlaskConical,
   Menu,
+  PlugZap,
   RefreshCw,
-  Wallet,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -321,17 +322,32 @@ export function AdminTopbar({
             )}
           </div>
 
-          {/* Live Total Equity Pill */}
-          <Link
-            href="/admin/treasury"
-            title={`Receptoras ${formatCents(totalReceiversUsdCents)} + Distribuidores ${formatCents(totalSuppliersUsdCents)}`}
-            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#131727] hover:bg-[#191f34] border border-white/[0.1] text-xs font-semibold text-white transition-colors"
-          >
-            <Wallet className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-            <span className="font-mono font-bold">
-              {formatCents(totalLiveEquityUsdCents)}
-            </span>
-          </Link>
+          {/* Separate Banks & Distributors Pills */}
+          <div className="hidden xl:flex items-center gap-1.5">
+            <Link
+              href="/admin/banks"
+              title={`Saldo disponible en Bancos / Receptoras (Patrimonio total ${formatCents(totalLiveEquityUsdCents)})`}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-[#131727] hover:bg-[#191f34] border border-white/[0.1] text-[11px] font-semibold text-white transition-colors"
+            >
+              <Building2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="text-slate-400">Bancos</span>
+              <span className="font-mono font-bold">
+                {formatCents(totalReceiversUsdCents)}
+              </span>
+            </Link>
+
+            <Link
+              href="/admin/providers"
+              title="Saldo vivo en Distribuidores (FazerCards, Central One, CSV)"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-[#131727] hover:bg-[#191f34] border border-white/[0.1] text-[11px] font-semibold text-white transition-colors"
+            >
+              <PlugZap className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <span className="text-slate-400">Dist.</span>
+              <span className="font-mono font-bold text-indigo-200">
+                {formatCents(totalSuppliersUsdCents)}
+              </span>
+            </Link>
+          </div>
 
           {/* Operational Alerts Bell */}
           <Link

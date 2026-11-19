@@ -11,6 +11,7 @@ import type {
   InventoryStatus,
   OrderDTO,
   OrderItemStatus,
+  OrderItemTargetInfo,
   OrderStatus,
   PaymentGatewayId,
   ProductDTO,
@@ -25,6 +26,7 @@ import type {
   SupportTicketDTO,
   SupportTicketStatus,
   SupportTicketTopic,
+  TargetSchemaField,
   TreasuryAccountId,
   TreasuryMovementDTO,
   TreasuryMovementType,
@@ -171,8 +173,12 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
 
   const variantsByProduct = new Map<string, ProductVariantDTO[]>();
   for (const v of variants ?? []) {
-    const manualCount = manualEnabled ? stockMap.get(v.id) ?? 0 : 0;
+    const pricingMeta = pricingMetaMap[v.id];
+    const requiresTarget = Boolean(pricingMeta?.requiresTarget);
+    const manualCount =
+      !requiresTarget && manualEnabled ? stockMap.get(v.id) ?? 0 : 0;
     const reloadlyAvail =
+      !requiresTarget &&
       reloadlyEnabled &&
       (v.source_priority === "manual_then_reloadly" ||
         v.source_priority === "reloadly_only") &&
@@ -188,6 +194,7 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       Boolean(v.centralone_product_id);
 
     const usesFazerCards =
+      !requiresTarget &&
       isFazerSku &&
       fazerCardsEnabled &&
       (v.source_priority === "manual_then_centralone" ||
@@ -205,12 +212,13 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       ? computeCentralOneUnitCapacity(
           activeSupplierBalanceCents,
           v.unit_cost_cents ?? null,
-          pricingMetaMap[v.id]?.exactCostUsd
+          pricingMeta?.exactCostUsd
         )
       : null;
 
     const centralOneAvail =
       usesSupplierApi &&
+      pricingMeta?.supplierAvailable !== false &&
       (c1Capacity === null
         ? activeSupplierBalanceCents !== null && activeSupplierBalanceCents > 0
         : c1Capacity > 0);
@@ -221,7 +229,7 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       : manualCount + (c1Capacity ?? 0);
 
     const volumeDiscounts = normalizeVolumeDiscountTiers(
-      pricingMetaMap[v.id]?.volumeDiscounts,
+      pricingMeta?.volumeDiscounts,
       v.sale_price_cents
     );
     const dto: ProductVariantDTO = {
@@ -242,6 +250,14 @@ export async function listCatalog(includeInactive = false): Promise<ProductDTO[]
       deliverableStock,
       inStock: manualCount > 0 || reloadlyAvail || centralOneAvail,
       ...(volumeDiscounts.length > 0 ? { volumeDiscounts } : {}),
+      ...(requiresTarget
+        ? {
+            requiresTarget: true,
+            targetFields: pricingMeta?.targetFields ?? [],
+            targetSchema: pricingMeta?.targetSchema ?? [],
+            supportsPlayerValidate: Boolean(pricingMeta?.supportsPlayerValidate),
+          }
+        : {}),
     };
     const arr = variantsByProduct.get(v.product_id) ?? [];
     arr.push(dto);
@@ -1590,6 +1606,70 @@ export interface VariantPricingMeta {
   supplierAvailable?: boolean | null;
   supplierStockCount?: number | null;
   volumeDiscounts?: VolumeDiscountTier[];
+  requiresTarget?: boolean;
+  targetFields?: string[];
+  targetSchema?: TargetSchemaField[];
+  supportsPlayerValidate?: boolean;
+}
+
+const ORDER_TARGETS_KEY_PREFIX = "order_targets:";
+
+export async function saveOrderItemTargets(
+  orderId: string,
+  targetsByOrderItemId: Record<string, OrderItemTargetInfo>,
+  updatedBy?: string | null
+): Promise<void> {
+  if (Object.keys(targetsByOrderItemId).length === 0) return;
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const state = getSandboxState();
+    state.orderItemTargets[orderId] = {
+      ...(state.orderItemTargets[orderId] ?? {}),
+      ...targetsByOrderItemId,
+    };
+    return;
+  }
+  const existing = await getOrderItemTargets(orderId);
+  await writeSettingJson(
+    `${ORDER_TARGETS_KEY_PREFIX}${orderId}`,
+    { items: { ...existing, ...targetsByOrderItemId } },
+    updatedBy
+  );
+}
+
+export async function getOrderItemTargets(
+  orderId: string
+): Promise<Record<string, OrderItemTargetInfo>> {
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    return { ...(getSandboxState().orderItemTargets[orderId] ?? {}) };
+  }
+  const data = await readSettingJson<{
+    items?: Record<string, OrderItemTargetInfo>;
+  }>(`${ORDER_TARGETS_KEY_PREFIX}${orderId}`, {});
+  const items = data?.items;
+  return items && typeof items === "object" ? items : {};
+}
+
+export async function updateOrderItemTargetStatus(
+  orderId: string,
+  orderItemId: string,
+  patch: Partial<
+    Pick<
+      OrderItemTargetInfo,
+      "supplierReferenceCode" | "topupStatus" | "topupFailureReason" | "playerName"
+    >
+  >
+): Promise<void> {
+  const existing = await getOrderItemTargets(orderId);
+  const current = existing[orderItemId];
+  if (!current) return;
+  await saveOrderItemTargets(orderId, {
+    [orderItemId]: {
+      ...current,
+      ...patch,
+    },
+  });
 }
 
 const SUPPLIER_PRICING_POLICY_KEY = "supplier_pricing_policy";
@@ -2002,19 +2082,23 @@ export async function getOrderById(
   if (error) throw error;
   if (!o) return null;
 
-  const { data: items } = await ctx.admin
-    .from("order_items")
-    .select("*")
-    .eq("order_id", o.id)
-    .order("created_at", { ascending: true });
-
-  const { data: fulfillments } = await ctx.admin
-    .from("fulfillments")
-    .select(
-      "id, order_item_id, order_id, source, code_last4, supplier_tx_id, revealed_at, created_at"
-    )
-    .eq("order_id", o.id)
-    .order("created_at", { ascending: true });
+  const [{ data: items }, { data: fulfillments }, orderTargets] = await Promise.all([
+    ctx.admin
+      .from("order_items")
+      .select("*")
+      .eq("order_id", o.id)
+      .order("created_at", { ascending: true }),
+    ctx.admin
+      .from("fulfillments")
+      .select(
+        "id, order_item_id, order_id, source, code_last4, supplier_tx_id, revealed_at, created_at"
+      )
+      .eq("order_id", o.id)
+      .order("created_at", { ascending: true }),
+    getOrderItemTargets(o.id).catch(
+      () => ({}) as Record<string, OrderItemTargetInfo>
+    ),
+  ]);
 
   const itemMap = new Map<string, { productName: string; denominationLabel: string; region: string }>();
   for (const it of items ?? []) {
@@ -2075,6 +2159,7 @@ export async function getOrderById(
       quantity: it.quantity,
       deliveredCount: it.delivered_count,
       status: it.status,
+      targetInfo: orderTargets[it.id] ?? null,
     })),
     fulfillments: (fulfillments ?? []).map((f) => {
       const meta = itemMap.get(f.order_item_id);
@@ -3131,7 +3216,43 @@ export async function upsertSupplierOrder(params: {
   rawPayload?: Record<string, unknown>;
 }): Promise<SupplierOrderRecord | null> {
   const ctx = assertDbOrSandbox();
-  if (ctx.mode === "sandbox") return null;
+  if (ctx.mode === "sandbox") {
+    const state = getSandboxState();
+    const now = new Date().toISOString();
+    const existingIdx = state.supplierOrders.findIndex(
+      (so) =>
+        so.provider === params.provider &&
+        so.idempotencyKey === params.idempotencyKey
+    );
+    const next: SupplierOrderRecord = {
+      id:
+        existingIdx >= 0
+          ? state.supplierOrders[existingIdx].id
+          : crypto.randomUUID(),
+      orderId: params.orderId,
+      orderItemId: params.orderItemId,
+      provider: params.provider,
+      idempotencyKey: params.idempotencyKey,
+      externalOrderId: params.externalOrderId ?? null,
+      referenceCode: params.referenceCode ?? null,
+      status: params.status,
+      expectedQty: params.expectedQty,
+      deliveredCount: params.deliveredCount ?? 0,
+      supplierUnitCostCents: params.supplierUnitCostCents ?? null,
+      lastSequence: params.lastSequence ?? 0,
+      errorMessage: params.errorMessage ?? null,
+      rawPayload: params.rawPayload ?? {},
+      createdAt:
+        existingIdx >= 0 ? state.supplierOrders[existingIdx].createdAt : now,
+      updatedAt: now,
+    };
+    if (existingIdx >= 0) {
+      state.supplierOrders[existingIdx] = next;
+    } else {
+      state.supplierOrders.push(next);
+    }
+    return next;
+  }
 
   const { data, error } = await ctx.admin
     .from("supplier_orders")
@@ -3165,9 +3286,17 @@ export async function getSupplierOrderByExternalId(
   externalOrderId: string
 ): Promise<SupplierOrderRecord | null> {
   const ctx = assertDbOrSandbox();
-  if (ctx.mode === "sandbox") return null;
-
   const providers = Array.isArray(provider) ? provider : [provider];
+  if (ctx.mode === "sandbox") {
+    return (
+      getSandboxState().supplierOrders.find(
+        (so) =>
+          providers.includes(so.provider) &&
+          so.externalOrderId === externalOrderId
+      ) ?? null
+    );
+  }
+
   const { data, error } = await ctx.admin
     .from("supplier_orders")
     .select("*")
@@ -3180,14 +3309,84 @@ export async function getSupplierOrderByExternalId(
   return data ? mapSupplierOrderRow(data as Record<string, unknown>) : null;
 }
 
+/**
+ * Looks up a supplier_orders row by external_order_id, reference_code, or
+ * idempotency_key. Required for Central One v1 webhooks, which omit order.id
+ * and identify orders via reference_code and idempotency_key.
+ */
+export async function getSupplierOrderByIdentifier(
+  provider: string | string[],
+  identifiers: {
+    externalOrderId?: string | null;
+    referenceCode?: string | null;
+    idempotencyKey?: string | null;
+  }
+): Promise<SupplierOrderRecord | null> {
+  const providers = Array.isArray(provider) ? provider : [provider];
+  const extId = identifiers.externalOrderId?.trim() || null;
+  const refCode = identifiers.referenceCode?.trim() || null;
+  const idemKey = identifiers.idempotencyKey?.trim() || null;
+
+  if (!extId && !refCode && !idemKey) return null;
+
+  const ctx = assertDbOrSandbox();
+  if (ctx.mode === "sandbox") {
+    const list = getSandboxState().supplierOrders.filter((so) =>
+      providers.includes(so.provider)
+    );
+    return (
+      (extId ? list.find((so) => so.externalOrderId === extId) : undefined) ??
+      (refCode ? list.find((so) => so.referenceCode === refCode) : undefined) ??
+      (idemKey ? list.find((so) => so.idempotencyKey === idemKey) : undefined) ??
+      null
+    );
+  }
+
+  if (extId) {
+    const byExt = await getSupplierOrderByExternalId(providers, extId);
+    if (byExt) return byExt;
+  }
+  if (refCode) {
+    const { data, error } = await ctx.admin
+      .from("supplier_orders")
+      .select("*")
+      .in("provider", providers)
+      .eq("reference_code", refCode)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) return mapSupplierOrderRow(data as Record<string, unknown>);
+  }
+  if (idemKey) {
+    const { data, error } = await ctx.admin
+      .from("supplier_orders")
+      .select("*")
+      .in("provider", providers)
+      .eq("idempotency_key", idemKey)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) return mapSupplierOrderRow(data as Record<string, unknown>);
+  }
+  return null;
+}
+
 export async function listPendingSupplierOrders(
   provider: string | string[],
   limit = 25
 ): Promise<SupplierOrderRecord[]> {
   const ctx = assertDbOrSandbox();
-  if (ctx.mode === "sandbox") return [];
-
   const providers = Array.isArray(provider) ? provider : [provider];
+  if (ctx.mode === "sandbox") {
+    return getSandboxState()
+      .supplierOrders.filter(
+        (so) =>
+          providers.includes(so.provider) &&
+          ["pending", "confirmed", "processing"].includes(so.status)
+      )
+      .slice(0, limit);
+  }
+
   const { data, error } = await ctx.admin
     .from("supplier_orders")
     .select("*")
@@ -3205,9 +3404,24 @@ export async function listPendingSupplierOrdersForOrder(
   provider: string | string[] = ["centralone", "fazercards"]
 ): Promise<SupplierOrderRecord[]> {
   const ctx = assertDbOrSandbox();
-  if (ctx.mode === "sandbox") return [];
-
   const providers = Array.isArray(provider) ? provider : [provider];
+  if (ctx.mode === "sandbox") {
+    return getSandboxState().supplierOrders.filter(
+      (so) =>
+        so.orderId === orderId &&
+        providers.includes(so.provider) &&
+        [
+          "pending",
+          "confirmed",
+          "processing",
+          "completed",
+          "delivered",
+          "partially_delivered",
+          "partially_completed",
+        ].includes(so.status)
+    );
+  }
+
   const { data, error } = await ctx.admin
     .from("supplier_orders")
     .select("*")
@@ -3329,7 +3543,20 @@ export async function updateSupplierOrderState(
   }>
 ) {
   const ctx = assertDbOrSandbox();
-  if (ctx.mode === "sandbox") return;
+  if (ctx.mode === "sandbox") {
+    const found = getSandboxState().supplierOrders.find((so) => so.id === id);
+    if (found) {
+      if (patch.status !== undefined) found.status = patch.status;
+      if (patch.deliveredCount !== undefined) found.deliveredCount = patch.deliveredCount;
+      if (patch.supplierUnitCostCents !== undefined)
+        found.supplierUnitCostCents = patch.supplierUnitCostCents;
+      if (patch.lastSequence !== undefined) found.lastSequence = patch.lastSequence;
+      if (patch.errorMessage !== undefined) found.errorMessage = patch.errorMessage;
+      if (patch.rawPayload !== undefined) found.rawPayload = patch.rawPayload;
+      found.updatedAt = new Date().toISOString();
+    }
+    return;
+  }
 
   const dbPatch: Record<string, unknown> = {};
   if (patch.status !== undefined) dbPatch.status = patch.status;

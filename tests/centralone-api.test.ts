@@ -6,7 +6,10 @@ const mockRepo = vi.hoisted(() => ({
   recordWebhookEventOnce: vi.fn(),
   updateWebhookEventStatus: vi.fn(),
   getOrderById: vi.fn(),
+  getOrderItemTargets: vi.fn().mockResolvedValue({}),
+  updateOrderItemTargetStatus: vi.fn().mockResolvedValue(undefined),
   getSupplierOrderByExternalId: vi.fn(),
+  getSupplierOrderByIdentifier: vi.fn().mockResolvedValue(null),
   listPendingSupplierOrdersForOrder: vi.fn(),
   listPendingSupplierOrders: vi.fn(),
   upsertSupplierOrder: vi.fn(),
@@ -34,6 +37,8 @@ const mockRepo = vi.hoisted(() => ({
 vi.mock("@/lib/server/env", () => ({
   getCentralOneApiKey: () => "co_live_test_key",
   getCentralOneBaseUrl: () => "https://portal.centraloneglobal.com/api/v1",
+  getCentralOneProxyUrl: () => null,
+  getCentralOneProxyMode: () => "fallback",
   getCentralOneWebhookSecret: () => "whsec_centralone_current",
   isCentralOneConfigured: () => true,
   isSandboxMode: () => false,
@@ -358,7 +363,14 @@ describe("Central One API v1 compliance", () => {
       })
     );
     await vi.waitFor(() => {
-      expect(syncSpy).toHaveBeenCalledWith("ord-live-99", 3);
+      expect(syncSpy).toHaveBeenCalledWith(
+        {
+          externalOrderId: "ord-live-99",
+          referenceCode: "CO-ORD-99",
+          idempotencyKey: null,
+        },
+        3
+      );
     });
   });
 

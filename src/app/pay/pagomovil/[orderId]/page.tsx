@@ -7,6 +7,7 @@ import { useParams, useRouter } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
+  Calendar,
   Check,
   CheckCircle2,
   Clock,
@@ -14,6 +15,7 @@ import {
   Loader2,
   Lock,
   RefreshCw,
+  Wallet,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -32,6 +34,7 @@ interface PagoMovilStatusPayload {
   orderNumber: string;
   status: string;
   amountDueCents: number;
+  paidCents: number;
   bsRateCents: number | null;
   amountDueBsCents: number;
   rateExpiresAt: string | null;
@@ -41,15 +44,20 @@ interface PagoMovilStatusPayload {
   reportedReference: string | null;
   reportedSenderBank: string | null;
   reportedSenderPhone: string | null;
+  reportedSenderDni: string | null;
+  reportedAmountBsCents: number | null;
+  reportedPaymentDate: string | null;
   reportedAt: string | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
-  waitingBankConfirmation: boolean;
   matchedReference: string | null;
   paidBsCents: number | null;
   receivedBsCents: number;
   remainingBsCents: number;
   surplusBsCents: number;
+  userCreditBalanceCents: number;
+  todayDateVe: string;
+  orderCreatedDateVe: string;
   receiver: {
     bankCode: string;
     bankName: string;
@@ -60,15 +68,21 @@ interface PagoMovilStatusPayload {
   } | null;
   settings: {
     minReferenceDigits: number;
-    requireSenderPhone: boolean;
     rateExpirationMinutes: number;
     orderExpirationMinutes: number;
   };
-  watchdog: {
-    online: boolean;
-    activeDevices: number;
-    lastHeartbeatAt: string | null;
-  };
+}
+
+function splitCedula(raw: string | null | undefined): {
+  prefix: "V" | "E" | "J" | "P";
+  digits: string;
+} {
+  const clean = (raw ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const m = clean.match(/^([VEJP])(\d+)$/);
+  if (m) {
+    return { prefix: m[1] as "V" | "E" | "J" | "P", digits: m[2] };
+  }
+  return { prefix: "V", digits: clean.replace(/\D/g, "") };
 }
 
 function PagoMovilHostedCheckoutContent() {
@@ -82,77 +96,110 @@ function PagoMovilHostedCheckoutContent() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
+  // BDV API Conciliación required fields
   const [referenceDigits, setReferenceDigits] = useState("");
   const [senderBankCode, setSenderBankCode] = useState("");
   const [senderPhone, setSenderPhone] = useState("");
+  const [cedulaPrefix, setCedulaPrefix] = useState<"V" | "E" | "J" | "P">("V");
+  const [cedulaNumber, setCedulaNumber] = useState("");
+  const [amountBsInput, setAmountBsInput] = useState("");
+  const [amountEditedByUser, setAmountEditedByUser] = useState(false);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [paymentDate, setPaymentDate] = useState("");
+
   const [submitting, setSubmitting] = useState(false);
+  const [resolvingAbono, setResolvingAbono] = useState(false);
   const [refreshingRate, setRefreshingRate] = useState(false);
+  const [confirmedBanner, setConfirmedBanner] = useState<string | null>(null);
   const [verifyFeedback, setVerifyFeedback] = useState<{
-    type: "error" | "warning" | "waiting";
+    type: "error" | "warning";
     code?: string;
     message: string;
   } | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  const applyStatusPayload = useCallback((body: PagoMovilStatusPayload) => {
-    setData(body);
-    setLoadError(null);
+  const applyStatusPayload = useCallback(
+    (body: PagoMovilStatusPayload, forceResetAmount = false) => {
+      setData(body);
+      setLoadError(null);
 
-    const hasPartialAbono =
-      (body.receivedBsCents ?? 0) > 0 &&
-      body.lastErrorCode === "AMOUNT_MISMATCH";
+      const hasPartialAbono =
+        (body.receivedBsCents ?? 0) > 0 &&
+        body.lastErrorCode === "AMOUNT_MISMATCH";
 
-    // After an abono the customer must type the NEW reference of the remaining transfer
-    setReferenceDigits((prev) =>
-      hasPartialAbono ? prev : prev ? prev : body.reportedReference ?? ""
-    );
-    setSenderBankCode((prev) =>
-      prev ? prev : body.reportedSenderBank ?? ""
-    );
-    setSenderPhone((prev) =>
-      prev ? prev : body.reportedSenderPhone ?? ""
-    );
+      const targetBsCents =
+        (body.receivedBsCents ?? 0) > 0
+          ? body.remainingBsCents
+          : body.amountDueBsCents;
+      const formattedTargetBs = (targetBsCents / 100).toFixed(2);
 
-    if (body.lastErrorCode && body.lastErrorMessage) {
-      setVerifyFeedback({
-        type:
-          body.lastErrorCode === "AMBIGUOUS_REFERENCE" || hasPartialAbono
-            ? "warning"
-            : "error",
-        code: body.lastErrorCode,
-        message: body.lastErrorMessage,
-      });
-    } else if (body.waitingBankConfirmation && body.reportedReference) {
-      setVerifyFeedback({
-        type: "waiting",
-        message: `Referencia ${body.reportedReference} registrada. Esperando confirmación automática del banco...`,
-      });
-    } else {
-      setVerifyFeedback(null);
-    }
-  }, []);
-
-  const loadStatus = useCallback(async () => {
-    if (!orderId) return;
-    try {
-      const res = await fetch(
-        `/api/payments/pagomovil/status?orderId=${encodeURIComponent(orderId)}`,
-        { cache: "no-store" }
+      setReferenceDigits((prev) =>
+        hasPartialAbono ? prev : prev ? prev : body.reportedReference ?? ""
       );
-      const body = (await res.json()) as PagoMovilStatusPayload & {
-        error?: string;
-      };
-      if (!res.ok) {
-        setLoadError(body.error ?? "No se pudo cargar la ventana de Pago Móvil.");
-        return;
+      setSenderBankCode((prev) =>
+        prev ? prev : body.reportedSenderBank ?? ""
+      );
+      setSenderPhone((prev) =>
+        prev ? prev : body.reportedSenderPhone ?? ""
+      );
+      if (body.reportedSenderDni) {
+        const parsed = splitCedula(body.reportedSenderDni);
+        setCedulaNumber((prev) => {
+          if (prev) return prev;
+          setCedulaPrefix(parsed.prefix);
+          return parsed.digits;
+        });
       }
-      applyStatusPayload(body);
-    } catch {
-      setLoadError("Error de conexión al consultar la orden.");
-    } finally {
-      setLoading(false);
-    }
-  }, [orderId, applyStatusPayload]);
+      setAmountBsInput((prev) => {
+        if (forceResetAmount) return formattedTargetBs;
+        if (!prev && !amountEditedByUser) return formattedTargetBs;
+        return prev;
+      });
+      setPaymentDate((prev) => prev || body.todayDateVe);
+
+      if (body.lastErrorCode && body.lastErrorMessage) {
+        setVerifyFeedback({
+          type:
+            body.lastErrorCode === "AMOUNT_MISMATCH" ||
+            body.lastErrorCode === "NOT_FOUND_IN_BDV"
+              ? "warning"
+              : "error",
+          code: body.lastErrorCode,
+          message: body.lastErrorMessage,
+        });
+      } else {
+        setVerifyFeedback(null);
+      }
+    },
+    [amountEditedByUser]
+  );
+
+  const loadStatus = useCallback(
+    async (forceResetAmount = false) => {
+      if (!orderId) return;
+      try {
+        const res = await fetch(
+          `/api/payments/pagomovil/status?orderId=${encodeURIComponent(orderId)}`,
+          { cache: "no-store" }
+        );
+        const body = (await res.json()) as PagoMovilStatusPayload & {
+          error?: string;
+        };
+        if (!res.ok) {
+          setLoadError(
+            body.error ?? "No se pudo cargar la ventana de Pago Móvil."
+          );
+          return;
+        }
+        applyStatusPayload(body, forceResetAmount);
+      } catch {
+        setLoadError("Error de conexión al consultar la orden.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [orderId, applyStatusPayload]
+  );
 
   useEffect(() => {
     if (!orderId) return;
@@ -183,7 +230,7 @@ function PagoMovilHostedCheckoutContent() {
           );
           return;
         }
-        applyStatusPayload(statusRes.body);
+        applyStatusPayload(statusRes.body, true);
         if (orderRes?.order) {
           setOrderDetails(orderRes.order);
         }
@@ -212,23 +259,17 @@ function PagoMovilHostedCheckoutContent() {
         data.status === "DELIVERED")
   );
   const isCancelled = data?.status === "CANCELLED";
+  const isRefundedCredit = data?.status === "REFUNDED_CREDIT";
 
   useEffect(() => {
     if (!data) return;
     if (isConfirmed) {
       const timer = setTimeout(() => {
         router.push(`/order/${orderId}`);
-      }, 1400);
+      }, 1800);
       return () => clearTimeout(timer);
     }
-
-    if (data.status === "PENDING_PAYMENT" || data.status === "CREATED") {
-      const poller = setInterval(() => {
-        void loadStatus();
-      }, 2500);
-      return () => clearInterval(poller);
-    }
-  }, [data, isConfirmed, orderId, router, loadStatus]);
+  }, [data, isConfirmed, orderId, router]);
 
   const isRateExpired = Boolean(
     data &&
@@ -248,6 +289,15 @@ function PagoMovilHostedCheckoutContent() {
       ? data.remainingBsCents
       : data.amountDueBsCents
     : 0;
+  const remainingUsdCents = data
+    ? Math.max(0, data.amountDueCents - data.paidCents)
+    : 0;
+  const canCoverRemainingWithCredit = Boolean(
+    data &&
+      hasAbono &&
+      remainingUsdCents > 0 &&
+      data.userCreditBalanceCents >= remainingUsdCents
+  );
 
   const copyField = async (key: string, value: string, label: string) => {
     try {
@@ -287,12 +337,45 @@ function PagoMovilHostedCheckoutContent() {
         toast.error(body.error ?? "No se pudo actualizar la tasa Bs.");
         return;
       }
-      await loadStatus();
+      setAmountEditedByUser(false);
+      await loadStatus(true);
       toast.success("Tasa Bs actualizada.");
     } catch {
       toast.error("Error de red al actualizar la tasa.");
     } finally {
       setRefreshingRate(false);
+    }
+  };
+
+  const handleResolveAbono = async (
+    mode: "complete_with_credit" | "convert_to_credit_now"
+  ) => {
+    setResolvingAbono(true);
+    try {
+      const res = await fetch(`/api/orders/${orderId}/resolve-underpayment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const body = (await res.json()) as {
+        error?: string;
+        outcome?: "fulfilled" | "converted_to_credit";
+      };
+      if (!res.ok) {
+        toast.error(body.error ?? "No se pudo procesar el abono.");
+        return;
+      }
+      if (body.outcome === "fulfilled") {
+        toast.success("Diferencia cubierta con tu saldo a favor. Liberando pedido...");
+      } else {
+        toast.success("Abono acreditado inmediatamente a tu saldo a favor.");
+      }
+      await loadStatus();
+      router.push(`/order/${orderId}`);
+    } catch {
+      toast.error("Error de red al resolver el abono.");
+    } finally {
+      setResolvingAbono(false);
     }
   };
 
@@ -307,6 +390,18 @@ function PagoMovilHostedCheckoutContent() {
       );
       return;
     }
+    if (!senderBankCode) {
+      toast.error("Selecciona el banco desde donde realizaste el Pago Móvil.");
+      return;
+    }
+    if (senderPhone.replace(/\D/g, "").length < 10) {
+      toast.error("Ingresa el teléfono desde donde enviaste el Pago Móvil (ej. 04121234567).");
+      return;
+    }
+    if (cedulaNumber.replace(/\D/g, "").length < 5) {
+      toast.error("Ingresa la cédula del titular que realizó el Pago Móvil.");
+      return;
+    }
 
     setSubmitting(true);
     setVerifyFeedback(null);
@@ -317,8 +412,12 @@ function PagoMovilHostedCheckoutContent() {
         body: JSON.stringify({
           orderId,
           referenceDigits: cleanDigits,
-          senderBankCode: senderBankCode || null,
-          senderPhone: senderPhone.trim() || null,
+          senderBankCode,
+          senderPhone: senderPhone.trim(),
+          senderDni: `${cedulaPrefix}${cedulaNumber.replace(/\D/g, "")}`,
+          amountBs: amountBsInput.trim() || undefined,
+          paymentDate:
+            showDatePicker && paymentDate ? paymentDate : undefined,
         }),
       });
       const body = (await res.json()) as {
@@ -326,42 +425,45 @@ function PagoMovilHostedCheckoutContent() {
         code?: string;
         message?: string;
         error?: string;
+        remainingBsCents?: number;
       };
 
       const msg =
         body.message ?? body.error ?? "No se pudo verificar el pago.";
 
       if (body.code === "COMPLETED" || body.code === "ALREADY_PAID") {
+        setConfirmedBanner(msg);
         toast.success(msg);
         await loadStatus();
         return;
       }
 
-      if (body.code === "WAITING_BANK_CONFIRMATION") {
-        setVerifyFeedback({ type: "waiting", code: body.code, message: msg });
-        toast.success("Referencia registrada.");
-        await loadStatus();
-        return;
-      }
-
       if (body.code === "AMOUNT_MISMATCH") {
-        // Abono registered: keep the form clean for the NEW reference of the remaining transfer
+        // Verified partial payment (abono): clear reference and pre-fill remaining Bs for a 2nd transfer
         setReferenceDigits("");
+        setAmountEditedByUser(false);
+        if (typeof body.remainingBsCents === "number" && body.remainingBsCents > 0) {
+          setAmountBsInput((body.remainingBsCents / 100).toFixed(2));
+        }
         setVerifyFeedback({ type: "warning", code: body.code, message: msg });
-        toast.warning("Abono registrado. Falta una parte del pago.");
-        await loadStatus();
+        toast.warning("Abono verificado por BDV. Falta completar la diferencia.");
+        await loadStatus(true);
         return;
       }
 
       setVerifyFeedback({
-        type: body.code === "AMBIGUOUS_REFERENCE" ? "warning" : "error",
+        type: body.code === "NOT_FOUND_IN_BDV" ? "warning" : "error",
         code: body.code,
         message: msg,
       });
-      toast.error(msg);
+      toast.error(
+        body.code === "NOT_FOUND_IN_BDV"
+          ? "BDV no encontró el pago con esos datos. Revisa referencia, cédula o monto."
+          : msg
+      );
       await loadStatus();
     } catch {
-      toast.error("Error de red al enviar referencia bancaria.");
+      toast.error("Error de red al consultar con el Banco de Venezuela.");
     } finally {
       setSubmitting(false);
     }
@@ -371,7 +473,7 @@ function PagoMovilHostedCheckoutContent() {
     return (
       <div className="max-w-4xl mx-auto px-4 sm:px-6 py-24 text-center space-y-3">
         <Loader2 className="w-6 h-6 animate-spin text-sky-400 mx-auto" />
-        <p className="text-xs text-slate-400">Cargando Pago Móvil...</p>
+        <p className="text-xs text-slate-400">Cargando Pago Móvil BDV...</p>
       </div>
     );
   }
@@ -421,7 +523,7 @@ function PagoMovilHostedCheckoutContent() {
     status: data.status as OrderDTO["status"],
     amountDueCents: data.amountDueCents,
     creditAppliedCents: 0,
-    paidCents: 0,
+    paidCents: data.paidCents,
     paymentGateway: "pagomovil",
     items: [],
   };
@@ -438,7 +540,7 @@ function PagoMovilHostedCheckoutContent() {
           <span>Volver a orden #{data.orderNumber}</span>
         </Link>
 
-        {!isConfirmed && !isCancelled && !isOrderExpired && (
+        {!isConfirmed && !isCancelled && !isRefundedCredit && !isOrderExpired && (
           <div className="inline-flex items-center gap-1.5 text-xs text-slate-400 font-mono tabular-nums">
             <Clock className="w-3.5 h-3.5 text-slate-400" />
             <span>Expira en {formatCountdown(data.expiresAt, nowMs)}</span>
@@ -446,7 +548,7 @@ function PagoMovilHostedCheckoutContent() {
         )}
       </div>
 
-      {/* Authentic Stripe Checkout Floating Sheet */}
+      {/* Authentic Stripe Checkout Floating Sheet (Design Preserved) */}
       <div className="rounded-2xl overflow-hidden bg-white text-[#0a2540] shadow-[0_28px_80px_-20px_rgba(0,0,0,0.65)] ring-1 ring-white/10 grid grid-cols-1 lg:grid-cols-12">
         {/* Left: Soft Slate Order Summary Column */}
         <aside className="lg:col-span-5 bg-[#f7f9fc] p-6 sm:p-8 border-b lg:border-b-0 lg:border-r border-slate-200/80 flex flex-col justify-between gap-8">
@@ -462,7 +564,7 @@ function PagoMovilHostedCheckoutContent() {
                 </span>
               </div>
               <span className="px-2 py-0.5 rounded-full bg-slate-200/75 text-[10px] font-semibold text-slate-700">
-                Pago Móvil
+                Pago Móvil · BDV
               </span>
             </div>
 
@@ -476,7 +578,7 @@ function PagoMovilHostedCheckoutContent() {
               </div>
               {hasAbono && data && (
                 <div className="text-[11px] text-emerald-700 font-medium tabular-nums">
-                  Abono recibido Bs. {formatBsNumber(data.receivedBsCents)} de Bs.{" "}
+                  Abono verificado BDV: Bs. {formatBsNumber(data.receivedBsCents)} de Bs.{" "}
                   {formatBsNumber(data.amountDueBsCents)}
                 </div>
               )}
@@ -494,6 +596,7 @@ function PagoMovilHostedCheckoutContent() {
 
               {!isConfirmed &&
                 !isCancelled &&
+                !isRefundedCredit &&
                 !isOrderExpired &&
                 isRateExpired && (
                   <div className="pt-2">
@@ -542,6 +645,11 @@ function PagoMovilHostedCheckoutContent() {
                           <div className="text-[11px] text-slate-500">
                             {item.denominationLabel} · Cant. {item.quantity}
                           </div>
+                          {item.targetInfo?.displaySummary && (
+                            <div className="text-[10px] font-mono text-emerald-700 truncate">
+                              {item.targetInfo.displaySummary}
+                            </div>
+                          )}
                         </div>
                       </div>
                       <span className="font-medium text-[#0a2540] tabular-nums shrink-0">
@@ -564,7 +672,7 @@ function PagoMovilHostedCheckoutContent() {
           </div>
 
           {/* Cancel Order Inline Control */}
-          {!isConfirmed && !isCancelled && !isOrderExpired && (
+          {!isConfirmed && !isCancelled && !isRefundedCredit && !isOrderExpired && (
             <CancelOrderControl
               order={cancelableOrderSnapshot}
               tone="light"
@@ -610,17 +718,37 @@ function PagoMovilHostedCheckoutContent() {
                 </Link>
               </div>
             </div>
+          ) : isRefundedCredit ? (
+            <div className="py-6 space-y-5">
+              <div className="flex items-start gap-3">
+                <Wallet className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <h1 className="text-lg font-bold text-[#0a2540]">
+                    Abono convertido en saldo a favor
+                  </h1>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Acreditamos el monto verificado a tu saldo interno de StoryCheap para tu próxima compra.
+                  </p>
+                </div>
+              </div>
+              <Link
+                href={`/order/${orderId}`}
+                className="inline-flex items-center justify-center px-5 py-3 rounded-lg bg-[#0a2540] hover:bg-[#163859] text-white font-semibold text-xs transition-colors"
+              >
+                Ver detalle de orden
+              </Link>
+            </div>
           ) : isConfirmed ? (
             <div className="py-6 space-y-5">
               <div className="flex items-start gap-3">
                 <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <h1 className="text-lg font-bold text-[#0a2540]">
-                    Pago Móvil confirmado
+                    Pago Móvil confirmado por BDV
                   </h1>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Confirmamos tu transferencia. Llevándote a tu bóveda para
-                    revelar tus códigos...
+                    {confirmedBanner ??
+                      "Confirmamos tu transferencia directamente con el Banco de Venezuela. Llevándote a tu entrega..."}
                   </p>
                 </div>
               </div>
@@ -628,7 +756,7 @@ function PagoMovilHostedCheckoutContent() {
                 href={`/order/${orderId}`}
                 className="inline-flex items-center justify-center px-5 py-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition-colors"
               >
-                Ver mis códigos ahora
+                Ver mi entrega ahora
               </Link>
             </div>
           ) : isOrderExpired ? (
@@ -668,28 +796,52 @@ function PagoMovilHostedCheckoutContent() {
           ) : (
             <div className="space-y-6">
               {hasAbono && data && (
-                <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 space-y-2">
-                  <div className="text-xs font-bold text-amber-900">
-                    Abono registrado: Bs. {formatBsNumber(data.receivedBsCents)}
+                <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 space-y-3">
+                  <div className="space-y-1">
+                    <div className="text-xs font-bold text-amber-900">
+                      Abono verificado por BDV: Bs. {formatBsNumber(data.receivedBsCents)}
+                    </div>
+                    <p className="text-[11px] text-amber-900/90 leading-relaxed">
+                      Faltan{" "}
+                      <strong className="tabular-nums">
+                        Bs. {formatBsNumber(data.remainingBsCents)}
+                      </strong>{" "}
+                      para liberar tu pedido. Puedes enviar la diferencia por otro Pago
+                      Móvil e ingresar la <strong>nueva</strong> referencia abajo, o convertir tu abono en saldo a favor.
+                    </p>
                   </div>
-                  <p className="text-[11px] text-amber-900/90 leading-relaxed">
-                    Faltan{" "}
-                    <strong className="tabular-nums">
-                      Bs. {formatBsNumber(data.remainingBsCents)}
-                    </strong>{" "}
-                    para liberar tus códigos. Envía solo la diferencia por Pago
-                    Móvil y pega la <strong>nueva</strong> referencia abajo. La tasa
-                    queda congelada para que el monto no cambie.
-                  </p>
-                  <Link
-                    href={`/order/${orderId}`}
-                    className="inline-flex text-[11px] font-semibold text-amber-900 underline underline-offset-2"
-                  >
-                    Prefiero convertir mi abono en saldo a favor
-                  </Link>
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    {canCoverRemainingWithCredit && (
+                      <button
+                        type="button"
+                        disabled={resolvingAbono}
+                        onClick={() => void handleResolveAbono("complete_with_credit")}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold text-[11px] transition-colors"
+                      >
+                        <Wallet className="w-3.5 h-3.5" />
+                        <span>
+                          Cubrir {formatCents(remainingUsdCents)} con mi saldo
+                        </span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={resolvingAbono}
+                      onClick={() => void handleResolveAbono("convert_to_credit_now")}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-amber-100 disabled:opacity-50 border border-amber-300 text-amber-950 font-semibold text-[11px] transition-colors"
+                    >
+                      {resolvingAbono ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Wallet className="w-3 h-3" />
+                      )}
+                      <span>Convertir abono en saldo a favor ahora</span>
+                    </button>
+                  </div>
                 </div>
               )}
-              {/* Component 1: Unified Stripe Bank Details Box */}
+
+              {/* Component 1: Unified Stripe Bank Details Box (Preserved) */}
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <h1 className="text-sm font-bold text-[#0a2540]">
@@ -718,7 +870,7 @@ function PagoMovilHostedCheckoutContent() {
                   {[
                     {
                       key: "amount",
-                      label: "Monto exacto",
+                      label: hasAbono ? "Diferencia exacta" : "Monto exacto",
                       display: `Bs. ${exactCopyBs}`,
                       sub: null as string | null,
                       copyVal: exactCopyBs,
@@ -792,104 +944,208 @@ function PagoMovilHostedCheckoutContent() {
                 </div>
               </div>
 
-              {/* Component 2: Stripe Connected Payment Element Form */}
+              {/* Component 2: Stripe Connected Payment Element Form (Direct BDV Conciliación) */}
               <form onSubmit={handleVerifySubmit} className="space-y-4">
                 <div className="space-y-2">
-                  <h2 className="text-sm font-bold text-[#0a2540]">
-                    Confirma tu transferencia
-                  </h2>
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="text-sm font-bold text-[#0a2540]">
+                      Confirma tu transferencia
+                    </h2>
+                    <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                      Verificación directa BDV
+                    </span>
+                  </div>
 
                   {/* Unified Hairline Connected Input Group */}
                   <div className="rounded-xl border border-slate-300 bg-white overflow-hidden shadow-xs divide-y divide-slate-200 focus-within:border-[#635bff] focus-within:ring-2 focus-within:ring-[#635bff]/20 transition-all">
-                    <div className="px-3.5 py-2.5">
-                      <label
-                        htmlFor="pm-reference"
-                        className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-0.5"
-                      >
-                        Número de referencia (últimos{" "}
-                        {data.settings.minReferenceDigits}+ dígitos)
-                      </label>
-                      <input
-                        id="pm-reference"
-                        type="text"
-                        inputMode="numeric"
-                        required
-                        minLength={data.settings.minReferenceDigits}
-                        maxLength={32}
-                        value={referenceDigits}
-                        onChange={(e) =>
-                          setReferenceDigits(
-                            e.target.value.replace(/[^0-9A-Za-z]/g, "")
-                          )
-                        }
-                        placeholder="Ej. 123456"
-                        className="w-full bg-transparent text-sm font-mono font-semibold text-[#0a2540] placeholder-slate-400 focus:outline-none tabular-nums"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
-                      <div className="px-3.5 py-2.5">
+                    {/* Row 1: Reference + Editable Amount Sent */}
+                    <div className="grid grid-cols-1 sm:grid-cols-12 divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
+                      <div className="sm:col-span-7 px-3.5 py-2.5">
                         <label
-                          htmlFor="pm-bank"
+                          htmlFor="pm-reference"
                           className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-0.5"
                         >
-                          Banco de origen
+                          Referencia bancaria *
                         </label>
-                        <select
-                          id="pm-bank"
-                          value={senderBankCode}
-                          onChange={(e) => setSenderBankCode(e.target.value)}
-                          className="w-full bg-transparent text-xs font-medium text-[#0a2540] focus:outline-none"
-                        >
-                          <option value="">Cualquier banco</option>
-                          {VENEZUELAN_BANKS.map((b) => (
-                            <option key={b.code} value={b.code}>
-                              {b.code} · {b.shortName}
-                            </option>
-                          ))}
-                        </select>
+                        <input
+                          id="pm-reference"
+                          type="text"
+                          inputMode="numeric"
+                          required
+                          minLength={data.settings.minReferenceDigits}
+                          maxLength={32}
+                          value={referenceDigits}
+                          onChange={(e) =>
+                            setReferenceDigits(
+                              e.target.value.replace(/[^0-9A-Za-z]/g, "")
+                            )
+                          }
+                          placeholder="Ej. 12345678"
+                          className="w-full bg-transparent text-sm font-mono font-semibold text-[#0a2540] placeholder-slate-400 focus:outline-none tabular-nums"
+                        />
                       </div>
 
+                      <div className="sm:col-span-5 px-3.5 py-2.5 bg-slate-50/40">
+                        <label
+                          htmlFor="pm-amount"
+                          className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-0.5"
+                        >
+                          Monto enviado (Bs) *
+                        </label>
+                        <input
+                          id="pm-amount"
+                          type="text"
+                          inputMode="decimal"
+                          required
+                          value={amountBsInput}
+                          onChange={(e) => {
+                            setAmountEditedByUser(true);
+                            setAmountBsInput(
+                              e.target.value.replace(/[^0-9.,]/g, "")
+                            );
+                          }}
+                          placeholder={exactCopyBs}
+                          className="w-full bg-transparent text-sm font-mono font-semibold text-[#0a2540] placeholder-slate-400 focus:outline-none tabular-nums"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Row 2: Origin Bank (required by BDV) */}
+                    <div className="px-3.5 py-2.5">
+                      <label
+                        htmlFor="pm-bank"
+                        className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-0.5"
+                      >
+                        Banco de origen *
+                      </label>
+                      <select
+                        id="pm-bank"
+                        required
+                        value={senderBankCode}
+                        onChange={(e) => setSenderBankCode(e.target.value)}
+                        className="w-full bg-transparent text-xs font-medium text-[#0a2540] focus:outline-none"
+                      >
+                        <option value="">Selecciona tu banco...</option>
+                        {VENEZUELAN_BANKS.map((b) => (
+                          <option key={b.code} value={b.code}>
+                            {b.code} · {b.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Row 3: Payer Phone + Payer Cedula (both required by BDV) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
                       <div className="px-3.5 py-2.5">
                         <label
                           htmlFor="pm-phone"
                           className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-0.5"
                         >
-                          Teléfono emisor{" "}
-                          {data.settings.requireSenderPhone
-                            ? "*"
-                            : "(opcional)"}
+                          Teléfono emisor *
                         </label>
                         <input
                           id="pm-phone"
                           type="tel"
-                          required={data.settings.requireSenderPhone}
+                          inputMode="numeric"
+                          required
                           value={senderPhone}
-                          onChange={(e) => setSenderPhone(e.target.value)}
+                          onChange={(e) =>
+                            setSenderPhone(e.target.value.replace(/[^0-9+-\s]/g, ""))
+                          }
                           placeholder="04121234567"
-                          className="w-full bg-transparent text-xs font-mono font-medium text-[#0a2540] placeholder-slate-400 focus:outline-none"
+                          className="w-full bg-transparent text-xs font-mono font-semibold text-[#0a2540] placeholder-slate-400 focus:outline-none tabular-nums"
                         />
+                      </div>
+
+                      <div className="px-3.5 py-2.5">
+                        <label
+                          htmlFor="pm-cedula"
+                          className="block text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-0.5"
+                        >
+                          Cédula del pagador *
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            aria-label="Tipo de documento"
+                            value={cedulaPrefix}
+                            onChange={(e) =>
+                              setCedulaPrefix(
+                                e.target.value as "V" | "E" | "J" | "P"
+                              )
+                            }
+                            className="bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5 text-xs font-bold text-[#0a2540] focus:outline-none"
+                          >
+                            <option value="V">V</option>
+                            <option value="E">E</option>
+                            <option value="J">J</option>
+                            <option value="P">P</option>
+                          </select>
+                          <input
+                            id="pm-cedula"
+                            type="text"
+                            inputMode="numeric"
+                            required
+                            value={cedulaNumber}
+                            onChange={(e) =>
+                              setCedulaNumber(e.target.value.replace(/\D/g, ""))
+                            }
+                            placeholder="27037606"
+                            className="w-full bg-transparent text-xs font-mono font-semibold text-[#0a2540] placeholder-slate-400 focus:outline-none tabular-nums"
+                          />
+                        </div>
                       </div>
                     </div>
                   </div>
+
+                  {/* Subtle helper note for different amounts + optional date */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 px-0.5">
+                    <span>
+                      Si enviaste un monto distinto (de más o de menos), edita{" "}
+                      <strong className="text-slate-700">Monto enviado</strong> para
+                      acreditarlo automáticamente.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowDatePicker((v) => !v)}
+                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#635bff] hover:text-[#4b43e6] shrink-0"
+                    >
+                      <Calendar className="w-3 h-3" />
+                      <span>
+                        {showDatePicker ? "Usar fecha de hoy" : "¿Pagaste ayer?"}
+                      </span>
+                    </button>
+                  </div>
+
+                  {showDatePicker && (
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 flex items-center justify-between gap-3">
+                      <label
+                        htmlFor="pm-date"
+                        className="text-[11px] font-semibold text-slate-600"
+                      >
+                        Fecha real del Pago Móvil (hora Venezuela):
+                      </label>
+                      <input
+                        id="pm-date"
+                        type="date"
+                        value={paymentDate}
+                        max={data.todayDateVe}
+                        onChange={(e) => setPaymentDate(e.target.value)}
+                        className="rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-mono text-[#0a2540]"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {/* Inline Stripe Feedback */}
                 {verifyFeedback && (
                   <div
                     className={`rounded-lg border px-3.5 py-2.5 text-xs leading-relaxed flex items-start gap-2.5 ${
-                      verifyFeedback.type === "waiting"
-                        ? "bg-sky-50 border-sky-200 text-sky-900"
-                        : verifyFeedback.type === "warning"
-                          ? "bg-amber-50 border-amber-200 text-amber-900"
-                          : "bg-rose-50 border-rose-200 text-rose-900"
+                      verifyFeedback.type === "warning"
+                        ? "bg-amber-50 border-amber-200 text-amber-900"
+                        : "bg-rose-50 border-rose-200 text-rose-900"
                     }`}
                   >
-                    {verifyFeedback.type === "waiting" ? (
-                      <span className="mt-1.5 w-2 h-2 rounded-full bg-sky-600 animate-pulse shrink-0" />
-                    ) : (
-                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                    )}
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                     <span>{verifyFeedback.message}</span>
                   </div>
                 )}
@@ -902,35 +1158,20 @@ function PagoMovilHostedCheckoutContent() {
                   {submitting ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      <span>Verificando pago...</span>
+                      <span>Verificando con Banco de Venezuela...</span>
                     </>
                   ) : (
-                    <span>
-                      {data.waitingBankConfirmation
-                        ? `Actualizar referencia · Bs. ${formatBsNumber(amountToTransferBsCents)}`
-                        : `Confirmar Pago Móvil · Bs. ${formatBsNumber(amountToTransferBsCents)}`}
-                    </span>
+                    <>
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>Verificar pago con Banco de Venezuela</span>
+                    </>
                   )}
                 </button>
 
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 pt-1">
-                  <span className="inline-flex items-center gap-1.5">
-                    <Lock className="w-3 h-3 text-slate-400" />
-                    <span>Verificación automática segura</span>
-                  </span>
-                  <span className="inline-flex items-center gap-1.5">
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${
-                        data.watchdog.online ? "bg-emerald-500" : "bg-amber-400"
-                      }`}
-                    />
-                    <span>
-                      {data.watchdog.online
-                        ? "Sensor bancario en línea"
-                        : "Confirmación pendiente"}
-                    </span>
-                  </span>
-                </div>
+                <p className="text-[11px] text-center text-slate-400">
+                  Verificación directa 24/7 con BDV. Si pagas de más, el excedente se
+                  acredita a tu saldo a favor; si pagas menos, queda abonado sin perder tu dinero.
+                </p>
               </form>
             </div>
           )}

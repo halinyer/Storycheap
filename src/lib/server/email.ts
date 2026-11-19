@@ -183,38 +183,75 @@ export async function sendOrderReadyEmail(params: {
   orderNumber: string;
   itemCount: number;
   partial?: boolean;
+  directTopupSummaries?: Array<{
+    productName: string;
+    denominationLabel: string;
+    targetSummary: string;
+    referenceCode?: string | null;
+  }>;
 }) {
   const orderUrl = `${getSiteUrl()}/order/${params.orderId}`;
+  const topups = params.directTopupSummaries ?? [];
+  const hasTopups = topups.length > 0;
+  const allTopups = hasTopups && topups.length >= params.itemCount;
+
   const subject = params.partial
     ? `Entrega parcial disponible · Pedido ${params.orderNumber}`
-    : `Tu pedido ${params.orderNumber} está listo`;
+    : allTopups
+      ? `¡Tu recarga directa del pedido ${params.orderNumber} fue acreditada!`
+      : `Tu pedido ${params.orderNumber} está listo`;
+
+  const rows: SummaryRow[] = [
+    { label: "N.° de pedido", value: params.orderNumber, mono: true },
+    {
+      label: "Artículos",
+      value: allTopups
+        ? `${params.itemCount} recarga${params.itemCount === 1 ? "" : "s"} directa${params.itemCount === 1 ? "" : "s"}`
+        : `${params.itemCount} artículo${params.itemCount === 1 ? "" : "s"}`,
+    },
+    {
+      label: "Estado",
+      value: params.partial
+        ? "Entrega parcial"
+        : allTopups
+          ? "Recarga acreditada"
+          : "Disponible",
+    },
+  ];
+
+  for (const t of topups.slice(0, 4)) {
+    rows.push({
+      label: `${t.productName} (${t.denominationLabel})`,
+      value: t.referenceCode
+        ? `${t.targetSummary} · Ref ${t.referenceCode}`
+        : t.targetSummary,
+      mono: true,
+    });
+  }
 
   const html = renderEmailShell({
     preheader: params.partial
-      ? `Ya tienes códigos disponibles para el pedido ${params.orderNumber}.`
-      : `Confirmamos tu pago. Accede para revelar tus códigos del pedido ${params.orderNumber}.`,
+      ? `Ya tienes entregas disponibles para el pedido ${params.orderNumber}.`
+      : allTopups
+        ? `Confirmamos tu pago y acreditamos tu recarga directa del pedido ${params.orderNumber}.`
+        : `Confirmamos tu pago. Accede para ver tu pedido ${params.orderNumber}.`,
     headerRight: `Pedido ${params.orderNumber}`,
     title: params.partial
-      ? "Primeros códigos disponibles"
-      : "Tu pedido está listo",
+      ? "Primeras entregas disponibles"
+      : allTopups
+        ? "¡Recarga directa acreditada!"
+        : "Tu pedido está listo",
     intro: params.partial
-      ? "Algunos artículos de tu compra ya fueron emitidos y puedes verlos ahora mientras completamos el resto."
-      : "Confirmamos tu pago y emitimos tus tarjetas digitales. Ya puedes consultarlas desde tu cuenta.",
-    rows: [
-      { label: "N.° de pedido", value: params.orderNumber, mono: true },
-      {
-        label: "Artículos",
-        value: `${params.itemCount} tarjeta${params.itemCount === 1 ? "" : "s"}`,
-      },
-      {
-        label: "Estado",
-        value: params.partial ? "Entrega parcial" : "Disponible",
-      },
-    ],
-    ctaLabel: "Ver mis códigos",
+      ? "Algunos artículos de tu compra ya fueron entregados y puedes verlos ahora mientras completamos el resto."
+      : allTopups
+        ? "Confirmamos tu pago y tu recarga fue enviada directamente a tu ID de juego. Puedes revisar el comprobante en tu pedido."
+        : "Confirmamos tu pago y procesamos tu entrega. Ya puedes consultarla desde tu cuenta.",
+    rows,
+    ctaLabel: allTopups ? "Ver comprobante de recarga" : "Ver mi pedido y códigos",
     ctaUrl: orderUrl,
-    securityNote:
-      "Por tu seguridad, los pines y códigos digitales nunca se envían en texto plano por correo electrónico.",
+    securityNote: allTopups
+      ? "Revisa dentro de tu juego que los diamantes/créditos ya aparezcan acreditados. Ante cualquier duda responde a este correo."
+      : "Por tu seguridad, los pines y códigos digitales nunca se envían en texto plano por correo electrónico.",
   });
 
   return dispatchEmail({

@@ -1315,7 +1315,7 @@ export function ProductsConsole({
   const [c1Items, setC1Items] = useState<CentralOneCatalogItem[] | null>(null);
   const [fazerItems, setFazerItems] = useState<CentralOneCatalogItem[] | null>(null);
   const [c1Search, setC1Search] = useState("");
-  const [c1ShowAllTypes, setC1ShowAllTypes] = useState(false);
+  const [c1TypeFilter, setC1TypeFilter] = useState<"all" | "pin" | "topup">("all");
   const [loadingC1, setLoadingC1] = useState(false);
   const [loadingFazer, setLoadingFazer] = useState(false);
   const [c1Callback, setC1Callback] = useState<
@@ -1417,10 +1417,14 @@ export function ProductsConsole({
     if (!activeSupplierItems) return [];
     const availableItems = activeSupplierItems.filter((item) => {
       if (!item.available) return false;
-      return c1ShowAllTypes ? true : !item.requiresTarget;
+      // Hide Login Mode products (email/password) — only allow Gift Card PINs and clean ID/UID top-ups
+      if (item.isLoginMode) return false;
+      if (c1TypeFilter === "pin") return !item.requiresTarget;
+      if (c1TypeFilter === "topup") return item.requiresTarget;
+      return true;
     });
     return availableItems.filter((item) => matchesSupplierTokens(item, c1Search));
-  }, [activeSupplierItems, c1Search, c1ShowAllTypes]);
+  }, [activeSupplierItems, c1Search, c1TypeFilter]);
 
   const visibleC1Items = useMemo(() => filteredC1Items.slice(0, 150), [filteredC1Items]);
 
@@ -2981,25 +2985,36 @@ export function ProductsConsole({
                 <div className="inline-flex rounded-xl bg-slate-950 border border-white/10 p-1">
                   <button
                     type="button"
-                    onClick={() => setC1ShowAllTypes(false)}
+                    onClick={() => setC1TypeFilter("all")}
                     className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
-                      !c1ShowAllTypes
+                      c1TypeFilter === "all"
                         ? "bg-white text-slate-950 font-semibold"
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Solo Gift Cards / PINs
+                    Todos
                   </button>
                   <button
                     type="button"
-                    onClick={() => setC1ShowAllTypes(true)}
+                    onClick={() => setC1TypeFilter("topup")}
                     className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
-                      c1ShowAllTypes
-                        ? "bg-white text-slate-950 font-semibold"
+                      c1TypeFilter === "topup"
+                        ? "bg-sky-400 text-slate-950 font-semibold"
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Ver todos (incl. Recargas ID)
+                    Recargas por ID
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setC1TypeFilter("pin")}
+                    className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                      c1TypeFilter === "pin"
+                        ? "bg-emerald-400 text-slate-950 font-semibold"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    Gift Cards / PINs
                   </button>
                 </div>
               )}
@@ -3041,9 +3056,16 @@ export function ProductsConsole({
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-semibold text-white">{item.name}</span>
                           {item.requiresTarget ? (
-                            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 text-[10px] font-medium">
-                              Recarga por ID
-                            </span>
+                            <>
+                              <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-400/25 text-[10px] font-medium">
+                                Recarga por ID
+                              </span>
+                              {item.supportsPlayerValidate && (
+                                <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-medium">
+                                  ✓ Valida Nickname
+                                </span>
+                              )}
+                            </>
                           ) : (
                             <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-medium">
                               PIN / Gift Card
@@ -3053,6 +3075,11 @@ export function ProductsConsole({
                         <div className="font-mono text-[11px] text-slate-400 flex flex-wrap gap-2 mt-0.5">
                           {item.region && <span className="text-sky-400">{item.region}</span>}
                           {item.sku && <span>{item.sku}</span>}
+                          {item.requiresTarget && item.targetFields?.length > 0 && (
+                            <span className="text-amber-300/90">
+                              Campos: {item.targetFields.join(", ")}
+                            </span>
+                          )}
                           <span className="text-slate-600">{item.id}</span>
                         </div>
                       </div>
@@ -3061,28 +3088,24 @@ export function ProductsConsole({
                           ${formatCostDisplay(item.resellerPriceRaw, item.resellerPriceCents)}{" "}
                           {item.currency}
                         </span>
-                        {c1Callback &&
-                          (item.requiresTarget ? (
-                            <span
-                              title="Este SKU requiere player_id en Central One; elige su versión PIN para Gift Cards."
-                              className="px-2.5 py-1.5 rounded-lg bg-white/[0.04] text-slate-500 text-[11px]"
-                            >
-                              Requiere ID
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                c1Callback(item);
-                                setC1ModalOpen(false);
-                                toast.success(`Vinculado: ${item.name}`);
-                              }}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white hover:bg-sky-300 text-slate-950 font-semibold"
-                            >
-                              <Check className="w-3.5 h-3.5" />
-                              <span>Vincular</span>
-                            </button>
-                          ))}
+                        {c1Callback && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              c1Callback(item);
+                              setC1ModalOpen(false);
+                              toast.success(
+                                item.requiresTarget
+                                  ? `Recarga por ID vinculada: ${item.name}`
+                                  : `Vinculado: ${item.name}`
+                              );
+                            }}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white hover:bg-sky-300 text-slate-950 font-semibold"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Vincular</span>
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}

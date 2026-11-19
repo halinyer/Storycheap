@@ -6,6 +6,7 @@ import { GiftCardGrid } from "@/components/storefront/gift-card-grid";
 import { HeroSection } from "@/components/storefront/hero-section";
 import { PayYourWay } from "@/components/storefront/pay-your-way";
 import { getBsRateCents, listCatalog } from "@/lib/server/repository";
+import { getEffectiveCustomerBsRateCents } from "@/lib/server/pagomovil-store";
 import { ensureFreshSupplierCatalogPrices } from "@/lib/server/supplier-sync";
 import { isStorePreviewMode } from "@/lib/server/env";
 import { CheckCircle2, Lock, ShieldCheck, Zap } from "lucide-react";
@@ -13,10 +14,11 @@ import { CheckCircle2, Lock, ShieldCheck, Zap } from "lucide-react";
 async function CatalogSectionLoader() {
   await connection();
   await ensureFreshSupplierCatalogPrices();
-  const [products, bsRateCents] = await Promise.all([
+  const [products, rawBsRateCents] = await Promise.all([
     listCatalog(false),
     getBsRateCents(),
   ]);
+  const bsRateCents = await getEffectiveCustomerBsRateCents(rawBsRateCents);
   return (
     <GiftCardGrid
       initialProducts={products}
@@ -68,10 +70,10 @@ export default function HomePage() {
                 01
               </div>
               <h3 className="text-base font-extrabold text-white">
-                Elige tarjeta y región
+                Elige Gift Card o Recarga ID
               </h3>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Selecciona tu marca, verifica que coincida con el país de tu cuenta y agrégala directo al carrito.
+                Selecciona tu tarjeta digital (verificando la región) o elige un paquete de recarga directa ingresando tu UID y servidor.
               </p>
             </div>
 
@@ -92,12 +94,12 @@ export default function HomePage() {
                 03
               </div>
               <h3 className="text-base font-extrabold text-white">
-                Recibe correo y revela en tu bóveda
+                Entrega instantánea y segura
               </h3>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Al confirmarse el pago te enviamos un correo automático desde{" "}
-                <span className="text-slate-200 font-semibold">pedidos@storycheap.com</span>{" "}
-                y desbloqueamos tu código cifrado en pantalla y en tu cuenta.
+                Al confirmarse el pago te notificamos desde{" "}
+                <span className="text-slate-200 font-semibold">pedidos@storycheap.com</span>
+                : revelamos tu código PIN cifrado en tu bóveda o acreditamos tu recarga directo al ID.
               </p>
             </div>
           </div>

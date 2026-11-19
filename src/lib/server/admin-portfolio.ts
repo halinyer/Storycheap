@@ -4,7 +4,10 @@ import {
   fetchLiveVenezuelaRates,
   getBsRateAutoSyncPolicy,
 } from "@/lib/server/exchange-rates";
-import { listBankNotifications } from "@/lib/server/pagomovil-store";
+import {
+  getPagoMovilSettings,
+  listBankNotifications,
+} from "@/lib/server/pagomovil-store";
 import {
   getBsRateCents,
   listCatalog,
@@ -32,6 +35,7 @@ export async function loadAdminPortfolioSnapshot(options?: {
     actualItemCostCents,
     includeTestOrders,
     pagoMovilNotifications,
+    pagoMovilSettings,
     liveRates,
     bsRatePolicy,
   ] = await Promise.all([
@@ -45,6 +49,7 @@ export async function loadAdminPortfolioSnapshot(options?: {
     listSupplierItemCostsAdmin(),
     getAdminIncludeTestsPreference(),
     listBankNotifications(150),
+    getPagoMovilSettings(),
     fetchLiveVenezuelaRates().catch(() => null),
     getBsRateAutoSyncPolicy(),
   ]);
@@ -77,6 +82,9 @@ export async function loadAdminPortfolioSnapshot(options?: {
     includeTestOrders,
     bsRateCents,
     replacementUsdtRateCents,
+    pagomovilIncomingFeePct: pagoMovilSettings.incomingFeePct,
+    pagomovilOutgoingFeePct: pagoMovilSettings.outgoingFeePct,
+    pagomovilFeePassThroughMode: pagoMovilSettings.feePassThroughMode,
   });
 
   const suppliers = await fetchSuppliersPortfolioSnapshot({
@@ -101,6 +109,9 @@ export async function loadAdminPortfolioSnapshot(options?: {
     includeTestOrders,
     bsRateCents,
     replacementUsdtRateCents,
+    pagomovilIncomingFeePct: pagoMovilSettings.incomingFeePct,
+    pagomovilOutgoingFeePct: pagoMovilSettings.outgoingFeePct,
+    pagomovilFeePassThroughMode: pagoMovilSettings.feePassThroughMode,
   });
 
   return {

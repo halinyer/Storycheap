@@ -5,6 +5,7 @@ import type {
   SupplierCostChangeRecord,
   SupplierPricingPolicy,
   SupplierSyncState,
+  TargetSchemaField,
 } from "@/types";
 import {
   evaluateSupplierPriceChange,
@@ -42,6 +43,10 @@ export interface LiveSupplierQuote {
   name?: string;
   sku?: string;
   region?: string;
+  requiresTarget?: boolean;
+  targetFields?: string[];
+  targetSchema?: TargetSchemaField[];
+  supportsPlayerValidate?: boolean;
 }
 
 const QUOTE_CACHE_TTL_MS = 45_000;
@@ -151,6 +156,10 @@ async function fetchCentralOneQuotes(
       name: item.name,
       sku: item.sku,
       region: item.region,
+      requiresTarget: item.requiresTarget,
+      targetFields: item.targetFields,
+      targetSchema: item.targetSchema,
+      supportsPlayerValidate: item.supportsPlayerValidate,
     });
   }
   centralOneQuoteCache = { fetchedAt: Date.now(), quotes: map };
@@ -243,6 +252,15 @@ export async function applyLiveQuoteToVariant(input: {
     lastSyncedAt: nowIso,
     supplierAvailable: quote.available,
     supplierStockCount: quote.stockCount,
+    ...(quote.provider === "centralone" && quote.requiresTarget !== undefined
+      ? {
+          requiresTarget: quote.requiresTarget,
+          targetFields: quote.targetFields ?? existingMeta?.targetFields ?? [],
+          targetSchema: quote.targetSchema ?? existingMeta?.targetSchema ?? [],
+          supportsPlayerValidate:
+            quote.supportsPlayerValidate ?? existingMeta?.supportsPlayerValidate ?? false,
+        }
+      : {}),
   };
 
   if (

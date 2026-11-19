@@ -6,7 +6,6 @@ import { z } from "zod";
 import { ADMIN_INCLUDE_TESTS_COOKIE } from "@/lib/server/admin-preferences";
 import {
   BANK_BY_CODE,
-  DEFAULT_ANDROID_PACKAGES_BY_BANK,
   normalizeVePhone,
 } from "@/lib/catalog-banks";
 import { requireAdminUser } from "@/lib/server/auth";
@@ -26,16 +25,15 @@ import {
 } from "@/lib/server/fulfillment";
 import { getPaymentGateway } from "@/lib/server/payments";
 import {
-  deleteBotDevice,
-  getActiveReceiverBankAccount,
   listBankNotifications,
-  registerBotDevice,
-  savePagoMovilBotSettings,
+  savePagoMovilSettings,
   saveReceiverBankAccount,
-  setBotDeviceActive,
 } from "@/lib/server/pagomovil-store";
-import { adminManualConfirmPagoMovil } from "@/lib/server/payments/pagomovil-bot";
-import { parseBankNotification } from "@/lib/server/payments/parsers";
+import {
+  adminManualConfirmPagoMovil,
+  adminTestBdvConciliacion,
+} from "@/lib/server/payments/pagomovil-bdv";
+import { parseUserBsInputToCents } from "@/lib/server/payments/bdv-api";
 import { buildTreasuryMovementWithFeePlan } from "@/lib/server/treasury-metrics";
 import {
   appendAuditLog,
@@ -79,6 +77,7 @@ import {
 import {
   getFazerCardsBalance,
   getFazerCardsCatalog,
+  isFazerCardsProductId,
 } from "@/lib/server/suppliers/fazercards";
 import { getReloadlyBalance } from "@/lib/server/suppliers/reloadly";
 import {
@@ -87,14 +86,15 @@ import {
   syncBsExchangeRateIfNeeded,
 } from "@/lib/server/exchange-rates";
 import {
+  fetchLiveQuoteForSku,
   invalidateSupplierQuoteCache,
   syncSupplierCatalogCosts,
 } from "@/lib/server/supplier-sync";
+import { isLoginModeTarget } from "@/lib/topup-targets";
 import type {
-  BotDeviceDTO,
   BsRateAutoSyncPolicy,
   LiveVenezuelaRatesSnapshot,
-  PagoMovilBotSettingsDTO,
+  PagoMovilSettingsDTO,
   ProviderConfigDTO,
   SourcePriority,
   SupplierPricingPolicy,
@@ -466,11 +466,54 @@ export async function updateVariantAdminAction(input: {
     validatedVolumeDiscounts = check.tiers;
   }
 
+  let resolvedSourcePriority = input.sourcePriority;
+  let targetMetaPatch: Partial<VariantPricingMeta> = {};
+
+  if (input.centraloneProductId && !isFazerCardsProductId(input.centraloneProductId)) {
+    const liveQuote = await fetchLiveQuoteForSku(input.centraloneProductId).catch(
+      () => null
+    );
+    if (liveQuote?.requiresTarget) {
+      if (
+        isLoginModeTarget(
+          liveQuote.targetFields,
+          liveQuote.targetSchema,
+          liveQuote.name
+        )
+      ) {
+        throw new Error(
+          "Este SKU de Central One es modo Login (correo/contraseña). Solo están habilitadas las recargas directas por ID/UID."
+        );
+      }
+      resolvedSourcePriority = "centralone_only";
+      targetMetaPatch = {
+        requiresTarget: true,
+        targetFields: liveQuote.targetFields ?? [],
+        targetSchema: liveQuote.targetSchema ?? [],
+        supportsPlayerValidate: Boolean(liveQuote.supportsPlayerValidate),
+      };
+    } else if (liveQuote) {
+      targetMetaPatch = {
+        requiresTarget: false,
+        targetFields: [],
+        targetSchema: [],
+        supportsPlayerValidate: false,
+      };
+    }
+  } else {
+    targetMetaPatch = {
+      requiresTarget: false,
+      targetFields: [],
+      targetSchema: [],
+      supportsPlayerValidate: false,
+    };
+  }
+
   await updateVariantAdmin(input.variantId, {
     denominationLabel: trimmedLabel,
     salePriceCents: input.salePriceCents,
     unitCostCents: input.unitCostCents,
-    sourcePriority: input.sourcePriority,
+    sourcePriority: resolvedSourcePriority,
     reloadlyProductId: input.reloadlyProductId,
     centraloneProductId: input.centraloneProductId,
     lowStockThreshold: input.lowStockThreshold,
@@ -488,6 +531,7 @@ export async function updateVariantAdminAction(input: {
     centraloneRegion: input.centraloneProductId
       ? (input.centraloneRegion ?? null)
       : null,
+    ...targetMetaPatch,
     ...(validatedVolumeDiscounts !== undefined
       ? { volumeDiscounts: validatedVolumeDiscounts }
       : {}),
@@ -808,14 +852,48 @@ export async function createProductAction(
 ) {
   const adminUser = await requireAdminUser();
   const parsed = createProductSchema.parse(input);
+  let resolvedSourcePriority = parsed.sourcePriority;
+  let targetMetaPatch: Partial<VariantPricingMeta> = {};
+  if (parsed.centraloneProductId && !isFazerCardsProductId(parsed.centraloneProductId)) {
+    const liveQuote = await fetchLiveQuoteForSku(parsed.centraloneProductId).catch(
+      () => null
+    );
+    if (liveQuote?.requiresTarget) {
+      if (
+        isLoginModeTarget(
+          liveQuote.targetFields,
+          liveQuote.targetSchema,
+          liveQuote.name
+        )
+      ) {
+        throw new Error(
+          "Este SKU de Central One es modo Login (correo/contraseña). Solo están habilitadas las recargas directas por ID/UID."
+        );
+      }
+      resolvedSourcePriority = "centralone_only";
+      targetMetaPatch = {
+        requiresTarget: true,
+        targetFields: liveQuote.targetFields ?? [],
+        targetSchema: liveQuote.targetSchema ?? [],
+        supportsPlayerValidate: Boolean(liveQuote.supportsPlayerValidate),
+      };
+    }
+  }
+
   const created = await createProductWithVariantAdmin({
     ...parsed,
+    sourcePriority: resolvedSourcePriority,
     centraloneProductId: parsed.centraloneProductId || null,
     reloadlyProductId: parsed.reloadlyProductId ?? null,
     active: true,
   });
 
-  if (parsed.exactCostUsd || parsed.centraloneProductName || parsed.centraloneSku) {
+  if (
+    parsed.exactCostUsd ||
+    parsed.centraloneProductName ||
+    parsed.centraloneSku ||
+    targetMetaPatch.requiresTarget
+  ) {
     await saveVariantPricingMeta(
       created.variantId,
       {
@@ -823,6 +901,7 @@ export async function createProductAction(
         centraloneProductName: parsed.centraloneProductName ?? null,
         centraloneSku: parsed.centraloneSku ?? null,
         centraloneRegion: parsed.centraloneRegion ?? null,
+        ...targetMetaPatch,
       },
       adminUser.id
     );
@@ -868,13 +947,47 @@ export async function createVariantAction(
 ) {
   const adminUser = await requireAdminUser();
   const parsed = createVariantSchema.parse(input);
+  let resolvedSourcePriority = parsed.sourcePriority;
+  let targetMetaPatch: Partial<VariantPricingMeta> = {};
+  if (parsed.centraloneProductId && !isFazerCardsProductId(parsed.centraloneProductId)) {
+    const liveQuote = await fetchLiveQuoteForSku(parsed.centraloneProductId).catch(
+      () => null
+    );
+    if (liveQuote?.requiresTarget) {
+      if (
+        isLoginModeTarget(
+          liveQuote.targetFields,
+          liveQuote.targetSchema,
+          liveQuote.name
+        )
+      ) {
+        throw new Error(
+          "Este SKU de Central One es modo Login (correo/contraseña). Solo están habilitadas las recargas directas por ID/UID."
+        );
+      }
+      resolvedSourcePriority = "centralone_only";
+      targetMetaPatch = {
+        requiresTarget: true,
+        targetFields: liveQuote.targetFields ?? [],
+        targetSchema: liveQuote.targetSchema ?? [],
+        supportsPlayerValidate: Boolean(liveQuote.supportsPlayerValidate),
+      };
+    }
+  }
+
   const variantId = await createVariantAdmin({
     ...parsed,
+    sourcePriority: resolvedSourcePriority,
     centraloneProductId: parsed.centraloneProductId || null,
     active: true,
   });
 
-  if (parsed.exactCostUsd || parsed.centraloneProductName || parsed.centraloneSku) {
+  if (
+    parsed.exactCostUsd ||
+    parsed.centraloneProductName ||
+    parsed.centraloneSku ||
+    targetMetaPatch.requiresTarget
+  ) {
     await saveVariantPricingMeta(
       variantId,
       {
@@ -882,6 +995,7 @@ export async function createVariantAction(
         centraloneProductName: parsed.centraloneProductName ?? null,
         centraloneSku: parsed.centraloneSku ?? null,
         centraloneRegion: parsed.centraloneRegion ?? null,
+        ...targetMetaPatch,
       },
       adminUser.id
     );
@@ -964,7 +1078,7 @@ export async function captureMonthlyCapitalSnapshotAction(
 }
 
 // ============================================================================
-// PAGO MOVIL BOT VERIFIER ADMIN ACTIONS
+// PAGO MOVIL BDV API CONCILIACION ADMIN ACTIONS
 // ============================================================================
 
 export async function saveReceiverBankAccountAction(input: {
@@ -974,44 +1088,34 @@ export async function saveReceiverBankAccountAction(input: {
   phone: string;
   dni: string;
   holderName: string;
-  allowedPackagesRaw?: string;
   active: boolean;
 }) {
   const adminUser = await requireAdminUser();
   const bankInfo = BANK_BY_CODE.get(input.bankCode.trim());
   const normalizedPhone = normalizeVePhone(input.phone);
   if (!normalizedPhone || normalizedPhone.length < 10) {
-    throw new Error("Ingresa un teléfono Pago Móvil venezolano válido (ej. 04121234567).");
+    throw new Error(
+      "Ingresa un teléfono Pago Móvil venezolano válido (ej. 04121234567)."
+    );
   }
   const cleanDni = input.dni.trim().toUpperCase();
   if (cleanDni.length < 5) {
-    throw new Error("Ingresa la cédula o RIF (ej. V-24123456).");
+    throw new Error("Ingresa la cédula o RIF (ej. J-500123456).");
   }
   const cleanHolder = input.holderName.trim();
   if (cleanHolder.length < 3) {
     throw new Error("Ingresa el nombre del titular de la cuenta.");
   }
 
-  const parsedPackages = input.allowedPackagesRaw
-    ? input.allowedPackagesRaw
-        .split(/[,\n]+/)
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : DEFAULT_ANDROID_PACKAGES_BY_BANK[input.bankCode.trim()] ?? [
-        "SMS",
-        "EMAIL",
-      ];
-
   const saved = await saveReceiverBankAccount(
     {
       id: input.id,
       bankCode: input.bankCode.trim(),
-      bankName: bankInfo?.name ?? "Pago Móvil",
+      bankName: bankInfo?.name ?? "Banco de Venezuela",
       accountType: input.accountType,
       phone: normalizedPhone,
       dni: cleanDni,
       holderName: cleanHolder,
-      allowedPackages: parsedPackages,
       active: input.active,
     },
     adminUser.id
@@ -1031,132 +1135,16 @@ export async function saveReceiverBankAccountAction(input: {
   });
 
   revalidatePath("/admin/pagomovil");
+  revalidatePath("/admin/treasury");
   revalidatePath("/checkout");
   return saved;
 }
 
-export async function allowBotAppPackageAction(appPackage: string) {
-  const adminUser = await requireAdminUser();
-  const cleanPkg = appPackage.trim();
-  if (!cleanPkg || /^[\{\[].*[\}\]]$/.test(cleanPkg)) {
-    throw new Error(
-      "Nombre de paquete inválido (MacroDroid envió una variable literal sin valor)."
-    );
-  }
-  const activeAccount = await getActiveReceiverBankAccount();
-  if (!activeAccount) {
-    throw new Error("No hay ninguna cuenta receptora Pago Móvil activa.");
-  }
-  const exists = activeAccount.allowedPackages.some(
-    (p) => p.toLowerCase() === cleanPkg.toLowerCase()
-  );
-  const nextPackages = exists
-    ? activeAccount.allowedPackages
-    : [...activeAccount.allowedPackages, cleanPkg];
-
-  const saved = await saveReceiverBankAccount(
-    {
-      id: activeAccount.id,
-      bankCode: activeAccount.bankCode,
-      bankName: activeAccount.bankName,
-      accountType: activeAccount.accountType,
-      phone: activeAccount.phone,
-      dni: activeAccount.dni,
-      holderName: activeAccount.holderName,
-      allowedPackages: nextPackages,
-      active: activeAccount.active,
-    },
-    adminUser.id
-  );
-
-  await appendAuditLog({
-    actorId: adminUser.id,
-    actorRole: adminUser.role,
-    action: "pagomovil.allow_app_package",
-    targetType: "receiver_bank_account",
-    targetId: saved.id,
-    metadata: { appPackage: cleanPkg },
-  });
-
-  revalidatePath("/admin/pagomovil");
-  return saved;
-}
-
-export async function registerBotDeviceAction(input: {
-  name: string;
-  channelType: BotDeviceDTO["channelType"];
-  allowPlainBearer: boolean;
-  deviceIdentifier?: string;
-}) {
-  const adminUser = await requireAdminUser();
-  const cleanName = input.name.trim();
-  if (cleanName.length < 2) {
-    throw new Error("El nombre del dispositivo debe tener al menos 2 caracteres.");
-  }
-
-  const res = await registerBotDevice(
-    {
-      name: cleanName,
-      channelType: input.channelType,
-      allowPlainBearer: input.allowPlainBearer,
-      deviceIdentifier: input.deviceIdentifier?.trim() || undefined,
-    },
-    adminUser.id
-  );
-
-  await appendAuditLog({
-    actorId: adminUser.id,
-    actorRole: adminUser.role,
-    action: "pagomovil.register_device",
-    targetType: "bot_device",
-    targetId: res.device.id,
-    metadata: {
-      name: res.device.name,
-      channelType: res.device.channelType,
-      allowPlainBearer: res.device.allowPlainBearer,
-    },
-  });
-
-  revalidatePath("/admin/pagomovil");
-  return res;
-}
-
-export async function toggleBotDeviceAction(input: {
-  deviceId: string;
-  active: boolean;
-}) {
-  const adminUser = await requireAdminUser();
-  await setBotDeviceActive(input.deviceId, input.active, adminUser.id);
-  await appendAuditLog({
-    actorId: adminUser.id,
-    actorRole: adminUser.role,
-    action: "pagomovil.toggle_device",
-    targetType: "bot_device",
-    targetId: input.deviceId,
-    metadata: { active: input.active },
-  });
-  revalidatePath("/admin/pagomovil");
-}
-
-export async function deleteBotDeviceAction(deviceId: string) {
-  const adminUser = await requireAdminUser();
-  await deleteBotDevice(deviceId, adminUser.id);
-  await appendAuditLog({
-    actorId: adminUser.id,
-    actorRole: adminUser.role,
-    action: "pagomovil.delete_device",
-    targetType: "bot_device",
-    targetId: deviceId,
-    metadata: {},
-  });
-  revalidatePath("/admin/pagomovil");
-}
-
-export async function savePagoMovilBotSettingsAction(
-  input: Partial<PagoMovilBotSettingsDTO>
+export async function savePagoMovilSettingsAction(
+  input: Partial<PagoMovilSettingsDTO>
 ) {
   const adminUser = await requireAdminUser();
-  const saved = await savePagoMovilBotSettings(input, adminUser.id);
+  const saved = await savePagoMovilSettings(input, adminUser.id);
   await appendAuditLog({
     actorId: adminUser.id,
     actorRole: adminUser.role,
@@ -1166,32 +1154,37 @@ export async function savePagoMovilBotSettingsAction(
     metadata: { ...saved },
   });
   revalidatePath("/admin/pagomovil");
+  revalidatePath("/admin/banks");
+  revalidatePath("/admin/treasury");
+  revalidatePath("/admin");
+  revalidatePath("/");
   revalidatePath("/checkout");
   return saved;
 }
 
-export async function testNotificationParserAction(input: {
-  title?: string;
-  content: string;
-  appPackage?: string;
-  sourceType?: "APP_PUSH" | "SMS" | "EMAIL";
-  preferredBankCode?: string;
+export async function testBdvConciliacionAction(input: {
+  cedulaPagador: string;
+  telefonoPagador: string;
+  telefonoDestino?: string;
+  referencia: string;
+  fechaPago?: string;
+  importeBs: string;
+  bancoOrigen: string;
 }) {
   await requireAdminUser();
-  if (!input.content.trim()) {
-    throw new Error("Ingresa el texto de prueba de la notificación.");
+  const amountBsCents = parseUserBsInputToCents(input.importeBs);
+  if (!amountBsCents || amountBsCents <= 0) {
+    throw new Error("Ingresa un monto en Bs válido (ej. 120.00).");
   }
-  const parsed = parseBankNotification({
-    title: input.title ?? null,
-    content: input.content,
-    appPackage: input.appPackage ?? null,
-    sourceType: input.sourceType ?? "APP_PUSH",
-    preferredBankCode: input.preferredBankCode ?? "0172",
+  return adminTestBdvConciliacion({
+    cedulaPagador: input.cedulaPagador,
+    telefonoPagador: input.telefonoPagador,
+    telefonoDestino: input.telefonoDestino,
+    referencia: input.referencia,
+    fechaPago: input.fechaPago,
+    importeBsCents: amountBsCents,
+    bancoOrigen: input.bancoOrigen,
   });
-  const senderBankName = parsed.senderBankCode
-    ? BANK_BY_CODE.get(parsed.senderBankCode)?.name ?? null
-    : null;
-  return { ...parsed, senderBankName };
 }
 
 export async function manualConfirmPagoMovilAction(input: {

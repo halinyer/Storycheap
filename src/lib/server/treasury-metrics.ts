@@ -1,3 +1,4 @@
+import { computeBdvFeeRates, type BdvFeePassThroughMode } from "@/lib/bdv-fees";
 import type {
   OrderDTO,
   SupplierPortfolioRow,
@@ -36,6 +37,12 @@ export interface ComputeTreasuryPositionInput {
   includeTestOrders?: boolean;
   bsRateCents?: number | null;
   replacementUsdtRateCents?: number | null;
+  /** Comisión % de entrada que descuenta BDV al recibir Pago Móvil jurídico (default 0 en tests, 1.5% en vivo) */
+  pagomovilIncomingFeePct?: number;
+  /** Comisión % estimada de salida/retiro al mover fondos Bs fuera de BDV (default 0 en tests, 1.5% en vivo) */
+  pagomovilOutgoingFeePct?: number;
+  /** Si el recargo BDV fue trasladado al cliente en Bs ("incoming" | "both"), el 1.5% de entrada no reduce tu utilidad USD */
+  pagomovilFeePassThroughMode?: BdvFeePassThroughMode;
 }
 
 /**
@@ -56,11 +63,38 @@ export function computeTreasuryPosition({
   includeTestOrders = false,
   bsRateCents = null,
   replacementUsdtRateCents = null,
+  pagomovilIncomingFeePct = 0,
+  pagomovilOutgoingFeePct = 0,
+  pagomovilFeePassThroughMode = "off",
 }: ComputeTreasuryPositionInput): TreasuryPositionSummary {
   const activeOrdersMetrics = summarizeOrdersMetrics(orders, actualItemCostCents, {
     includeTestOrders,
     matchedBsByOrder,
   });
+
+  const feeRates = computeBdvFeeRates(
+    pagomovilIncomingFeePct,
+    pagomovilOutgoingFeePct
+  );
+  const pagomovilIncomingFeeBsCents =
+    activeOrdersMetrics.pagomovilBsCents > 0 && feeRates.incomingFeePct > 0
+      ? Math.round(
+          (activeOrdersMetrics.pagomovilBsCents * feeRates.incomingFeePct) / 100
+        )
+      : 0;
+  // When pass-through ("incoming" or "both") is enabled, the customer paid the gross-up on top of the
+  // target net Bs so 100% of the USD sale value lands cleanly in the BDV account.
+  const incomingFeeCoveredByCustomer =
+    pagomovilFeePassThroughMode === "incoming" ||
+    pagomovilFeePassThroughMode === "both";
+  const pagomovilIncomingFeeUsdCents =
+    !incomingFeeCoveredByCustomer &&
+    activeOrdersMetrics.pagomovilCents > 0 &&
+    feeRates.incomingFeePct > 0
+      ? Math.round(
+          (activeOrdersMetrics.pagomovilCents * feeRates.incomingFeePct) / 100
+        )
+      : 0;
 
   const supplierIdSet = new Set(suppliers.map((s) => s.id));
   const fundedBySupplierUsdCents: Record<string, number> = {};
@@ -69,8 +103,11 @@ export function computeTreasuryPosition({
   }
 
   let zenobankBalanceUsdCents = activeOrdersMetrics.zenobankCents;
-  let pagomovilBalanceUsdCents = activeOrdersMetrics.pagomovilCents;
-  let pagomovilBalanceBsCents = activeOrdersMetrics.pagomovilBsCents;
+  // Real balance credited in BDV bank account = Gross Pago Móvil minus incoming bank fee (e.g. 1.5%)
+  let pagomovilBalanceUsdCents =
+    activeOrdersMetrics.pagomovilCents - pagomovilIncomingFeeUsdCents;
+  let pagomovilBalanceBsCents =
+    activeOrdersMetrics.pagomovilBsCents - pagomovilIncomingFeeBsCents;
 
   // Weighted average Bs/USD book rate from historical Pago Movil sales for clean P2P Bs -> USDT swaps
   const weightedBookBsRateCents =
@@ -85,7 +122,7 @@ export function computeTreasuryPosition({
 
   let netContributedCapitalUsdCents = 0;
   let withdrawnProfitUsdCents = 0;
-  let expensesUsdCents = 0;
+  let expensesUsdCents = pagomovilIncomingFeeUsdCents;
   let reconciliationNetUsdCents = 0;
   let exchangeDiffUsdCents = 0;
 
@@ -119,8 +156,17 @@ export function computeTreasuryPosition({
         if (m.sourceAccount === "zenobank") {
           zenobankBalanceUsdCents -= usd;
         } else if (m.sourceAccount === "pagomovil") {
-          pagomovilBalanceUsdCents -= usd;
           pagomovilBalanceBsCents -= bs;
+          const releasedBookUsdCents =
+            bs > 0 && weightedBookBsRateCents
+              ? pagomovilBalanceBsCents <= 0 && pagomovilBalanceUsdCents > 0
+                ? pagomovilBalanceUsdCents
+                : Math.round((bs * 100) / weightedBookBsRateCents)
+              : usd;
+          pagomovilBalanceUsdCents -= releasedBookUsdCents;
+          if (bs > 0 && weightedBookBsRateCents) {
+            exchangeDiffUsdCents += usd - releasedBookUsdCents;
+          }
         } else if (m.sourceAccount === "external") {
           netContributedCapitalUsdCents += usd;
         }
@@ -270,22 +316,50 @@ export function computeTreasuryPosition({
         : pagomovilBalanceUsdCents
       : 0;
 
+  const pagomovilEstimatedOutgoingFeeBsCents =
+    pagomovilBalanceBsCents > 0 && feeRates.outgoingFeePct > 0
+      ? Math.round((pagomovilBalanceBsCents * feeRates.outgoingFeePct) / 100)
+      : 0;
+  const pagomovilNetLiquidableBsCents = Math.max(
+    0,
+    pagomovilBalanceBsCents - pagomovilEstimatedOutgoingFeeBsCents
+  );
+  const pagomovilNetLiquidableUsdtCents =
+    pagomovilNetLiquidableBsCents > 0
+      ? effectiveReplacementRateCents && effectiveReplacementRateCents > 0
+        ? Math.round(
+            (pagomovilNetLiquidableBsCents * 100) / effectiveReplacementRateCents
+          )
+        : Math.max(
+            0,
+            Math.round(
+              pagomovilBalanceUsdCents * (1 - feeRates.outgoingFeePct / 100)
+            )
+          )
+      : 0;
+  const pagomovilEstimatedOutgoingFeeUsdCents = Math.max(
+    0,
+    pagomovilMarkToMarketUsdtCents - pagomovilNetLiquidableUsdtCents
+  );
+
   const unrealizedExchangeDiffUsdCents =
     pagomovilBalanceBsCents > 0
       ? pagomovilMarkToMarketUsdtCents - pagomovilBalanceUsdCents
       : 0;
 
   const pagomovilRealNetProfitUsdCents =
-    pagomovilNominalProfitUsdCents +
+    pagomovilNominalProfitUsdCents -
+    pagomovilIncomingFeeUsdCents +
     exchangeDiffUsdCents +
     unrealizedExchangeDiffUsdCents;
 
+  const netCreditedSalesBsCents = Math.max(
+    0,
+    activeOrdersMetrics.pagomovilBsCents - pagomovilIncomingFeeBsCents
+  );
   const pagomovilBreakEvenRateCents =
-    pagomovilSalesCostUsdCents > 0 && activeOrdersMetrics.pagomovilBsCents > 0
-      ? Math.floor(
-          (activeOrdersMetrics.pagomovilBsCents * 100) /
-            pagomovilSalesCostUsdCents
-        )
+    pagomovilSalesCostUsdCents > 0 && netCreditedSalesBsCents > 0
+      ? Math.floor((netCreditedSalesBsCents * 100) / pagomovilSalesCostUsdCents)
       : null;
 
   return {
@@ -317,6 +391,16 @@ export function computeTreasuryPosition({
     pagomovilSalesGrossBsCents: activeOrdersMetrics.pagomovilBsCents,
     pagomovilSalesCostUsdCents,
     pagomovilNominalProfitUsdCents,
+    pagomovilIncomingFeePct: feeRates.incomingFeePct,
+    pagomovilOutgoingFeePct: feeRates.outgoingFeePct,
+    pagomovilIncomingFeeBsCents,
+    pagomovilIncomingFeeUsdCents,
+    pagomovilEstimatedOutgoingFeeBsCents,
+    pagomovilEstimatedOutgoingFeeUsdCents,
+    pagomovilNetLiquidableBsCents,
+    pagomovilNetLiquidableUsdtCents,
+    pagomovilCombinedBankFeePct: feeRates.combinedEffectiveFeePct,
+    pagomovilRequiredMarkupPct: feeRates.requiredMarkupPct,
     weightedBookBsRateCents,
     replacementUsdtRateCents: effectiveReplacementRateCents,
     pagomovilMarkToMarketUsdtCents,
@@ -367,10 +451,12 @@ export function buildTreasuryMovementWithFeePlan(input: {
     );
   }
 
-  const fromExternal =
-    input.sourceAccount === "external" || input.movementType === "CAPITAL_IN";
+  const chargeFeeToTarget =
+    input.sourceAccount === "external" ||
+    input.movementType === "CAPITAL_IN" ||
+    (input.movementType === "SUPPLIER_TOPUP" && input.sourceAccount === "pagomovil");
 
-  if (fromExternal) {
+  if (chargeFeeToTarget) {
     return {
       primaryAmountUsdCents: input.amountUsdCents,
       feeEntry: {

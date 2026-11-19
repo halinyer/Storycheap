@@ -1,5 +1,5 @@
 import { connection, NextResponse } from "next/server";
-import { getPagoMovilAvailabilitySnapshot } from "@/lib/server/payments/pagomovil-bot";
+import { getPagoMovilAvailabilitySnapshot } from "@/lib/server/payments/pagomovil-bdv";
 
 export async function GET() {
   await connection();
@@ -14,12 +14,9 @@ export async function GET() {
       {
         enabled: false,
         configured: false,
+        bdvApiConfigured: false,
         available: false,
         bsRateCents: null,
-        watchdogOnline: false,
-        watchdogRequired: false,
-        activeDevices: 0,
-        lastHeartbeatAt: null,
         receiverBankName: null,
         receiverAccountType: null,
       },

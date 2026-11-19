@@ -2,16 +2,22 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getServerSessionUser } from "@/lib/server/auth";
 import { hasOrderAccessCookie } from "@/lib/server/order-access";
+import { checkRateLimit } from "@/lib/server/rate-limit";
+import { parseUserBsInputToCents } from "@/lib/server/payments/bdv-api";
 import {
   PagoMovilAuthError,
   verifyOrderPagoMovilClaim,
-} from "@/lib/server/payments/pagomovil-bot";
+} from "@/lib/server/payments/pagomovil-bdv";
 
 const verifySchema = z.object({
   orderId: z.string().min(1),
   referenceDigits: z.string().trim().min(4).max(32),
-  senderBankCode: z.string().trim().max(12).optional().nullable(),
-  senderPhone: z.string().trim().max(25).optional().nullable(),
+  senderBankCode: z.string().trim().min(4).max(12),
+  senderPhone: z.string().trim().min(10).max(25),
+  senderDni: z.string().trim().min(5).max(20),
+  amountBs: z.union([z.string(), z.number()]).optional().nullable(),
+  amountBsCents: z.number().int().positive().optional().nullable(),
+  paymentDate: z.string().trim().max(16).optional().nullable(),
 });
 
 export async function POST(request: Request) {
@@ -29,12 +35,46 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return NextResponse.json(
       {
-        error: "Datos inválidos. Verifica la referencia bancaria ingresada.",
+        error:
+          "Completa todos los campos requeridos por Banco de Venezuela (Referencia, Banco, Teléfono y Cédula).",
         issues: parsed.error.issues,
       },
       { status: 400 }
     );
   }
+
+  const ip =
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    request.headers.get("x-real-ip") ||
+    "unknown";
+
+  const rl = checkRateLimit({
+    key: `pm_bdv_verify:${parsed.data.orderId}:${ip}`,
+    limit: 12,
+    windowMs: 60_000,
+  });
+  if (!rl.allowed) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "BDV_API_ERROR",
+        error:
+          "Demasiados intentos de verificación. Espera unos segundos antes de volver a consultar con Banco de Venezuela.",
+      },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfterSeconds) },
+      }
+    );
+  }
+
+  const resolvedAmountBsCents =
+    typeof parsed.data.amountBsCents === "number" &&
+    parsed.data.amountBsCents > 0
+      ? parsed.data.amountBsCents
+      : parsed.data.amountBs !== undefined && parsed.data.amountBs !== null
+        ? parseUserBsInputToCents(parsed.data.amountBs)
+        : null;
 
   try {
     const [actorUser, hasOrderCookie] = await Promise.all([
@@ -47,8 +87,11 @@ export async function POST(request: Request) {
       actorUser,
       hasOrderCookie,
       referenceDigits: parsed.data.referenceDigits,
-      senderBankCode: parsed.data.senderBankCode ?? null,
-      senderPhone: parsed.data.senderPhone ?? null,
+      senderBankCode: parsed.data.senderBankCode,
+      senderPhone: parsed.data.senderPhone,
+      senderDni: parsed.data.senderDni,
+      amountBsCents: resolvedAmountBsCents,
+      paymentDate: parsed.data.paymentDate ?? null,
     });
 
     return NextResponse.json(result, {
@@ -60,7 +103,7 @@ export async function POST(request: Request) {
     }
     console.error("[api/payments/pagomovil/verify] Error:", err);
     return NextResponse.json(
-      { error: "No se pudo verificar el Pago Móvil." },
+      { error: "No se pudo verificar el Pago Móvil con Banco de Venezuela." },
       { status: 500 }
     );
   }

@@ -12,6 +12,7 @@ import React, {
 import { useRouter } from "next/navigation";
 import { type DisplayCurrency } from "@/lib/currency";
 import { createSupabaseBrowserClient } from "@/lib/supabase";
+import { buildCartLineKey } from "@/lib/topup-targets";
 import {
   computeCartTotals,
   MAX_ORDER_QUANTITY_PER_LINE,
@@ -98,12 +99,17 @@ function writeCartToStorage(items: CartItem[]) {
   window.dispatchEvent(new Event(CART_EVENT));
 }
 
+export type CatalogCategoryFilter = Category | "ALL" | "topup";
+export type CatalogDeliveryFilter = "all" | "pin" | "topup";
+
 interface StoreContextValue {
   // Storefront filters
   searchQuery: string;
   setSearchQuery: (q: string) => void;
-  selectedCategory: Category | "ALL";
-  setSelectedCategory: (cat: Category | "ALL") => void;
+  selectedCategory: CatalogCategoryFilter;
+  setSelectedCategory: (cat: CatalogCategoryFilter) => void;
+  deliveryFilter: CatalogDeliveryFilter;
+  setDeliveryFilter: (filter: CatalogDeliveryFilter) => void;
   selectedRegion: Region | "ALL";
   setSelectedRegion: (reg: Region | "ALL") => void;
 
@@ -142,9 +148,30 @@ const StoreContext = createContext<StoreContextValue | undefined>(undefined);
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState<Category | "ALL">("ALL");
+  const [selectedCategory, setSelectedCategoryState] =
+    useState<CatalogCategoryFilter>("ALL");
+  const [deliveryFilter, setDeliveryFilterState] =
+    useState<CatalogDeliveryFilter>("all");
   const [selectedRegion, setSelectedRegion] = useState<Region | "ALL">("ALL");
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
+
+  const setSelectedCategory = useCallback((cat: CatalogCategoryFilter) => {
+    setSelectedCategoryState(cat);
+    if (cat === "topup") {
+      setDeliveryFilterState("topup");
+    } else {
+      setDeliveryFilterState("all");
+    }
+  }, []);
+
+  const setDeliveryFilter = useCallback((filter: CatalogDeliveryFilter) => {
+    setDeliveryFilterState(filter);
+    if (filter === "topup") {
+      setSelectedCategoryState((prev) => (prev === "ALL" ? "topup" : prev));
+    } else {
+      setSelectedCategoryState((prev) => (prev === "topup" ? "ALL" : prev));
+    }
+  }, []);
 
   const cartItems = useSyncExternalStore(
     subscribeCart,
@@ -368,15 +395,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const addToCart = useCallback(
     (item: Omit<CartItem, "quantity">, qty = 1) => {
       const current = readCartFromStorage();
-      const idx = current.findIndex((c) => c.variantId === item.variantId);
+      const lineKey = item.cartKey ?? buildCartLineKey(item.variantId, item.targetPayload);
+      const idx = current.findIndex(
+        (c) => (c.cartKey ?? buildCartLineKey(c.variantId, c.targetPayload)) === lineKey
+      );
       let next: CartItem[];
       if (idx >= 0) {
         next = current.map((c, i) =>
           i === idx
             ? {
                 ...c,
+                cartKey: lineKey,
                 unitPriceCents: item.unitPriceCents,
                 volumeDiscounts: item.volumeDiscounts,
+                requiresTarget: item.requiresTarget,
+                targetPayload: item.targetPayload ?? c.targetPayload,
+                targetSummary: item.targetSummary ?? c.targetSummary,
+                verifiedPlayerName: item.verifiedPlayerName ?? c.verifiedPlayerName,
+                targetValidationStatus:
+                  item.targetValidationStatus ?? c.targetValidationStatus,
                 quantity: Math.min(MAX_ORDER_QUANTITY_PER_LINE, c.quantity + qty),
               }
             : c
@@ -386,6 +423,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           ...current,
           {
             ...item,
+            cartKey: lineKey,
             quantity: Math.min(MAX_ORDER_QUANTITY_PER_LINE, Math.max(1, qty)),
           },
         ];
@@ -395,21 +433,26 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
-  const updateQuantity = useCallback((variantId: string, quantity: number) => {
+  const updateQuantity = useCallback((keyOrVariantId: string, quantity: number) => {
     const current = readCartFromStorage();
+    const matches = (c: CartItem) =>
+      (c.cartKey ?? buildCartLineKey(c.variantId, c.targetPayload)) === keyOrVariantId ||
+      c.variantId === keyOrVariantId;
     const next =
       quantity <= 0
-        ? current.filter((c) => c.variantId !== variantId)
+        ? current.filter((c) => !matches(c))
         : current.map((c) =>
-            c.variantId === variantId
-              ? { ...c, quantity: Math.min(10, quantity) }
-              : c
+            matches(c) ? { ...c, quantity: Math.min(10, quantity) } : c
           );
     writeCartToStorage(next);
   }, []);
 
-  const removeFromCart = useCallback((variantId: string) => {
-    const next = readCartFromStorage().filter((c) => c.variantId !== variantId);
+  const removeFromCart = useCallback((keyOrVariantId: string) => {
+    const next = readCartFromStorage().filter(
+      (c) =>
+        (c.cartKey ?? buildCartLineKey(c.variantId, c.targetPayload)) !== keyOrVariantId &&
+        c.variantId !== keyOrVariantId
+    );
     writeCartToStorage(next);
   }, []);
 
@@ -524,6 +567,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setSearchQuery,
       selectedCategory,
       setSelectedCategory,
+      deliveryFilter,
+      setDeliveryFilter,
       selectedRegion,
       setSelectedRegion,
       displayCurrency,
@@ -553,6 +598,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [
       searchQuery,
       selectedCategory,
+      setSelectedCategory,
+      deliveryFilter,
+      setDeliveryFilter,
       selectedRegion,
       displayCurrency,
       setDisplayCurrency,

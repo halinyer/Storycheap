@@ -520,6 +520,9 @@ export async function getFazerCardsCatalog(query?: string): Promise<CentralOneCa
             resellerPriceCents: priceCents,
             currency: "USD",
             requiresTarget: false,
+            targetFields: [],
+            targetSchema: [],
+            isLoginMode: false,
             available: offer.stock > 0,
           },
         });

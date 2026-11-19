@@ -4,18 +4,19 @@ import { normalizeVolumeDiscountTiers } from "@/lib/volume-discounts";
 import type {
   AuditLogEntryDTO,
   BankPaymentNotificationDTO,
-  BotDeviceDTO,
   BsRateAutoSyncPolicy,
   CreditLedgerEntryDTO,
   CustomerSummaryDTO,
   InventoryStatus,
   OrderDTO,
   OrderItemDTO,
-  PagoMovilBotSettingsDTO,
+  OrderItemTargetInfo,
+  PagoMovilSettingsDTO,
   ProductDTO,
   ProviderConfigDTO,
   ReceiverBankAccountDTO,
   SupportTicketDTO,
+  TargetSchemaField,
   TreasuryMovementDTO,
   VolumeDiscountTier,
   WebhookEventDTO,
@@ -66,10 +67,6 @@ export interface SandboxProfile {
   createdAt: string;
 }
 
-export interface SandboxBotDeviceRow extends BotDeviceDTO {
-  secretCiphertext: string;
-}
-
 export interface SandboxOrderPagoMovilReport {
   orderId: string;
   amountDueBsCents: number | null;
@@ -77,17 +74,19 @@ export interface SandboxOrderPagoMovilReport {
   reportedReference: string | null;
   reportedSenderPhone: string | null;
   reportedSenderBank: string | null;
+  reportedSenderDni?: string | null;
+  reportedAmountBsCents?: number | null;
+  reportedPaymentDate?: string | null;
   reportedAt: string | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
 }
 
 export interface SandboxPagoMovilState {
-  devices: SandboxBotDeviceRow[];
   receiverAccounts: ReceiverBankAccountDTO[];
   notifications: BankPaymentNotificationDTO[];
   orderReports: Record<string, SandboxOrderPagoMovilReport>;
-  settings: PagoMovilBotSettingsDTO;
+  settings: PagoMovilSettingsDTO;
   webhookSecretCiphertext: string | null;
 }
 
@@ -108,6 +107,25 @@ export interface SandboxState {
   pagoMovil: SandboxPagoMovilState;
   treasuryMovements: TreasuryMovementDTO[];
   supportTickets: SupportTicketDTO[];
+  orderItemTargets: Record<string, Record<string, OrderItemTargetInfo>>;
+  supplierOrders: Array<{
+    id: string;
+    orderId: string;
+    orderItemId: string;
+    provider: string;
+    idempotencyKey: string;
+    externalOrderId: string | null;
+    referenceCode: string | null;
+    status: string;
+    expectedQty: number;
+    deliveredCount: number;
+    supplierUnitCostCents: number | null;
+    lastSequence: number;
+    errorMessage: string | null;
+    rawPayload: Record<string, unknown>;
+    createdAt: string;
+    updatedAt: string;
+  }>;
   variantPricingMeta: Record<
     string,
     {
@@ -120,6 +138,10 @@ export interface SandboxState {
       supplierAvailable?: boolean | null;
       supplierStockCount?: number | null;
       volumeDiscounts?: VolumeDiscountTier[];
+      requiresTarget?: boolean;
+      targetFields?: string[];
+      targetSchema?: TargetSchemaField[];
+      supportsPlayerValidate?: boolean;
     }
   >;
 }
@@ -247,17 +269,15 @@ function createInitialSandboxState(): SandboxState {
     bsRateCents: null,
     variantPricingMeta: {},
     pagoMovil: {
-      devices: [],
       receiverAccounts: [
         {
-          id: "90000000-0000-4000-8000-000000000172",
-          bankCode: "0172",
-          bankName: "Bancamiga Banco Universal",
-          accountType: "natural",
+          id: "90000000-0000-4000-8000-000000000102",
+          bankCode: "0102",
+          bankName: "Banco de Venezuela",
+          accountType: "juridical",
           phone: "04120000000",
-          dni: "V-00000000",
-          holderName: "StoryCheap Demo Bancamiga",
-          allowedPackages: ["com.bancamiga.suite", "com.bancamiga", "com.bancamiga.mobile", "SMS", "EMAIL"],
+          dni: "J-000000000",
+          holderName: "StoryCheap Demo BDV",
           active: false,
           createdAt: now,
           updatedAt: now,
@@ -269,15 +289,16 @@ function createInitialSandboxState(): SandboxState {
         rateExpirationMinutes: 20,
         orderExpirationMinutes: 25,
         amountToleranceBsCents: 5,
-        watchdogOfflineMinutes: 15,
-        enforceWatchdog: false,
-        requireSenderPhone: false,
-        minReferenceDigits: 4,
+        minReferenceDigits: 6,
+        incomingFeePct: 1.5,
+        outgoingFeePct: 1.5,
       },
       webhookSecretCiphertext: null,
     },
     treasuryMovements: [],
     supportTickets: [],
+    orderItemTargets: {},
+    supplierOrders: [],
   };
 }
 
@@ -303,6 +324,7 @@ export function resetSandboxStateForTests(customSeedInventory?: SandboxInventory
 export function buildSandboxCatalogSnapshot(includeInactive = false): ProductDTO[] {
   const state = getSandboxState();
   const reloadlyCfg = state.providerConfigs.find((c) => c.id === "reloadly");
+  const centralOneCfg = state.providerConfigs.find((c) => c.id === "centralone");
   const manualCfg = state.providerConfigs.find((c) => c.id === "manual_inventory");
   const nowMs = Date.now();
 
@@ -326,20 +348,42 @@ export function buildSandboxCatalogSnapshot(includeInactive = false): ProductDTO
       variants: p.variants
         .filter((v) => includeInactive || v.active)
         .map((v) => {
-          const manualCount = manualCfg?.enabled ? availableMap.get(v.id) ?? 0 : 0;
+          const meta = state.variantPricingMeta?.[v.id];
+          const requiresTarget = Boolean(meta?.requiresTarget ?? v.requiresTarget);
+          const targetFields = meta?.targetFields ?? v.targetFields;
+          const targetSchema = meta?.targetSchema ?? v.targetSchema;
+          const supportsPlayerValidate = Boolean(
+            meta?.supportsPlayerValidate ?? v.supportsPlayerValidate
+          );
+          const manualCount =
+            !requiresTarget && manualCfg?.enabled ? availableMap.get(v.id) ?? 0 : 0;
           const reloadlyAvailable =
+            !requiresTarget &&
             Boolean(reloadlyCfg?.enabled) &&
             v.sourcePriority !== "manual_only" &&
             Boolean(v.reloadlyProductId);
+          const centralOneAvailable =
+            Boolean(centralOneCfg?.enabled) &&
+            (v.sourcePriority === "manual_then_centralone" ||
+              v.sourcePriority === "centralone_only") &&
+            Boolean(v.centraloneProductId);
           const volumeDiscounts = normalizeVolumeDiscountTiers(
-            state.variantPricingMeta?.[v.id]?.volumeDiscounts ?? v.volumeDiscounts,
+            meta?.volumeDiscounts ?? v.volumeDiscounts,
             v.salePriceCents
           );
           return {
             ...v,
             availableStock: manualCount,
-            inStock: manualCount > 0 || reloadlyAvailable,
+            inStock: manualCount > 0 || reloadlyAvailable || centralOneAvailable,
             ...(volumeDiscounts.length > 0 ? { volumeDiscounts } : {}),
+            ...(requiresTarget
+              ? {
+                  requiresTarget: true,
+                  targetFields: targetFields ?? [],
+                  targetSchema: targetSchema ?? [],
+                  supportsPlayerValidate,
+                }
+              : {}),
           };
         }),
     }))
@@ -392,9 +436,13 @@ export function hydrateSandboxOrder(order: OrderDTO): OrderDTO {
       };
     });
 
+  const targets = state.orderItemTargets?.[order.id] ?? {};
   return {
     ...order,
-    items: order.items.map((it) => ({ ...it })),
+    items: order.items.map((it) => ({
+      ...it,
+      targetInfo: targets[it.id] ?? it.targetInfo ?? null,
+    })),
     fulfillments,
   };
 }

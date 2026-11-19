@@ -1,5 +1,6 @@
 import { resolveBrandTheme } from "@/lib/brand-theme";
 import { formatBsNumber } from "@/lib/currency";
+import { buildCartLineKey } from "@/lib/topup-targets";
 import type { CartItem, OrderItemDTO, Region } from "@/types";
 
 const VALID_REGIONS: ReadonlySet<string> = new Set([
@@ -33,8 +34,12 @@ export function buildCartEntriesFromOrderItems(
       ? (orderItem.region as Region)
       : "USA";
 
+    const targetPayload = orderItem.targetInfo?.payload;
+    const cartKey = buildCartLineKey(orderItem.variantId, targetPayload);
+
     return {
       item: {
+        cartKey,
         variantId: orderItem.variantId,
         productId: orderItem.productSlug || orderItem.variantId,
         productSlug: orderItem.productSlug,
@@ -45,6 +50,17 @@ export function buildCartEntriesFromOrderItems(
         denominationLabel: orderItem.denominationLabel,
         unitPriceCents: orderItem.unitPriceCents,
         unitCostCents: orderItem.unitCostCents ?? null,
+        ...(orderItem.targetInfo
+          ? {
+              requiresTarget: true,
+              targetPayload: orderItem.targetInfo.payload,
+              targetSummary: orderItem.targetInfo.displaySummary,
+              verifiedPlayerName: orderItem.targetInfo.playerName ?? null,
+              targetValidationStatus:
+                orderItem.targetInfo.validationStatus ??
+                (orderItem.targetInfo.playerName ? "valid" : "unverified"),
+            }
+          : {}),
       },
       quantity: Math.max(1, Math.min(10, orderItem.quantity)),
     };

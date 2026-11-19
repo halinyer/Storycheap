@@ -86,6 +86,7 @@ export default function CartPage() {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           <div className="lg:col-span-8 space-y-4">
             {cartItems.map((item) => {
+              const lineKey = item.cartKey ?? item.variantId;
               const tier = resolveVolumeTierPrice({
                 baseUnitPriceCents: item.unitPriceCents,
                 quantity: item.quantity,
@@ -96,7 +97,7 @@ export default function CartPage() {
 
               return (
                 <div
-                  key={item.variantId}
+                  key={lineKey}
                   className="rounded-2xl apple-glass p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center gap-4"
                 >
                   <div className="w-20 h-24 rounded-xl bg-slate-950 border border-white/10 p-2 flex items-center justify-center shrink-0">
@@ -133,12 +134,23 @@ export default function CartPage() {
                           `${formatCents(item.unitPriceCents)} c/u`
                         )}
                       </p>
+                      {item.requiresTarget && (
+                        <span className="px-2 py-0.5 rounded-full bg-sky-500/15 border border-sky-400/25 text-[10px] font-bold text-sky-300">
+                          Recarga directa por ID
+                        </span>
+                      )}
                       {tier.appliedTier && (
                         <span className="px-2 py-0.5 rounded-full bg-white/[0.08] border border-white/15 text-[10px] font-semibold text-slate-200 tabular-nums">
                           {tier.appliedTier.minQuantity}+ u. · -{tier.discountPct}%
                         </span>
                       )}
                     </div>
+                    {item.targetSummary && (
+                      <div className="mt-2 inline-block rounded-lg bg-slate-950/80 border border-white/10 px-2.5 py-1 text-[11px] font-mono text-emerald-300/95">
+                        {item.targetValidationStatus === "valid" ? "✓ " : ""}
+                        {item.targetSummary}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center justify-between sm:justify-end gap-4">
@@ -146,7 +158,7 @@ export default function CartPage() {
                       <button
                         type="button"
                         onClick={() =>
-                          updateQuantity(item.variantId, item.quantity - 1)
+                          updateQuantity(lineKey, item.quantity - 1)
                         }
                         className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/10"
                       >
@@ -159,7 +171,7 @@ export default function CartPage() {
                         type="button"
                         disabled={item.quantity >= MAX_ORDER_QUANTITY_PER_LINE}
                         onClick={() =>
-                          updateQuantity(item.variantId, item.quantity + 1)
+                          updateQuantity(lineKey, item.quantity + 1)
                         }
                         className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/10 disabled:opacity-35"
                       >
@@ -191,7 +203,7 @@ export default function CartPage() {
 
                     <button
                       type="button"
-                      onClick={() => removeFromCart(item.variantId)}
+                      onClick={() => removeFromCart(lineKey)}
                       aria-label="Eliminar"
                       className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-rose-500/10"
                     >

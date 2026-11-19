@@ -5,7 +5,7 @@ import { hasOrderAccessCookie } from "@/lib/server/order-access";
 import {
   PagoMovilAuthError,
   refreshPagoMovilOrderRate,
-} from "@/lib/server/payments/pagomovil-bot";
+} from "@/lib/server/payments/pagomovil-bdv";
 
 const refreshSchema = z.object({
   orderId: z.string().min(1),

@@ -10,6 +10,14 @@ import { resolveBrandTheme } from "@/lib/brand-theme";
 import { formatCents } from "@/lib/catalog-seed";
 import { formatBsFromUsdCents } from "@/lib/currency";
 import {
+  buildCartLineKey,
+  formatTargetSummary,
+  getHumanTargetFieldLabel,
+  getTargetFieldPlaceholder,
+  normalizeTargetSchema,
+  validateTargetPayloadAgainstSchema,
+} from "@/lib/topup-targets";
+import {
   getBestVolumeTierHint,
   MAX_ORDER_QUANTITY_PER_LINE,
   resolveVolumeTierPrice,
@@ -18,18 +26,24 @@ import type { ProductDTO } from "@/types";
 import {
   AlertCircle,
   AlertTriangle,
-  ArrowLeft,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   Clock,
   ExternalLink,
+  Gamepad2,
   Globe,
+  HelpCircle,
+  Loader2,
   Lock,
   Mail,
   Minus,
   Plus,
+  Search,
   ShieldCheck,
   ShoppingCart,
+  UserCheck,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -46,6 +60,7 @@ export function ProductDetailClient({
   const {
     addToCart,
     setCartDrawerOpen,
+    setSelectedCategory,
     displayCurrency,
     bsRateCents,
     hydrateBsRateCents,
@@ -71,9 +86,34 @@ export function ProductDetailClient({
     firstAvailable?.id ?? ""
   );
   const [quantity, setQuantity] = useState(1);
+  const [targetValues, setTargetValues] = useState<Record<string, string>>({});
+  const [validatingPlayer, setValidatingPlayer] = useState(false);
+  const [playerValidation, setPlayerValidation] = useState<{
+    signature: string;
+    status: "valid" | "invalid" | "unverified";
+    playerName: string | null;
+    reason: string | null;
+  } | null>(null);
+  const [manualIdConfirmed, setManualIdConfirmed] = useState(false);
+  const [showUidHelp, setShowUidHelp] = useState(false);
 
   const selectedVariant =
     activeVariants.find((v) => v.id === selectedVariantId) ?? firstAvailable;
+
+  const isDirectTopup = Boolean(selectedVariant?.requiresTarget);
+  const targetSchema = selectedVariant?.requiresTarget
+    ? normalizeTargetSchema(
+        selectedVariant.targetFields,
+        selectedVariant.targetSchema
+      )
+    : [];
+  const currentTargetSignature = selectedVariant
+    ? buildCartLineKey(selectedVariant.id, targetValues)
+    : "";
+  const activeValidation =
+    playerValidation && playerValidation.signature === currentTargetSignature
+      ? playerValidation
+      : null;
 
   const canBuy = Boolean(selectedVariant && selectedVariant.inStock);
   const accent = product.accentColor || "#0070d1";
@@ -105,14 +145,147 @@ export function ProductDetailClient({
     .filter((v) => !v.inStock)
     .map((v) => v.denominationLabel);
 
-  const handleAddToCart = (redirectCheckout: boolean) => {
+  const runPlayerValidation = async (): Promise<{
+    status: "valid" | "invalid" | "unverified";
+    playerName: string | null;
+    cleanPayload: Record<string, string>;
+  } | null> => {
+    if (!selectedVariant || !selectedVariant.requiresTarget) return null;
+    const fieldCheck = validateTargetPayloadAgainstSchema(
+      targetValues,
+      targetSchema
+    );
+    if (!fieldCheck.ok) {
+      toast.error(fieldCheck.error);
+      return null;
+    }
+
+    setValidatingPlayer(true);
+    try {
+      const res = await fetch("/api/catalog/validate-player", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          variantId: selectedVariant.id,
+          targetPayload: fieldCheck.cleanPayload,
+        }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        status?: "valid" | "invalid" | "unverified";
+        playerName?: string | null;
+        reason?: string | null;
+        cleanPayload?: Record<string, string>;
+      };
+      if (!res.ok) {
+        toast.error(data.error ?? "No se pudo verificar el ID del jugador.");
+        return null;
+      }
+      const status = data.status ?? "unverified";
+      const playerName = data.playerName ?? null;
+      const cleanPayload = data.cleanPayload ?? fieldCheck.cleanPayload;
+      setPlayerValidation({
+        signature: buildCartLineKey(selectedVariant.id, cleanPayload),
+        status,
+        playerName,
+        reason: data.reason ?? null,
+      });
+
+      if (status === "valid") {
+        toast.success(
+          playerName
+            ? `Jugador verificado: ${playerName}`
+            : "ID de jugador verificado correctamente"
+        );
+      } else if (status === "invalid") {
+        toast.error(
+          "ID de jugador no encontrado. Revisa el ID o servidor antes de pagar."
+        );
+      } else {
+        toast.info(
+          "Este juego no muestra nickname en vivo. Confirma que tu ID sea exacto."
+        );
+      }
+
+      return { status, playerName, cleanPayload };
+    } catch {
+      toast.error("Error de red verificando el ID del jugador.");
+      return null;
+    } finally {
+      setValidatingPlayer(false);
+    }
+  };
+
+  const handleAddToCart = async (redirectCheckout: boolean) => {
     if (!selectedVariant || !selectedVariant.inStock) {
       toast.error("Esta denominación no tiene stock disponible en este momento.");
       return;
     }
 
+    let cleanPayload: Record<string, string> | undefined;
+    let verifiedPlayerName: string | null = null;
+    let targetValidationStatus: "valid" | "unverified" | undefined;
+    let targetSummary: string | undefined;
+
+    if (selectedVariant.requiresTarget) {
+      const fieldCheck = validateTargetPayloadAgainstSchema(
+        targetValues,
+        targetSchema
+      );
+      if (!fieldCheck.ok) {
+        toast.error(fieldCheck.error);
+        return;
+      }
+      cleanPayload = fieldCheck.cleanPayload;
+
+      if (selectedVariant.supportsPlayerValidate) {
+        let validation = activeValidation;
+        if (!validation) {
+          const liveRes = await runPlayerValidation();
+          if (!liveRes) return;
+          validation = {
+            signature: buildCartLineKey(selectedVariant.id, liveRes.cleanPayload),
+            status: liveRes.status,
+            playerName: liveRes.playerName,
+            reason: null,
+          };
+          cleanPayload = liveRes.cleanPayload;
+        }
+        if (validation.status === "invalid") {
+          toast.error(
+            "El ID ingresado es inválido. Corrige el ID y vuelve a verificarlo."
+          );
+          return;
+        }
+        if (validation.status === "unverified" && !manualIdConfirmed) {
+          toast.error(
+            "Marca la casilla de confirmación de ID antes de continuar."
+          );
+          return;
+        }
+        verifiedPlayerName = validation.playerName;
+        targetValidationStatus =
+          validation.status === "valid" ? "valid" : "unverified";
+      } else {
+        if (!manualIdConfirmed) {
+          toast.error(
+            "Confirma que tu ID y servidor son exactos antes de continuar."
+          );
+          return;
+        }
+        targetValidationStatus = "unverified";
+      }
+
+      targetSummary = formatTargetSummary(
+        cleanPayload,
+        targetSchema,
+        verifiedPlayerName
+      );
+    }
+
     addToCart(
       {
+        cartKey: buildCartLineKey(selectedVariant.id, cleanPayload),
         variantId: selectedVariant.id,
         productId: product.id,
         productSlug: product.slug,
@@ -123,6 +296,15 @@ export function ProductDetailClient({
         denominationLabel: selectedVariant.denominationLabel,
         unitPriceCents: selectedVariant.salePriceCents,
         volumeDiscounts: selectedVariant.volumeDiscounts,
+        ...(selectedVariant.requiresTarget
+          ? {
+              requiresTarget: true,
+              targetPayload: cleanPayload,
+              targetSummary,
+              verifiedPlayerName,
+              targetValidationStatus,
+            }
+          : {}),
       },
       quantity
     );
@@ -131,22 +313,55 @@ export function ProductDetailClient({
       router.push("/checkout");
     } else {
       toast.success(
-        `${product.brand} (${selectedVariant.denominationLabel}) agregado al carrito`
+        selectedVariant.requiresTarget && verifiedPlayerName
+          ? `${product.brand} (${selectedVariant.denominationLabel}) para ${verifiedPlayerName} agregado al carrito`
+          : `${product.brand} (${selectedVariant.denominationLabel}) agregado al carrito`
       );
       setCartDrawerOpen(true);
     }
   };
 
+  const liveTargetPreview = isDirectTopup
+    ? formatTargetSummary(targetValues, targetSchema)
+    : "";
+
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
-      {/* Minimal Breadcrumb */}
-      <Link
-        href="/"
-        className="inline-flex items-center gap-2 text-xs font-medium text-slate-400 hover:text-white transition-colors mb-7"
+      {/* CoinGate-style Hierarchical Breadcrumb */}
+      <nav
+        aria-label="Ruta de navegación"
+        className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-slate-400 mb-7"
       >
-        <ArrowLeft className="w-3.5 h-3.5" />
-        <span>Volver al catálogo</span>
-      </Link>
+        <Link
+          href="/#catalogo"
+          onClick={() => setSelectedCategory("ALL")}
+          className="hover:text-white transition-colors"
+        >
+          Catálogo
+        </Link>
+        <ChevronRight className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+        <Link
+          href="/#catalogo"
+          onClick={() =>
+            setSelectedCategory(isDirectTopup ? "topup" : product.category)
+          }
+          className="hover:text-white transition-colors"
+        >
+          {isDirectTopup
+            ? "Recargas Directas"
+            : product.category === "gaming"
+              ? "Juegos y Consolas"
+              : product.category === "streaming"
+                ? "Streaming y Música"
+                : product.category === "shopping"
+                  ? "Apple y Tiendas USA"
+                  : "Cripto USDT"}
+        </Link>
+        <ChevronRight className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+        <span className="text-slate-200 font-semibold truncate">
+          {product.name}
+        </span>
+      </nav>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-start">
         {/* Left Column: Product Hero Banner + Pay Your Way + Description */}
@@ -171,9 +386,17 @@ export function ProductDetailClient({
               </div>
 
               <div className="flex-1 min-w-0 space-y-3 text-center sm:text-left pt-1">
-                <span className="text-xs font-medium text-slate-300/85">
-                  {product.brand}
-                </span>
+                <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
+                  <span className="text-xs font-medium text-slate-300/85">
+                    {product.brand}
+                  </span>
+                  {isDirectTopup && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-500/15 border border-sky-400/25 text-[10px] font-bold text-sky-300">
+                      <Zap className="w-2.5 h-2.5" />
+                      <span>Recarga directa por ID</span>
+                    </span>
+                  )}
+                </div>
 
                 <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-white leading-tight">
                   {product.name}
@@ -191,11 +414,17 @@ export function ProductDetailClient({
                   </div>
 
                   <div className="flex items-center justify-center sm:justify-start gap-2">
-                    <Mail className="w-4 h-4 text-slate-400 shrink-0" />
+                    {isDirectTopup ? (
+                      <Gamepad2 className="w-4 h-4 text-sky-400 shrink-0" />
+                    ) : (
+                      <Mail className="w-4 h-4 text-slate-400 shrink-0" />
+                    )}
                     <span>
-                      Entrega digital:{" "}
+                      {isDirectTopup ? "Recarga directa:" : "Entrega digital:"}{" "}
                       <span className="text-slate-200">
-                        al instante en tu bóveda y correo
+                        {isDirectTopup
+                          ? "directo a tu ID de juego (sin PIN ni códigos)"
+                          : "al instante en tus pedidos y correo"}
                       </span>
                     </span>
                   </div>
@@ -226,46 +455,50 @@ export function ProductDetailClient({
             )}
           </div>
 
-          {/* Always-Open Official Redemption Guide Card */}
+          {/* Always-Open Official Redemption / Direct Top-Up Guide Card */}
           <div className="rounded-2xl border border-white/[0.1] bg-[#11131c] p-5 sm:p-6 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <span className="text-[10px] font-black uppercase tracking-widest text-sky-400 block">
-                  Guía paso a paso
+                  {isDirectTopup ? "Recarga directa por ID" : "Guía paso a paso"}
                 </span>
                 <h2 className="text-base sm:text-lg font-black text-white mt-0.5">
-                  ¿Dónde y cómo canjear tu código de {brandTheme.brandName}?
+                  {isDirectTopup
+                    ? `¿Cómo funciona la recarga directa de ${product.brand || product.name}?`
+                    : `¿Dónde y cómo canjear tu código de ${brandTheme.brandName}?`}
                 </h2>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                {brandTheme.redeemUrl && (
-                  <a
-                    href={brandTheme.redeemUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] border border-white/15 text-xs font-bold text-white transition-colors"
-                  >
-                    <span>{brandTheme.redeemLabel}</span>
-                    <ExternalLink className="w-3.5 h-3.5 text-sky-400" />
-                  </a>
-                )}
-                {brandTheme.secondaryRedeemUrl &&
-                  brandTheme.secondaryRedeemLabel && (
+              {!isDirectTopup && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {brandTheme.redeemUrl && (
                     <a
-                      href={brandTheme.secondaryRedeemUrl}
+                      href={brandTheme.redeemUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.1] border border-white/10 text-xs font-bold text-slate-300 transition-colors"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] border border-white/15 text-xs font-bold text-white transition-colors"
                     >
-                      <span>{brandTheme.secondaryRedeemLabel}</span>
-                      <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
+                      <span>{brandTheme.redeemLabel}</span>
+                      <ExternalLink className="w-3.5 h-3.5 text-sky-400" />
                     </a>
                   )}
-              </div>
+                  {brandTheme.secondaryRedeemUrl &&
+                    brandTheme.secondaryRedeemLabel && (
+                      <a
+                        href={brandTheme.secondaryRedeemUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.1] border border-white/10 text-xs font-bold text-slate-300 transition-colors"
+                      >
+                        <span>{brandTheme.secondaryRedeemLabel}</span>
+                        <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
+                      </a>
+                    )}
+                </div>
+              )}
             </div>
 
-            {brandTheme.redeemHost && (
+            {!isDirectTopup && brandTheme.redeemHost && (
               <div className="text-xs text-slate-400">
                 Sitio web oficial de canje:{" "}
                 <span className="font-mono font-bold text-sky-300">
@@ -275,7 +508,10 @@ export function ProductDetailClient({
             )}
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {brandTheme.steps.map((step, i) => (
+              {(isDirectTopup && product.redemptionSteps.length > 0
+                ? product.redemptionSteps
+                : brandTheme.steps
+              ).map((step, i) => (
                 <div
                   key={i}
                   className="rounded-xl bg-slate-950/75 border border-white/[0.07] p-3.5 space-y-1.5"
@@ -344,9 +580,23 @@ export function ProductDetailClient({
 
             {/* Denomination Grid */}
             <div className="space-y-2.5">
-              <span className="text-xs font-medium text-slate-400 block">
-                Valor
-              </span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  {isDirectTopup && (
+                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white text-slate-950 text-[11px] font-black shrink-0">
+                      1
+                    </span>
+                  )}
+                  <span className="text-xs font-semibold text-slate-200">
+                    {isDirectTopup ? "Selecciona tu paquete" : "Valor"}
+                  </span>
+                </div>
+                {isDirectTopup && selectedVariant && (
+                  <span className="text-[11px] text-slate-400 truncate">
+                    {selectedVariant.denominationLabel}
+                  </span>
+                )}
+              </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                 {activeVariants.map((variant) => {
@@ -416,6 +666,192 @@ export function ProductDetailClient({
               )}
             </div>
 
+            {/* Step 2: CoinGate-Style Direct Top-Up Account Form */}
+            {selectedVariant && isDirectTopup && (
+              <div className="border-t border-white/[0.08] pt-5 space-y-3.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white text-slate-950 text-[11px] font-black shrink-0">
+                      2
+                    </span>
+                    <span className="text-xs font-semibold text-slate-200">
+                      Cuenta de {product.brand}
+                    </span>
+                  </div>
+
+                  {selectedVariant.supportsPlayerValidate ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/12 border border-emerald-400/25 text-[10px] font-semibold text-emerald-300">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                      <span>Verificación en vivo</span>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setShowUidHelp((prev) => !prev)}
+                      className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-white transition-colors cursor-pointer"
+                    >
+                      <HelpCircle className="w-3.5 h-3.5" />
+                      <span>¿Dónde veo mi UID?</span>
+                    </button>
+                  )}
+                </div>
+
+                {showUidHelp && (
+                  <div className="rounded-xl bg-white/[0.03] border border-white/[0.08] px-3.5 py-2.5 text-[11px] text-slate-300 leading-relaxed">
+                    Abre <strong className="text-white">{product.brand}</strong> y mira la{" "}
+                    <strong className="text-white">esquina inferior derecha</strong> de la pantalla: allí aparece tu UID numérico (9 dígitos). No necesitamos tu contraseña.
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  {targetSchema.map((field) => {
+                    const labelText = getHumanTargetFieldLabel(
+                      field.key,
+                      field.label
+                    );
+                    const val = targetValues[field.key] ?? "";
+                    const isSelect =
+                      field.type === "select" &&
+                      field.options &&
+                      field.options.length > 0;
+                    return (
+                      <div key={field.key} className="space-y-1.5">
+                        <label
+                          htmlFor={`target-field-${field.key}`}
+                          className="block text-[11px] font-medium text-slate-400"
+                        >
+                          {labelText}
+                        </label>
+                        {isSelect ? (
+                          <div className="relative">
+                            <select
+                              id={`target-field-${field.key}`}
+                              value={val}
+                              onChange={(e) => {
+                                setTargetValues((prev) => ({
+                                  ...prev,
+                                  [field.key]: e.target.value,
+                                }));
+                                setManualIdConfirmed(false);
+                              }}
+                              className="w-full appearance-none rounded-xl bg-[#141722] border border-white/[0.12] hover:border-white/25 focus:border-white/55 px-3.5 py-2.5 pr-9 text-xs font-medium text-white transition-colors focus:outline-none cursor-pointer"
+                            >
+                              <option value="" className="bg-[#11131c] text-slate-400">
+                                Selecciona tu servidor...
+                              </option>
+                              {field.options?.map((opt) => (
+                                <option
+                                  key={opt.value}
+                                  value={opt.value}
+                                  className="bg-[#11131c] text-white"
+                                >
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDown className="w-4 h-4 text-slate-400 pointer-events-none absolute right-3 top-1/2 -translate-y-1/2" />
+                          </div>
+                        ) : (
+                          <input
+                            id={`target-field-${field.key}`}
+                            type="text"
+                            value={val}
+                            maxLength={64}
+                            autoComplete="off"
+                            spellCheck={false}
+                            placeholder={getTargetFieldPlaceholder(field.key)}
+                            onChange={(e) => {
+                              setTargetValues((prev) => ({
+                                ...prev,
+                                [field.key]: e.target.value,
+                              }));
+                              setManualIdConfirmed(false);
+                            }}
+                            className="w-full rounded-xl bg-[#141722] border border-white/[0.12] hover:border-white/25 focus:border-white/55 px-3.5 py-2.5 text-sm font-mono tracking-wide text-white placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-500 transition-colors focus:outline-none"
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {selectedVariant.supportsPlayerValidate && (
+                  <button
+                    type="button"
+                    disabled={validatingPlayer}
+                    onClick={() => void runPlayerValidation()}
+                    className="w-full py-2.5 px-3.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.12] text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    {validatingPlayer ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400" />
+                        <span>Verificando cuenta...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Search className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Verificar ID y ver Nickname</span>
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {activeValidation?.status === "valid" && (
+                  <div className="rounded-xl bg-emerald-500/12 border border-emerald-400/30 px-3.5 py-2.5 flex items-center gap-2.5">
+                    <UserCheck className="w-4 h-4 text-emerald-300 shrink-0" />
+                    <div className="text-xs text-emerald-100 leading-snug">
+                      <span className="font-semibold text-emerald-300 block">
+                        {activeValidation.playerName
+                          ? `Jugador: ${activeValidation.playerName}`
+                          : "ID verificado correctamente"}
+                      </span>
+                      <span className="text-[11px] text-emerald-200/80">
+                        Cuenta confirmada en el servidor del juego.
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {activeValidation?.status === "invalid" && (
+                  <div className="rounded-xl bg-rose-500/12 border border-rose-400/30 px-3.5 py-2.5 flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 text-rose-300 shrink-0 mt-0.5" />
+                    <div className="text-xs text-rose-100 leading-snug">
+                      <span className="font-semibold text-rose-300 block">
+                        ID de jugador no encontrado
+                      </span>
+                      <span className="text-[11px] text-rose-200/85">
+                        Revisa el número de ID{targetSchema.length > 1 ? " y el servidor" : ""} antes de pagar.
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {liveTargetPreview && activeValidation?.status !== "invalid" && (
+                  <div className="rounded-xl bg-white/[0.03] border border-white/[0.07] px-3 py-2 flex items-center justify-between gap-2 text-[11px]">
+                    <span className="text-slate-400 shrink-0">Destino:</span>
+                    <span className="font-mono text-slate-200 truncate">
+                      {liveTargetPreview}
+                    </span>
+                  </div>
+                )}
+
+                {(!selectedVariant.supportsPlayerValidate ||
+                  activeValidation?.status === "unverified") && (
+                  <label className="flex items-start gap-2.5 cursor-pointer rounded-xl bg-white/[0.02] hover:bg-white/[0.04] border border-white/[0.07] px-3 py-2.5 text-[11px] text-slate-300 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={manualIdConfirmed}
+                      onChange={(e) => setManualIdConfirmed(e.target.checked)}
+                      className="mt-0.5 h-3.5 w-3.5 rounded border-white/25 bg-[#141722] accent-sky-500 cursor-pointer shrink-0"
+                    />
+                    <span className="leading-relaxed">
+                      Confirmo que el ID{targetSchema.length > 1 ? " y servidor son" : " es"} exacto. Las recargas acreditadas no son reversibles.
+                    </span>
+                  </label>
+                )}
+              </div>
+            )}
+
             {/* Quiet, High-Trust Purchase Block */}
             {selectedVariant && (() => {
               const hasTiers = variantTierHint.tiers.length > 0;
@@ -435,12 +871,17 @@ export function ProductDetailClient({
                   {/* Quantity + Minimal Volume Pricing Selector */}
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <span className="text-xs font-medium text-slate-300">
-                          Cantidad
+                      <div className="flex items-center gap-2 min-w-0">
+                        {isDirectTopup && (
+                          <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-white text-slate-950 text-[11px] font-black shrink-0">
+                            3
+                          </span>
+                        )}
+                        <span className="text-xs font-semibold text-slate-200">
+                          {isDirectTopup ? "Cantidad y pago" : "Cantidad"}
                         </span>
                         {hasTiers && variantTierHint.firstTier && (
-                          <span className="text-[11px] text-slate-500 ml-2 tabular-nums">
+                          <span className="text-[11px] text-slate-500 ml-1 tabular-nums">
                             Desc. desde {variantTierHint.firstTier.minQuantity} u.
                           </span>
                         )}
@@ -644,17 +1085,33 @@ export function ProductDetailClient({
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
                     <button
                       type="button"
-                      disabled={!canBuy}
-                      onClick={() => handleAddToCart(true)}
+                      disabled={
+                        !canBuy ||
+                        validatingPlayer ||
+                        activeValidation?.status === "invalid"
+                      }
+                      onClick={() => void handleAddToCart(true)}
                       className="w-full py-3 px-4 rounded-xl bg-[#0070d1] hover:bg-[#0b84eb] disabled:bg-white/[0.06] disabled:text-slate-500 text-white font-semibold text-sm flex items-center justify-center transition-colors shadow-sm"
                     >
-                      <span>{canBuy ? "Comprar ahora" : "Sin stock"}</span>
+                      <span>
+                        {validatingPlayer
+                          ? "Verificando..."
+                          : canBuy
+                            ? isDirectTopup
+                              ? "Recargar ahora"
+                              : "Comprar ahora"
+                            : "Sin stock"}
+                      </span>
                     </button>
 
                     <button
                       type="button"
-                      disabled={!canBuy}
-                      onClick={() => handleAddToCart(false)}
+                      disabled={
+                        !canBuy ||
+                        validatingPlayer ||
+                        activeValidation?.status === "invalid"
+                      }
+                      onClick={() => void handleAddToCart(false)}
                       className="w-full py-3 px-4 rounded-xl border border-white/[0.16] bg-transparent hover:bg-white/[0.05] disabled:opacity-40 text-white font-medium text-sm flex items-center justify-center gap-2 transition-colors"
                     >
                       <ShoppingCart className="w-4 h-4 shrink-0" />
@@ -673,13 +1130,13 @@ export function ProductDetailClient({
                     <div className="space-y-1">
                       <Clock className="w-3.5 h-3.5 text-slate-400 mx-auto" />
                       <span className="block text-[11px] text-slate-400 leading-tight">
-                        Entrega al instante
+                        {isDirectTopup ? "Acreditación directa" : "Entrega al instante"}
                       </span>
                     </div>
                     <div className="space-y-1">
                       <ShieldCheck className="w-3.5 h-3.5 text-slate-400 mx-auto" />
                       <span className="block text-[11px] text-slate-400 leading-tight">
-                        Códigos oficiales
+                        {isDirectTopup ? "Recarga oficial" : "Códigos oficiales"}
                       </span>
                     </div>
                   </div>

@@ -46,6 +46,33 @@ export function getCentralOneBaseUrl(): string {
   return (configured || "https://portal.centraloneglobal.com/api/v1").replace(/\/+$/, "");
 }
 
+/**
+ * Optional outbound static-IP HTTP(S) proxy used ONLY for Central One API calls
+ * (e.g. Fixie's auto-injected `FIXIE_URL` on Vercel or explicit `CENTRAL_ONE_PROXY_URL`).
+ */
+export function getCentralOneProxyUrl(): string | null {
+  return (
+    process.env.CENTRAL_ONE_PROXY_URL?.trim() ||
+    process.env.FIXIE_URL?.trim() ||
+    null
+  );
+}
+
+/**
+ * Controls when Central One calls use the static-IP proxy (`FIXIE_URL` / `CENTRAL_ONE_PROXY_URL`):
+ * - "fallback" (default): calls Central One directly (0 Fixie quota used) and automatically fails
+ *   over to Fixie on the exact same request if Central One ever responds `403 ip_not_allowed`.
+ * - "always": always route Central One calls through the proxy.
+ * - "direct": never route through the proxy.
+ */
+export function getCentralOneProxyMode(): "fallback" | "always" | "direct" {
+  const raw = (process.env.CENTRAL_ONE_PROXY_MODE ?? "fallback")
+    .trim()
+    .toLowerCase();
+  if (raw === "always" || raw === "direct") return raw;
+  return "fallback";
+}
+
 export function isFazerCardsConfigured(): boolean {
   return Boolean(
     process.env.FAZERCARDS_API_KEY?.trim() || process.env.FAZER_API_KEY?.trim()
@@ -144,4 +171,19 @@ export function getBinancePayCredentials(): {
     apiSecret,
     baseUrl: (configured || "https://api.binance.com").replace(/\/+$/, ""),
   };
+}
+
+export function isBdvConciliacionConfigured(): boolean {
+  return Boolean(process.env.BDV_API_KEY?.trim());
+}
+
+export function getBdvApiKey(): string | null {
+  return process.env.BDV_API_KEY?.trim() || null;
+}
+
+export function getBdvApiBaseUrl(): string {
+  const configured = process.env.BDV_API_BASE_URL?.trim();
+  return (
+    configured || "https://bdvconciliacion.banvenez.com:443/getMovement"
+  ).replace(/\/+$/, "");
 }

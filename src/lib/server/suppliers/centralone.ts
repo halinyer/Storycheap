@@ -2,8 +2,16 @@ import "server-only";
 
 import crypto from "crypto";
 import {
+  isLoginModeTarget,
+  normalizeTargetPayloadMap,
+  normalizeTargetSchema,
+} from "@/lib/topup-targets";
+import type { TargetSchemaField } from "@/types";
+import {
   getCentralOneApiKey,
   getCentralOneBaseUrl,
+  getCentralOneProxyMode,
+  getCentralOneProxyUrl,
   getCentralOneWebhookSecret,
   isCentralOneConfigured,
 } from "@/lib/server/env";
@@ -13,12 +21,26 @@ export interface CentralOneCatalogItem {
   id: string;
   sku?: string;
   name: string;
+  category?: string;
+  productType?: string;
+  productFamilyId?: string;
+  productFamilyName?: string;
   region?: string;
   resellerPriceRaw: string;
   resellerPriceCents: number;
   currency: string;
   requiresTarget: boolean;
+  targetFields: string[];
+  targetSchema: TargetSchemaField[];
+  isLoginMode: boolean;
+  supportsPlayerValidate?: boolean;
   available: boolean;
+}
+
+export interface CentralOnePlayerValidationResult {
+  status: "valid" | "invalid" | "unverified";
+  playerName: string | null;
+  reason?: string | null;
 }
 
 export interface CentralOneOrderResult {
@@ -26,7 +48,13 @@ export interface CentralOneOrderResult {
   referenceCode: string | null;
   status: string;
   deliveredCount: number;
+  completedLineCount: number;
+  failedLineCount: number;
+  refundedLineCount: number;
+  refunded: boolean;
   unitCostCents: number | null;
+  failureCode?: string | null;
+  failureAction?: string | null;
   failureReason?: string | null;
   raw: Record<string, unknown>;
 }
@@ -59,6 +87,126 @@ export function parseCentralOneDecimalToCents(raw: string | number | null | unde
   return negative ? -totalCents : totalCents;
 }
 
+type UndiciModule = typeof import("undici");
+let cachedProxyUrl: string | null = null;
+let cachedProxyAgent: InstanceType<UndiciModule["ProxyAgent"]> | null = null;
+let cachedUndiciFetch: UndiciModule["fetch"] | null = null;
+
+// Sticky failover latch: stays 0 (direct, zero Fixie usage) until Central One actually returns 403 ip_not_allowed
+const PROXY_FAILOVER_STICKY_MS = 6 * 60 * 60_000;
+let proxyFailoverUntilMs = 0;
+
+function isIpNotAllowedResponse(
+  status: number,
+  parsed: unknown
+): boolean {
+  if (status !== 403) return false;
+  const errObj = (parsed as { error?: { code?: string; message?: string } })?.error;
+  const code = String(errObj?.code ?? "").toLowerCase();
+  const msg = String(errObj?.message ?? "").toLowerCase();
+  return (
+    code === "ip_not_allowed" ||
+    msg.includes("ip_not_allowed") ||
+    msg.includes("allowlist") ||
+    msg.includes("ip")
+  );
+}
+
+async function executeCentralOneHttp(args: {
+  useProxy: boolean;
+  proxyUrl: string | null;
+  targetUrl: string;
+  init: RequestInit;
+  headers: Headers;
+}): Promise<{
+  ok: boolean;
+  status: number;
+  text: string;
+  parsed: unknown;
+  retryAfter: string | null;
+}> {
+  const signal =
+    args.init.signal ?? AbortSignal.timeout(args.useProxy ? 12_000 : 8_000);
+  const response =
+    args.useProxy && args.proxyUrl
+      ? await fetchViaStaticProxy(args.proxyUrl, args.targetUrl, {
+          method: args.init.method,
+          headers: args.headers,
+          body: args.init.body,
+          signal,
+        })
+      : await fetch(args.targetUrl, {
+          ...args.init,
+          headers: args.headers,
+          cache: "no-store",
+          signal,
+        });
+
+  const text = await response.text();
+  let parsed: unknown = {};
+  if (text) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = { raw: text };
+    }
+  }
+  return {
+    ok: response.ok,
+    status: response.status,
+    text,
+    parsed,
+    retryAfter: response.headers.get("Retry-After"),
+  };
+}
+
+async function fetchViaStaticProxy(
+  proxyUrl: string,
+  url: string,
+  init: {
+    method?: string;
+    headers: Headers;
+    body?: RequestInit["body"];
+    signal: AbortSignal;
+  }
+): Promise<{
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+  headers: { get: (name: string) => string | null };
+}> {
+  if (!cachedProxyAgent || !cachedUndiciFetch || cachedProxyUrl !== proxyUrl) {
+    const undici = await import("undici");
+    cachedProxyAgent = new undici.ProxyAgent(proxyUrl);
+    cachedUndiciFetch = undici.fetch;
+    cachedProxyUrl = proxyUrl;
+  }
+
+  const headerRecord: Record<string, string> = {};
+  init.headers.forEach((value, key) => {
+    headerRecord[key] = value;
+  });
+
+  const res = await cachedUndiciFetch(url, {
+    method: init.method,
+    headers: headerRecord,
+    body: init.body as Parameters<UndiciModule["fetch"]>[1] extends { body?: infer B }
+      ? B
+      : undefined,
+    signal: init.signal,
+    dispatcher: cachedProxyAgent,
+  });
+
+  return {
+    ok: res.ok,
+    status: res.status,
+    text: () => res.text(),
+    headers: {
+      get: (name: string) => res.headers.get(name),
+    },
+  };
+}
+
 async function centralOneFetch<T>(
   path: string,
   init: RequestInit = {}
@@ -76,40 +224,82 @@ async function centralOneFetch<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(`${baseUrl}${path}`, {
-    ...init,
+  const proxyUrl = getCentralOneProxyUrl();
+  const proxyMode =
+    typeof getCentralOneProxyMode === "function"
+      ? getCentralOneProxyMode()
+      : "fallback";
+  const targetUrl = `${baseUrl}${path}`;
+
+  const shouldStartWithProxy = Boolean(
+    proxyUrl &&
+      (proxyMode === "always" ||
+        (proxyMode === "fallback" && Date.now() < proxyFailoverUntilMs))
+  );
+
+  let attempt = await executeCentralOneHttp({
+    useProxy: shouldStartWithProxy,
+    proxyUrl,
+    targetUrl,
+    init,
     headers,
-    cache: "no-store",
-    signal: init.signal ?? AbortSignal.timeout(8000),
   });
 
-  const text = await response.text();
-  let parsed: unknown = {};
-  if (text) {
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      parsed = { raw: text };
-    }
+  // Zero-cost standby failover: if Central One suddenly enforces IP Allowlist (403 ip_not_allowed),
+  // immediately retry this exact request via Fixie static IPs and latch failover for 6 hours.
+  if (
+    !attempt.ok &&
+    !shouldStartWithProxy &&
+    proxyUrl &&
+    proxyMode === "fallback" &&
+    isIpNotAllowedResponse(attempt.status, attempt.parsed)
+  ) {
+    proxyFailoverUntilMs = Date.now() + PROXY_FAILOVER_STICKY_MS;
+    console.warn(
+      "[centralone] Direct IP rejected (403 ip_not_allowed). Automatically failing over to static-IP proxy."
+    );
+    attempt = await executeCentralOneHttp({
+      useProxy: true,
+      proxyUrl,
+      targetUrl,
+      init,
+      headers,
+    });
   }
 
-  if (!response.ok) {
-    const errObj = (parsed as { error?: { code?: string; message?: string } })?.error;
-    const code = errObj?.code ?? `http_${response.status}`;
-    const msg = errObj?.message ?? `Central One HTTP ${response.status}`;
-    const retryAfter = response.headers.get("Retry-After");
+  if (!attempt.ok) {
+    const errObj = (attempt.parsed as { error?: { code?: string; message?: string } })?.error;
+    const code = errObj?.code ?? `http_${attempt.status}`;
+    const msg = errObj?.message ?? `Central One HTTP ${attempt.status}`;
     const err = new Error(
-      retryAfter ? `${code}: ${msg} (Retry-After ${retryAfter}s)` : `${code}: ${msg}`
+      attempt.retryAfter
+        ? `${code}: ${msg} (Retry-After ${attempt.retryAfter}s)`
+        : `${code}: ${msg}`
     ) as Error & { code?: string; httpStatus?: number };
     err.code = code;
-    err.httpStatus = response.status;
+    err.httpStatus = attempt.status;
     throw err;
   }
 
-  return { status: response.status, data: parsed as T };
+  return { status: attempt.status, data: attempt.parsed as T };
 }
 
-export async function getCentralOneBalance(): Promise<SupplierBalanceStatus> {
+const BALANCE_CACHE_TTL_MS = 5 * 60_000;
+let cachedBalanceStatus: { status: SupplierBalanceStatus; fetchedAt: number } | null = null;
+let cachedBalanceState: { balanceCents: number | null; fetchedAt: number } | null = null;
+
+const CATALOG_CACHE_TTL_MS = 15 * 60_000;
+let cachedCatalogState: { items: CentralOneCatalogItem[]; fetchedAt: number } | null = null;
+
+/** Clears cached Central One balance (e.g., right after creating an order). */
+export function invalidateCentralOneBalanceCache(): void {
+  cachedBalanceStatus = null;
+  cachedBalanceState = null;
+}
+
+export async function getCentralOneBalance(options?: {
+  forceRefresh?: boolean;
+}): Promise<SupplierBalanceStatus> {
   if (!isCentralOneConfigured()) {
     return {
       configured: false,
@@ -121,6 +311,15 @@ export async function getCentralOneBalance(): Promise<SupplierBalanceStatus> {
     };
   }
 
+  const now = Date.now();
+  if (
+    !options?.forceRefresh &&
+    cachedBalanceStatus &&
+    now - cachedBalanceStatus.fetchedAt < BALANCE_CACHE_TTL_MS
+  ) {
+    return cachedBalanceStatus.status;
+  }
+
   try {
     const { data } = await centralOneFetch<Record<string, unknown>>("/balance");
     const rawBalance =
@@ -130,7 +329,7 @@ export async function getCentralOneBalance(): Promise<SupplierBalanceStatus> {
       "0";
     const balanceCents = parseCentralOneDecimalToCents(rawBalance);
 
-    return {
+    const status: SupplierBalanceStatus = {
       configured: true,
       sandbox: false,
       balanceCents,
@@ -138,6 +337,11 @@ export async function getCentralOneBalance(): Promise<SupplierBalanceStatus> {
       currency: String(data.currency ?? "USD"),
       healthy: balanceCents !== null,
     };
+    if (status.healthy) {
+      cachedBalanceStatus = { status, fetchedAt: now };
+      cachedBalanceState = { balanceCents, fetchedAt: now };
+    }
+    return status;
   } catch (err) {
     return {
       configured: true,
@@ -150,17 +354,10 @@ export async function getCentralOneBalance(): Promise<SupplierBalanceStatus> {
   }
 }
 
-const BALANCE_CACHE_TTL_MS = 15_000;
-let cachedBalanceState: { balanceCents: number | null; fetchedAt: number } | null = null;
-
-/** Clears cached Central One balance (e.g., right after creating an order). */
-export function invalidateCentralOneBalanceCache(): void {
-  cachedBalanceState = null;
-}
-
 /**
- * Returns cached Central One available balance in cents (15s TTL) so catalog
- * views stay fast while accurately reflecting zero-balance out-of-stock states.
+ * Returns cached Central One available balance in cents (5-min TTL, immediately
+ * invalidated after every purchase) so storefront/admin views stay fast and
+ * preserve proxy request quotas.
  */
 export async function getCachedCentralOneBalanceCents(): Promise<number | null> {
   if (!isCentralOneConfigured()) return null;
@@ -169,11 +366,7 @@ export async function getCachedCentralOneBalanceCents(): Promise<number | null> 
     return cachedBalanceState.balanceCents;
   }
   const status = await getCentralOneBalance();
-  const value = status.healthy ? status.balanceCents : null;
-  if (status.healthy) {
-    cachedBalanceState = { balanceCents: value, fetchedAt: now };
-  }
-  return value;
+  return status.healthy ? status.balanceCents : null;
 }
 
 /**
@@ -204,10 +397,144 @@ export function computeCentralOneUnitCapacity(
   return Math.floor((balanceCents * 100) / costTenthsOfCent);
 }
 
-export async function getCentralOneCatalog(): Promise<CentralOneCatalogItem[]> {
-  const { data } = await centralOneFetch<
-    Record<string, unknown> | Array<Record<string, unknown>>
-  >("/catalog");
+const PLAYER_COVERAGE_TTL_MS = 15 * 60_000;
+let cachedValidateCoverage: { productIds: Set<string>; fetchedAt: number } | null = null;
+
+const PLAYER_VALIDATE_CACHE_TTL_MS = 5 * 60_000;
+const playerValidateCache = new Map<
+  string,
+  { result: CentralOnePlayerValidationResult; fetchedAt: number }
+>();
+
+export function clearCentralOneValidationCachesForTests(): void {
+  cachedValidateCoverage = null;
+  playerValidateCache.clear();
+  cachedBalanceStatus = null;
+  cachedBalanceState = null;
+  cachedCatalogState = null;
+  proxyFailoverUntilMs = 0;
+}
+
+export async function getCentralOnePlayerValidateCoverage(): Promise<Set<string>> {
+  if (!isCentralOneConfigured()) return new Set();
+  const now = Date.now();
+  if (
+    cachedValidateCoverage &&
+    now - cachedValidateCoverage.fetchedAt < PLAYER_COVERAGE_TTL_MS
+  ) {
+    return cachedValidateCoverage.productIds;
+  }
+
+  try {
+    const { data } = await centralOneFetch<{
+      products?: Array<{ product_id?: string; catalog_item_id?: string; id?: string }>;
+    }>("/player/validate/coverage");
+    const ids = new Set<string>();
+    for (const p of data.products ?? []) {
+      const id = String(p.product_id ?? p.catalog_item_id ?? p.id ?? "").trim();
+      if (id) ids.add(id);
+    }
+    cachedValidateCoverage = { productIds: ids, fetchedAt: now };
+    return ids;
+  } catch {
+    return cachedValidateCoverage?.productIds ?? new Set();
+  }
+}
+
+export async function validateCentralOnePlayer(params: {
+  productId: string;
+  targetPayload: Record<string, string>;
+}): Promise<CentralOnePlayerValidationResult> {
+  if (!isCentralOneConfigured()) {
+    return {
+      status: "unverified",
+      playerName: null,
+      reason: "centralone_not_configured",
+    };
+  }
+
+  const cleanPayload = normalizeTargetPayloadMap(params.targetPayload);
+  const cacheKey = `${params.productId}::${JSON.stringify(cleanPayload)}`;
+  const now = Date.now();
+  const cached = playerValidateCache.get(cacheKey);
+  if (cached && now - cached.fetchedAt < PLAYER_VALIDATE_CACHE_TTL_MS) {
+    return cached.result;
+  }
+
+  try {
+    const { data } = await centralOneFetch<Record<string, unknown>>("/player/validate", {
+      method: "POST",
+      body: JSON.stringify({
+        product_id: params.productId,
+        target_payload: cleanPayload,
+      }),
+    });
+
+    const rawStatus = String(data.status ?? "unverified").toLowerCase();
+    const playerObj =
+      data.player && typeof data.player === "object"
+        ? (data.player as Record<string, unknown>)
+        : null;
+    const playerName =
+      typeof playerObj?.name === "string" && playerObj.name.trim()
+        ? playerObj.name.trim()
+        : null;
+    const reason =
+      typeof data.reason === "string" && data.reason.trim()
+        ? data.reason.trim()
+        : null;
+
+    const result: CentralOnePlayerValidationResult =
+      rawStatus === "valid"
+        ? { status: "valid", playerName, reason: null }
+        : rawStatus === "invalid"
+          ? { status: "invalid", playerName: null, reason }
+          : { status: "unverified", playerName: null, reason };
+
+    if (result.status !== "unverified" || reason === "not_supported") {
+      playerValidateCache.set(cacheKey, { result, fetchedAt: now });
+      if (playerValidateCache.size > 500) {
+        const oldestKey = playerValidateCache.keys().next().value;
+        if (oldestKey) playerValidateCache.delete(oldestKey);
+      }
+    }
+
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string; httpStatus?: number };
+    if (e.httpStatus === 429 || e.code === "rate_limited") {
+      return {
+        status: "unverified",
+        playerName: null,
+        reason: "rate_limited",
+      };
+    }
+    return {
+      status: "unverified",
+      playerName: null,
+      reason: e.code ?? "temporarily_unavailable",
+    };
+  }
+}
+
+export async function getCentralOneCatalog(options?: {
+  forceRefresh?: boolean;
+}): Promise<CentralOneCatalogItem[]> {
+  const now = Date.now();
+  if (
+    !options?.forceRefresh &&
+    cachedCatalogState &&
+    now - cachedCatalogState.fetchedAt < CATALOG_CACHE_TTL_MS
+  ) {
+    return cachedCatalogState.items;
+  }
+
+  const [{ data }, coverageIds] = await Promise.all([
+    centralOneFetch<Record<string, unknown> | Array<Record<string, unknown>>>(
+      "/catalog"
+    ),
+    getCentralOnePlayerValidateCoverage().catch(() => new Set<string>()),
+  ]);
 
   const rows = Array.isArray(data)
     ? data
@@ -217,7 +544,7 @@ export async function getCentralOneCatalog(): Promise<CentralOneCatalogItem[]> {
         ? (data.products as Array<Record<string, unknown>>)
         : [];
 
-  return rows
+  const items = rows
     .map((item) => {
       const id = String(item.catalog_item_id ?? item.product_id ?? item.id ?? "").trim();
       const rawPrice = String(item.reseller_price ?? item.price ?? "0");
@@ -226,31 +553,76 @@ export async function getCentralOneCatalog(): Promise<CentralOneCatalogItem[]> {
         typeof item.status === "string"
           ? item.status.toLowerCase() === "active"
           : item.active !== false;
+      const rawTargetFields = Array.isArray(item.target_fields)
+        ? (item.target_fields as unknown[])
+            .map((k) => String(k ?? "").trim())
+            .filter(Boolean)
+        : [];
+      const rawTargetSchema = Array.isArray(item.target_schema)
+        ? (item.target_schema as Array<Record<string, unknown>>)
+        : [];
+      const targetSchema = normalizeTargetSchema(rawTargetFields, rawTargetSchema);
+      const targetFields =
+        rawTargetFields.length > 0
+          ? rawTargetFields
+          : targetSchema.map((f) => f.key);
+      const requiresTarget = Boolean(item.requires_target) || targetSchema.length > 0;
+      const name = String(item.name ?? item.title ?? item.product_name ?? id);
+      const isLoginMode =
+        requiresTarget && isLoginModeTarget(targetFields, targetSchema, name);
+
       return {
         id,
         sku: typeof item.sku === "string" ? item.sku : undefined,
-        name: String(item.name ?? item.title ?? item.product_name ?? id),
+        name,
+        category: typeof item.category === "string" ? item.category : undefined,
+        productType:
+          typeof item.product_type === "string" ? item.product_type : undefined,
+        productFamilyId:
+          typeof item.product_family_id === "string"
+            ? item.product_family_id
+            : undefined,
+        productFamilyName:
+          typeof item.product_family_name === "string"
+            ? item.product_family_name
+            : undefined,
         region: typeof item.region === "string" ? item.region : undefined,
         resellerPriceRaw: rawPrice,
         resellerPriceCents: cents,
         currency: String(item.currency ?? "USD"),
-        requiresTarget: Boolean(item.requires_target),
+        requiresTarget,
+        targetFields,
+        targetSchema,
+        isLoginMode,
+        supportsPlayerValidate: requiresTarget && coverageIds.has(id),
         available: item.in_stock !== false && isStatusActive,
       };
     })
     .filter((item) => item.id.length > 0);
+
+  if (items.length > 0) {
+    cachedCatalogState = { items, fetchedAt: now };
+  }
+  return items;
 }
 
-function extractCentralOneFailureMessage(
+function extractCentralOneFailure(
   obj: Record<string, unknown> | undefined
-): string | null {
+): { code: string | null; action: string | null; message: string | null } | null {
   if (!obj || typeof obj !== "object") return null;
   const f = obj.failure as Record<string, unknown> | null | undefined;
   if (!f || typeof f !== "object") return null;
   const msgEs = typeof f.message_es === "string" ? f.message_es.trim() : "";
   const msg = typeof f.message === "string" ? f.message.trim() : "";
   const code = typeof f.code === "string" ? f.code.trim() : "";
-  return msgEs || msg || code || null;
+  const action = typeof f.action === "string" ? f.action.trim() : "";
+  const message = msgEs || msg || code || null;
+  if (!message && !code) return null;
+  return {
+    code: code || null,
+    action: action || null,
+    message,
+  };
 }
 
 function normalizeCentralOneOrderResponse(
@@ -262,11 +634,11 @@ function normalizeCentralOneOrderResponse(
       ? (raw.order as Record<string, unknown>)
       : raw;
 
-  // Central One GET /orders/{id} returns `lines[]`; accept `items[]` as legacy fallback.
-  const lines = Array.isArray(orderObj.lines)
-    ? (orderObj.lines as Array<Record<string, unknown>>)
-    : Array.isArray(orderObj.items)
-      ? (orderObj.items as Array<Record<string, unknown>>)
+  // Central One GET /orders/{id} may return `items[]` (v1 official) or `lines[]` (legacy/webhook).
+  const lines = Array.isArray(orderObj.items)
+    ? (orderObj.items as Array<Record<string, unknown>>)
+    : Array.isArray(orderObj.lines)
+      ? (orderObj.lines as Array<Record<string, unknown>>)
       : [];
 
   const deliveredCount = lines.reduce(
@@ -274,8 +646,24 @@ function normalizeCentralOneOrderResponse(
     0
   );
 
+  let completedLineCount = 0;
+  let failedLineCount = 0;
+  let refundedLineCount = 0;
+  for (const line of lines) {
+    const lineStatus = String(line.status ?? "").toLowerCase();
+    const lineQty = Math.max(1, Number(line.quantity ?? 1) || 1);
+    if (lineStatus === "completed" || lineStatus === "delivered") {
+      completedLineCount += lineQty;
+    } else if (lineStatus === "failed" || lineStatus === "cancelled") {
+      failedLineCount += lineQty;
+    } else if (lineStatus === "refunded") {
+      refundedLineCount += lineQty;
+    }
+  }
+
   const firstLine = lines[0];
   const rawUnitPrice =
+    (firstLine?.unit_sale_price as string | number | undefined) ??
     (firstLine?.unit_price as string | number | undefined) ??
     (firstLine?.reseller_price as string | number | undefined);
   let unitCostCents = parseCentralOneDecimalToCents(rawUnitPrice);
@@ -283,17 +671,27 @@ function normalizeCentralOneOrderResponse(
     const totalSaleCents = parseCentralOneDecimalToCents(
       orderObj.total_sale_amount as string | number | undefined
     );
-    const divisor = Math.max(
-      1,
-      Number(firstLine?.quantity ?? expectedQuantity) || 1
-    );
+    const totalLineQty =
+      lines.reduce((sum, l) => sum + (Number(l.quantity ?? 1) || 1), 0) ||
+      expectedQuantity;
+    const divisor = Math.max(1, totalLineQty);
     unitCostCents =
       totalSaleCents !== null ? Math.round(totalSaleCents / divisor) : null;
   }
 
-  const failureReason =
-    extractCentralOneFailureMessage(orderObj) ??
-    lines.map(extractCentralOneFailureMessage).find((m): m is string => Boolean(m)) ??
+  const orderRefund =
+    orderObj.refund && typeof orderObj.refund === "object"
+      ? (orderObj.refund as Record<string, unknown>)
+      : null;
+  const refunded = Boolean(orderRefund?.refunded) || refundedLineCount > 0;
+
+  const failureInfo =
+    extractCentralOneFailure(orderObj) ??
+    lines
+      .map(extractCentralOneFailure)
+      .find((f): f is NonNullable<ReturnType<typeof extractCentralOneFailure>> =>
+        Boolean(f)
+      ) ??
     null;
 
   return {
@@ -301,8 +699,14 @@ function normalizeCentralOneOrderResponse(
     referenceCode: orderObj.reference_code ? String(orderObj.reference_code) : null,
     status: String(orderObj.status ?? "confirmed").toLowerCase(),
     deliveredCount,
+    completedLineCount,
+    failedLineCount,
+    refundedLineCount,
+    refunded,
     unitCostCents,
-    failureReason,
+    failureCode: failureInfo?.code ?? null,
+    failureAction: failureInfo?.action ?? null,
+    failureReason: failureInfo?.message ?? null,
     raw,
   };
 }
@@ -312,19 +716,46 @@ export async function createCentralOneOrder(params: {
   catalogItemId: string;
   quantity: number;
   externalReference?: string;
+  targetPayload?: Record<string, string> | null;
+  expectedUnitPrice?: number;
 }): Promise<CentralOneOrderResult> {
+  const cleanTarget = params.targetPayload
+    ? normalizeTargetPayloadMap(params.targetPayload)
+    : null;
+  const hasTarget = Boolean(cleanTarget && Object.keys(cleanTarget).length > 0);
+  const priceField =
+    typeof params.expectedUnitPrice === "number" &&
+    Number.isFinite(params.expectedUnitPrice) &&
+    params.expectedUnitPrice >= 0
+      ? { expected_unit_price: Number(params.expectedUnitPrice.toFixed(4)) }
+      : {};
+
+  // Per Central One v1 docs, direct top-up products may reject quantity > 1
+  // (`quantity_not_supported`); send separate quantity:1 lines automatically.
+  const orderItems =
+    hasTarget && params.quantity > 1
+      ? Array.from({ length: Math.min(20, params.quantity) }, () => ({
+          catalog_item_id: params.catalogItemId,
+          quantity: 1,
+          target_payload: cleanTarget!,
+          ...priceField,
+        }))
+      : [
+          {
+            catalog_item_id: params.catalogItemId,
+            quantity: params.quantity,
+            ...(hasTarget ? { target_payload: cleanTarget! } : {}),
+            ...priceField,
+          },
+        ];
+
   const { data } = await centralOneFetch<Record<string, unknown>>("/orders", {
     method: "POST",
     headers: {
       "Idempotency-Key": params.idempotencyKey,
     },
     body: JSON.stringify({
-      items: [
-        {
-          catalog_item_id: params.catalogItemId,
-          quantity: params.quantity,
-        },
-      ],
+      items: orderItems,
       ...(params.externalReference ? { note: params.externalReference } : {}),
     }),
   });

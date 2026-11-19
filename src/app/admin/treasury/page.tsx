@@ -12,6 +12,7 @@ import {
 import { getAdminIncludeTestsPreference } from "@/lib/server/admin-preferences";
 import {
   getActiveReceiverBankAccount,
+  getPagoMovilSettings,
   listBankNotifications,
 } from "@/lib/server/pagomovil-store";
 import {
@@ -60,6 +61,7 @@ async function AdminTreasuryContent() {
     customers,
     activePagoMovilAccount,
     pagoMovilNotifications,
+    pagoMovilSettings,
     zenoReceiver,
     zenoProofs,
     actualItemCostCents,
@@ -78,6 +80,7 @@ async function AdminTreasuryContent() {
     listCustomersAdmin(),
     getActiveReceiverBankAccount(),
     listBankNotifications(150),
+    getPagoMovilSettings(),
     getZenoBinanceReceiver(),
     listZenoPaymentProofsAdmin(),
     listSupplierItemCostsAdmin(),
@@ -116,6 +119,9 @@ async function AdminTreasuryContent() {
     includeTestOrders,
     bsRateCents,
     replacementUsdtRateCents,
+    pagomovilIncomingFeePct: pagoMovilSettings.incomingFeePct,
+    pagomovilOutgoingFeePct: pagoMovilSettings.outgoingFeePct,
+    pagomovilFeePassThroughMode: pagoMovilSettings.feePassThroughMode,
   });
 
   const suppliers = await fetchSuppliersPortfolioSnapshot({
@@ -145,6 +151,9 @@ async function AdminTreasuryContent() {
     includeTestOrders,
     bsRateCents,
     replacementUsdtRateCents,
+    pagomovilIncomingFeePct: pagoMovilSettings.incomingFeePct,
+    pagomovilOutgoingFeePct: pagoMovilSettings.outgoingFeePct,
+    pagomovilFeePassThroughMode: pagoMovilSettings.feePassThroughMode,
   });
 
   return (

@@ -7,6 +7,12 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { formatCents } from "@/lib/catalog-seed";
 import { resolveBrandTheme } from "@/lib/brand-theme";
 import { buildWhatsAppOrderUrl } from "@/lib/support-channels";
+import { getHumanTargetFieldLabel } from "@/lib/topup-targets";
+import {
+  hasTrackedZenoWindow,
+  openAndTrackZenoWindow,
+  redirectZenoWindowToOrder,
+} from "@/lib/zenobank-window";
 import type {
   OrderDTO,
   OrderStatus,
@@ -23,6 +29,7 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  Gamepad2,
   Globe,
   Headset,
   KeyRound,
@@ -32,6 +39,7 @@ import {
   ShieldCheck,
   Sparkles,
   Wallet,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ArrowRight, ShoppingCart, XCircle } from "lucide-react";
@@ -82,6 +90,8 @@ function OrderDetailInner() {
   const searchParams = useSearchParams();
   const orderId = params.id;
   const isSandboxCheckout = Boolean(searchParams.get("sandboxCheckout"));
+  const zenoOpenedParam = searchParams.get("zenoOpened") === "1";
+  const zenoPendingParam = searchParams.get("zenoPending") === "1";
 
   const [order, setOrder] = useState<OrderDTO | null>(null);
   const [statusMeta, setStatusMeta] = useState<{
@@ -97,6 +107,10 @@ function OrderDetailInner() {
     null
   );
   const autoRevealAttemptedRef = useRef(false);
+  const zenoRedirectedRef = useRef(false);
+  const [zenoWindowLive, setZenoWindowLive] = useState(() =>
+    hasTrackedZenoWindow(orderId)
+  );
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [maskedIds, setMaskedIds] = useState<Record<string, boolean>>({});
   const [simulating, setSimulating] = useState(false);
@@ -104,6 +118,7 @@ function OrderDetailInner() {
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [binanceTxInput, setBinanceTxInput] = useState("");
   const [verifyingBinanceTx, setVerifyingBinanceTx] = useState(false);
+  const [showManualBinanceVerify, setShowManualBinanceVerify] = useState(false);
   const [userCreditBalanceCents, setUserCreditBalanceCents] = useState(0);
   const [zenoTransactions, setZenoTransactions] = useState<
     Array<{
@@ -216,6 +231,28 @@ function OrderDetailInner() {
     }, 2500);
     return () => clearInterval(id);
   }, [order, fetchOrder]);
+
+  // Automatically redirect any tracked ZenoBank checkout tab straight to this
+  // order receipt as soon as payment (or Binance Pay overpayment) settles.
+  useEffect(() => {
+    if (!order || zenoRedirectedRef.current) return;
+    const isSettled =
+      order.status === "PAID" ||
+      order.status === "FULFILLING" ||
+      order.status === "DELIVERED" ||
+      order.status === "PARTIAL" ||
+      order.status === "MANUAL_REVIEW";
+
+    if (isSettled && hasTrackedZenoWindow(order.id)) {
+      const redirected = redirectZenoWindowToOrder(order.id);
+      if (redirected) {
+        zenoRedirectedRef.current = true;
+        toast.success(
+          "¡Pago confirmado! Redirigimos tu ventana de ZenoBank directo a tu entrega."
+        );
+      }
+    }
+  }, [order]);
 
   const handleRevealCodes = useCallback(
     async (silent = false) => {
@@ -526,6 +563,10 @@ function OrderDetailInner() {
 
   const stepIndex = getStepperStep(order.status);
   const canReveal = order.status === "DELIVERED" || order.status === "PARTIAL";
+  const topupItems = order.items.filter((item) => Boolean(item.targetInfo));
+  const hasTopupItems = topupItems.length > 0;
+  const isAllTopups =
+    hasTopupItems && topupItems.length === order.items.length;
   const primaryItem = order.items[0];
   const heroTheme = resolveBrandTheme(
     primaryItem?.productName ?? "Gift Card",
@@ -535,8 +576,18 @@ function OrderDetailInner() {
   const steps = [
     { num: 1, label: "Pago iniciado" },
     { num: 2, label: "Confirmado" },
-    { num: 3, label: "Generando PIN" },
-    { num: 4, label: "Listo para canjear" },
+    {
+      num: 3,
+      label: isAllTopups
+        ? "Acreditando ID"
+        : hasTopupItems
+          ? "Procesando entrega"
+          : "Generando PIN",
+    },
+    {
+      num: 4,
+      label: isAllTopups ? "Recarga acreditada" : "Listo para canjear",
+    },
   ];
 
   // Combine fulfillments with revealed codes so we always render rich voucher cards
@@ -657,7 +708,11 @@ function OrderDetailInner() {
 
                 <h1 className="text-xl sm:text-2xl md:text-3xl font-black text-white tracking-tight">
                   {order.status === "DELIVERED"
-                    ? "¡Tu código digital está listo para canjear!"
+                    ? isAllTopups
+                      ? "¡Tu recarga directa fue acreditada!"
+                      : hasTopupItems
+                        ? "¡Tu recarga y tus códigos están listos!"
+                        : "¡Tu código digital está listo para canjear!"
                     : statusMeta?.label ?? order.status}
                 </h1>
 
@@ -764,11 +819,17 @@ function OrderDetailInner() {
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm sm:text-base font-black text-white">
-                      Conectando con el proveedor oficial para emitir tu PIN...
+                      {isAllTopups
+                        ? "Conectando con el servidor oficial para acreditar tu recarga por ID..."
+                        : hasTopupItems
+                          ? "Procesando tu recarga directa y emitiendo tus códigos..."
+                          : "Conectando con el proveedor oficial para emitir tu PIN..."}
                     </span>
                   </div>
                   <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
-                    Tu pago ya está confirmado. En unos segundos tu tarjeta aparecerá desbloqueada aquí mismo sin tocar nada.
+                    {isAllTopups
+                      ? "Tu pago ya está confirmado. En unos segundos verás el comprobante oficial de recarga acreditada aquí mismo."
+                      : "Tu pago ya está confirmado. En unos segundos tu entrega aparecerá desbloqueada aquí mismo sin tocar nada."}
                   </p>
                 </div>
               </div>
@@ -824,17 +885,24 @@ function OrderDetailInner() {
                     </Link>
                   )}
                   {order.paymentGateway === "zenobank" && order.gatewayCheckoutUrl && (
-                    <a
-                      href={order.gatewayCheckoutUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (order.gatewayCheckoutUrl) {
+                          const opened = openAndTrackZenoWindow(
+                            order.id,
+                            order.gatewayCheckoutUrl
+                          );
+                          setZenoWindowLive(opened);
+                        }
+                      }}
                       className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs shrink-0"
                     >
                       <span>
                         Completar {formatCents(order.amountDueCents - order.paidCents)} en ZenoBank
                       </span>
                       <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
+                    </button>
                   )}
                 </div>
 
@@ -985,17 +1053,63 @@ function OrderDetailInner() {
 
                       {order.paymentGateway === "zenobank" && (
                         <>
+                          {(zenoOpenedParam || zenoWindowLive) && (
+                            <div className="rounded-xl bg-sky-500/10 border border-sky-400/30 px-3 py-2 text-[11px] text-sky-100 leading-relaxed flex items-start gap-2">
+                              <Zap className="w-3.5 h-3.5 text-sky-300 shrink-0 mt-0.5" />
+                              <span>
+                                <strong className="text-sky-200">
+                                  Redirección automática activa:
+                                </strong>{" "}
+                                mantén esta pestaña abierta mientras pagas en ZenoBank. Detectamos pagos y sobrepagos de Binance Pay en segundos y redirigiremos la ventana de ZenoBank directo hacia tu entrega.
+                              </span>
+                            </div>
+                          )}
+                          {zenoPendingParam && !zenoWindowLive && (
+                            <div className="rounded-xl bg-indigo-500/10 border border-indigo-400/30 px-3 py-2 text-[11px] text-indigo-100 leading-relaxed">
+                              Tu navegador bloqueó la pestaña automática. Haz clic en{" "}
+                              <strong className="text-white">Continuar en ZenoBank</strong>{" "}
+                              para abrir la pasarela vinculada a esta orden.
+                            </div>
+                          )}
                           <div className="rounded-xl bg-amber-500/10 border border-amber-500/25 px-3 py-2 text-[11px] text-amber-200/95 leading-relaxed">
                             <strong className="text-amber-300">
                               Si pagas por Binance Pay:
                             </strong>{" "}
                             envía el monto <strong>exacto con todos los decimales</strong>{" "}
                             que muestra ZenoBank. Si enviaste un monto distinto (de más
-                            o de menos), pega abajo el ID de tu transacción (
+                            o de menos), nuestro verificador lo detecta y te redirige aquí, o puedes pegar abajo el ID (
                             <code className="font-mono text-amber-100">P_...</code>) para
-                            conciliarla al instante.
+                            conciliarlo al instante.
                           </div>
-                          {!isSandboxCheckout && renderBinanceTxForm()}
+                          {!isSandboxCheckout && (
+                            <div className="pt-1">
+                              {!showManualBinanceVerify ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setShowManualBinanceVerify(true)}
+                                  className="text-[11px] font-semibold text-slate-400 hover:text-sky-300 underline underline-offset-4 transition-colors"
+                                >
+                                  ¿Ya pagaste por Binance Pay con un monto distinto y no se reflejó? Verificar manualmente
+                                </button>
+                              ) : (
+                                <div className="rounded-xl bg-white/[0.03] border border-white/10 p-3 space-y-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[11px] font-bold text-slate-200">
+                                      Conciliación manual de Binance Pay
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => setShowManualBinanceVerify(false)}
+                                      className="text-[10px] text-slate-400 hover:text-white"
+                                    >
+                                      Ocultar
+                                    </button>
+                                  </div>
+                                  {renderBinanceTxForm(true)}
+                                </div>
+                              )}
+                            </div>
+                          )}
                           <div className="pt-1">
                             <CardNetworksBadge />
                           </div>
@@ -1006,42 +1120,35 @@ function OrderDetailInner() {
 
                   <div className="flex flex-wrap items-center gap-2.5 shrink-0">
                     {(order.paymentGateway === "pagomovil" ||
-                      order.paymentGateway === "pablito" ||
-                      (order.gatewayCheckoutUrl &&
-                        !isSandboxCheckout &&
-                        !order.gatewayCheckoutId?.startsWith("zbk_sbx_"))) && (
+                      order.paymentGateway === "pablito") ? (
                       <Link
-                        href={
-                          order.paymentGateway === "pagomovil" ||
-                          order.paymentGateway === "pablito"
-                            ? `/pay/pagomovil/${order.id}`
-                            : order.gatewayCheckoutUrl ?? "#"
-                        }
-                        target={
-                          order.paymentGateway === "zenobank"
-                            ? "_blank"
-                            : undefined
-                        }
-                        rel={
-                          order.paymentGateway === "zenobank"
-                            ? "noopener noreferrer"
-                            : undefined
-                        }
-                        className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-black text-xs transition-colors ${
-                          order.paymentGateway === "pagomovil" ||
-                          order.paymentGateway === "pablito"
-                            ? "bg-emerald-400 hover:bg-emerald-300 text-slate-950"
-                            : "bg-white hover:bg-sky-200 text-slate-950"
-                        }`}
+                        href={`/pay/pagomovil/${order.id}`}
+                        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-black text-xs transition-colors bg-emerald-400 hover:bg-emerald-300 text-slate-950"
                       >
-                        <span>
-                          {order.paymentGateway === "pagomovil" ||
-                          order.paymentGateway === "pablito"
-                            ? "Ir a ventana Pago Móvil"
-                            : "Continuar en ZenoBank"}
-                        </span>
+                        <span>Ir a ventana Pago Móvil</span>
                         <ArrowRight className="w-3.5 h-3.5" />
                       </Link>
+                    ) : (
+                      order.gatewayCheckoutUrl &&
+                      !isSandboxCheckout &&
+                      !order.gatewayCheckoutId?.startsWith("zbk_sbx_") && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (order.gatewayCheckoutUrl) {
+                              const opened = openAndTrackZenoWindow(
+                                order.id,
+                                order.gatewayCheckoutUrl
+                              );
+                              setZenoWindowLive(opened);
+                            }
+                          }}
+                          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-black text-xs transition-colors bg-white hover:bg-sky-200 text-slate-950"
+                        >
+                          <span>Continuar en ZenoBank</span>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </button>
+                      )
                     )}
 
                     <CancelOrderControl
@@ -1153,14 +1260,15 @@ function OrderDetailInner() {
                   <button
                     type="button"
                     onClick={() => {
-                      const existingIds = new Set(
-                        cartItems.map((c) => c.variantId)
+                      const existingKeys = new Set(
+                        cartItems.map((c) => c.cartKey ?? c.variantId)
                       );
                       const entries = buildCartEntriesFromOrderItems(
                         order.items
                       );
                       for (const entry of entries) {
-                        if (!existingIds.has(entry.item.variantId)) {
+                        const key = entry.item.cartKey ?? entry.item.variantId;
+                        if (!existingKeys.has(key)) {
                           addToCart(entry.item, entry.quantity);
                         }
                       }
@@ -1216,6 +1324,238 @@ function OrderDetailInner() {
           )}
         </div>
       </div>
+
+      {/* ===================================================================== */}
+      {/* DIRECT TOP-UP BY PLAYER ID / UID RECEIPT & LIVE STATUS CARDS          */}
+      {/* ===================================================================== */}
+      {hasTopupItems && (
+        <div className="space-y-5">
+          {topupItems.map((item, idx) => {
+            const info = item.targetInfo!;
+            const itemTheme = resolveBrandTheme(
+              item.productName,
+              item.productSlug
+            );
+            const isDone =
+              info.topupStatus === "completed" ||
+              item.deliveredCount >= item.quantity;
+            const isFailed =
+              info.topupStatus === "failed" ||
+              info.topupStatus === "refunded" ||
+              item.status === "MANUAL_REVIEW";
+            const isProcessing =
+              !isDone &&
+              !isFailed &&
+              (info.topupStatus === "processing" ||
+                order.status === "PAID" ||
+                order.status === "FULFILLING");
+            const payloadEntries = Object.entries(info.payload ?? {});
+            const copyKey = `topup-${item.id}`;
+            const refToCopy = info.supplierReferenceCode ?? order.orderNumber;
+
+            return (
+              <div
+                key={item.id}
+                className={`relative rounded-[28px] overflow-hidden bg-[#11131c] border transition-all ${
+                  isDone
+                    ? "border-emerald-400/40 shadow-[0_0_40px_-14px_rgba(16,185,129,0.45)]"
+                    : isFailed
+                      ? "border-amber-400/40"
+                      : isProcessing
+                        ? "border-sky-400/40 shadow-[0_0_32px_-12px_rgba(56,189,248,0.4)]"
+                        : "border-white/10"
+                }`}
+              >
+                <div className="grid grid-cols-1 lg:grid-cols-12">
+                  {/* Left Game Artwork Panel */}
+                  <div
+                    className={`lg:col-span-4 relative p-6 sm:p-7 flex flex-col items-center justify-between text-center bg-gradient-to-br ${itemTheme.bannerGradient} border-b lg:border-b-0 lg:border-r border-white/10`}
+                  >
+                    <div className="relative z-10 w-full flex items-center justify-between gap-2 mb-3">
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-cyan-500/20 border border-cyan-400/35 text-[10px] font-black uppercase tracking-wider text-cyan-200">
+                        <Gamepad2 className="w-3 h-3" />
+                        <span>Recarga Directa</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-950/75 border border-white/15 text-[11px] font-bold text-slate-200">
+                        <Globe className="w-3 h-3 text-sky-400" />
+                        <span>{item.region}</span>
+                      </span>
+                    </div>
+
+                    <div className="relative z-10 my-2 py-1 flex items-center justify-center">
+                      <img
+                        src={itemTheme.imageUrl}
+                        alt={item.productName}
+                        className="w-32 sm:w-36 max-h-40 object-contain rounded-2xl drop-shadow-[0_18px_28px_rgba(0,0,0,0.8)]"
+                      />
+                    </div>
+
+                    <div className="relative z-10 w-full mt-3 pt-3 border-t border-white/10">
+                      <div className="text-xs font-bold text-slate-300 line-clamp-1">
+                        {item.productName}
+                      </div>
+                      <div className="text-lg font-black text-white mt-0.5">
+                        {item.denominationLabel}
+                        {item.quantity > 1 ? ` × ${item.quantity}` : ""}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right Direct Top-Up Status & Receipt Panel */}
+                  <div className="lg:col-span-8 p-6 sm:p-8 flex flex-col justify-between space-y-5">
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`w-2 h-2 rounded-full ${
+                              isDone
+                                ? "bg-emerald-400"
+                                : isFailed
+                                  ? "bg-amber-400"
+                                  : isProcessing
+                                    ? "bg-sky-400 animate-pulse"
+                                    : "bg-slate-500"
+                            }`}
+                          />
+                          <span
+                            className={`text-[11px] font-black uppercase tracking-widest ${
+                              isDone
+                                ? "text-emerald-400"
+                                : isFailed
+                                  ? "text-amber-300"
+                                  : isProcessing
+                                    ? "text-sky-300"
+                                    : "text-slate-400"
+                            }`}
+                          >
+                            {isDone
+                              ? `Recarga #${idx + 1} • Acreditada en tu cuenta`
+                              : isFailed
+                                ? `Recarga #${idx + 1} • En revisión prioritaria`
+                                : isProcessing
+                                  ? `Recarga #${idx + 1} • Acreditando en el servidor del juego...`
+                                  : `Recarga #${idx + 1} • En espera de confirmación de pago`}
+                          </span>
+                        </div>
+
+                        {isDone ? (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-400/35 text-[11px] font-black text-emerald-300">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Completada</span>
+                          </span>
+                        ) : isProcessing ? (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-sky-500/15 border border-sky-400/35 text-[11px] font-black text-sky-300">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Procesando</span>
+                          </span>
+                        ) : isFailed ? (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-400/35 text-[11px] font-black text-amber-300">
+                            <AlertCircle className="w-3.5 h-3.5" />
+                            <span>Revisión</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/[0.05] border border-white/10 text-[11px] font-bold text-slate-300">
+                            <Clock className="w-3.5 h-3.5" />
+                            <span>Pendiente de pago</span>
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Target Account Details Box */}
+                      <div className="rounded-2xl bg-[#090b10] border border-white/15 p-4 sm:p-5 space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                            Cuenta de destino de la recarga
+                          </span>
+                          {info.playerName && (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-400/30 text-[11px] font-black text-emerald-300">
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>Jugador: {info.playerName}</span>
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          {payloadEntries.map(([fieldKey, fieldValue]) => (
+                            <div
+                              key={fieldKey}
+                              className="rounded-xl bg-slate-950 border border-white/10 px-3.5 py-2.5"
+                            >
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                {getHumanTargetFieldLabel(fieldKey)}
+                              </div>
+                              <div className="font-mono text-sm font-black text-white mt-0.5 break-all">
+                                {fieldValue}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {info.supplierReferenceCode && (
+                          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/[0.08]">
+                            <div className="text-xs text-slate-300">
+                              <span className="text-slate-400">
+                                Comprobante oficial de recarga:{" "}
+                              </span>
+                              <span className="font-mono font-bold text-emerald-300 select-all">
+                                {info.supplierReferenceCode}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void copyCode(refToCopy, copyKey)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.15] text-white font-bold text-[11px]"
+                            >
+                              {copiedId === copyKey ? (
+                                <>
+                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>Copiado</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3.5 h-3.5" />
+                                  <span>Copiar ref</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {isDone && (
+                        <div className="rounded-xl bg-emerald-500/10 border border-emerald-400/25 px-4 py-3 text-xs text-emerald-100 leading-relaxed">
+                          <strong className="text-emerald-300">
+                            ¡Acreditación exitosa!
+                          </strong>{" "}
+                          Los créditos se enviaron directamente a tu cuenta sin
+                          necesidad de canjear códigos PIN. Si estabas dentro del
+                          juego, ciérralo y vuelve a abrirlo para ver tu nuevo saldo.
+                        </div>
+                      )}
+
+                      {isFailed && (
+                        <div className="rounded-xl bg-amber-500/10 border border-amber-400/30 px-4 py-3 text-xs text-amber-100 leading-relaxed space-y-1">
+                          <div className="font-bold text-amber-300">
+                            No se pudo completar la recarga automática — tu pago está 100% protegido.
+                          </div>
+                          {info.topupFailureReason && (
+                            <div className="text-[11px] text-amber-200/90">
+                              Motivo reportado: {info.topupFailureReason}
+                            </div>
+                          )}
+                          <div className="text-[11px] text-slate-300">
+                            Nuestro equipo revisará los datos contigo para reintentar o acreditar el monto a tu saldo interno.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* ===================================================================== */}
       {/* COINGATE / NINTENDO STYLE INTERACTIVE GIFT CARD VOUCHER TICKETS       */}
@@ -1502,13 +1842,25 @@ function OrderDetailInner() {
                       />
                     </div>
                     <div className="min-w-0">
-                      <div className="text-xs sm:text-sm font-black text-white truncate">
-                        {item.productName}
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-xs sm:text-sm font-black text-white truncate">
+                          {item.productName}
+                        </span>
+                        {item.targetInfo && (
+                          <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/30 text-[9px] font-black uppercase text-cyan-200 shrink-0">
+                            Recarga ID
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5">
                         {item.denominationLabel} • Región {item.region} • Cant:{" "}
                         {item.quantity}
                       </div>
+                      {item.targetInfo?.displaySummary && (
+                        <div className="text-[11px] font-mono text-emerald-300 mt-0.5 truncate">
+                          {item.targetInfo.displaySummary}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="text-right shrink-0">

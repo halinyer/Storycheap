@@ -11,7 +11,6 @@ import {
 } from "@/lib/server/fulfillment";
 import { hasOrderAccessCookie } from "@/lib/server/order-access";
 import { getPaymentGateway } from "@/lib/server/payments";
-import { reconcileWaitingPagoMovilOrder } from "@/lib/server/payments/pagomovil-bot";
 import {
   getOrderById,
   getUserCreditBalanceCents,
@@ -94,21 +93,6 @@ export async function GET(
           // Non-blocking
         }
       }
-    }
-  }
-
-  // Opportunistic reconciliation for waiting Pago Móvil orders (heals parallel verify/ingest races)
-  if (
-    (order.paymentGateway === "pagomovil" || order.paymentGateway === "pablito") &&
-    (order.status === "PENDING_PAYMENT" || order.status === "CREATED")
-  ) {
-    try {
-      const rec = await reconcileWaitingPagoMovilOrder(order.id, sessionUser);
-      if (rec.reconciled) {
-        order = (await getOrderById(id)) ?? order;
-      }
-    } catch {
-      // Non-blocking
     }
   }
 

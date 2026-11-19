@@ -8,7 +8,7 @@ import { formatCents } from "@/lib/catalog-seed";
 import { formatBsFromUsdCents } from "@/lib/currency";
 import { getBestVolumeTierHint } from "@/lib/volume-discounts";
 import type { ProductDTO } from "@/types";
-import { ArrowRight, Globe } from "lucide-react";
+import { ArrowRight, Globe, Zap } from "lucide-react";
 
 interface GiftCardCardProps {
   product: ProductDTO;
@@ -19,6 +19,7 @@ export function GiftCardCard({ product, bsRateCents: propBsRateCents }: GiftCard
   const { displayCurrency, bsRateCents: storeBsRateCents } = useStore();
   const effectiveBsRateCents = propBsRateCents ?? storeBsRateCents;
   const activeVariants = product.variants.filter((v) => v.active);
+  const isDirectTopup = activeVariants.some((v) => Boolean(v.requiresTarget));
   const minPriceCents =
     activeVariants.length > 0
       ? Math.min(...activeVariants.map((v) => v.salePriceCents))
@@ -134,14 +135,22 @@ export function GiftCardCard({ product, bsRateCents: propBsRateCents }: GiftCard
       {/* Minimalist Product Info (Zero Fake Reviews) */}
       <div className="px-1.5 pt-0.5 pb-2">
         <div className="flex items-center justify-between gap-2 mb-1">
-          <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">
+          <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400 truncate">
             {product.brand}
           </span>
-          {volumeSummary && anyInStock && (
-            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              <span>Disponible</span>
+          {isDirectTopup ? (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-sky-500/12 border border-sky-400/25 text-[10px] font-bold text-sky-300 shrink-0">
+              <Zap className="w-2.5 h-2.5" />
+              <span>Recarga ID</span>
             </span>
+          ) : (
+            volumeSummary &&
+            anyInStock && (
+              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-400 shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                <span>Disponible</span>
+              </span>
+            )
           )}
         </div>
         <h3 className="font-extrabold text-base text-white group-hover:text-sky-300 transition-colors line-clamp-1">
@@ -182,7 +191,7 @@ export function GiftCardCard({ product, bsRateCents: propBsRateCents }: GiftCard
         </div>
 
         <div className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white text-slate-950 text-xs font-black transition-all group-hover:bg-sky-300 group-hover:scale-105">
-          <span>Elegir</span>
+          <span>{isDirectTopup ? "Recargar" : "Elegir"}</span>
           <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
         </div>
       </div>

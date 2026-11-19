@@ -2,6 +2,7 @@ import React, { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import { getBsRateCents, getProductBySlug } from "@/lib/server/repository";
+import { getEffectiveCustomerBsRateCents } from "@/lib/server/pagomovil-store";
 import { ensureFreshSupplierCatalogPrices } from "@/lib/server/supplier-sync";
 import { ProductDetailClient } from "./product-detail-client";
 
@@ -13,10 +14,11 @@ async function ProductDetailLoader({
   await connection();
   await ensureFreshSupplierCatalogPrices();
   const { slug } = await params;
-  const [product, bsRateCents] = await Promise.all([
+  const [product, rawBsRateCents] = await Promise.all([
     getProductBySlug(slug),
     getBsRateCents(),
   ]);
+  const bsRateCents = await getEffectiveCustomerBsRateCents(rawBsRateCents);
   if (!product) {
     notFound();
   }

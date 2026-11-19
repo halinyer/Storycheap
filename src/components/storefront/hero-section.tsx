@@ -1,14 +1,16 @@
 "use client";
 
 import React from "react";
-import { useStore } from "@/context/store-context";
-import type { Category } from "@/types";
+import {
+  useStore,
+  type CatalogCategoryFilter,
+} from "@/context/store-context";
 import { ArrowRight, Flame } from "lucide-react";
 
 interface CategoryTile {
   id: string;
   label: string;
-  category: Category | "ALL";
+  category: CatalogCategoryFilter;
   query?: string;
   bgClass: string;
   imageSrc?: string;
@@ -24,11 +26,11 @@ const CATEGORY_TILES: CategoryTile[] = [
     isFlame: true,
   },
   {
-    id: "all",
-    label: "Todas las tarjetas",
-    category: "ALL",
-    bgClass: "from-[#4338ca] to-[#29226c] border-indigo-400/25",
-    imageSrc: "/cards/nintendo.png",
+    id: "topup",
+    label: "Recargas por ID",
+    category: "topup",
+    bgClass: "from-[#1e3a8a] to-[#0f172a] border-sky-400/25",
+    imageSrc: "/cards/genshin.png",
   },
   {
     id: "gaming",
@@ -63,7 +65,7 @@ const CATEGORY_TILES: CategoryTile[] = [
 export function HeroSection() {
   const { selectedCategory, setSelectedCategory, setSearchQuery } = useStore();
 
-  const scrollToCatalog = (cat?: Category | "ALL", query = "") => {
+  const scrollToCatalog = (cat?: CatalogCategoryFilter, query = "") => {
     if (cat) setSelectedCategory(cat);
     setSearchQuery(query);
     const el = document.getElementById("catalogo");

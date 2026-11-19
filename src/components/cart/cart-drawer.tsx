@@ -87,6 +87,7 @@ export function CartDrawer() {
             </div>
           ) : (
             cartItems.map((item) => {
+              const lineKey = item.cartKey ?? item.variantId;
               const tier = resolveVolumeTierPrice({
                 baseUnitPriceCents: item.unitPriceCents,
                 quantity: item.quantity,
@@ -97,7 +98,7 @@ export function CartDrawer() {
 
               return (
                 <div
-                  key={item.variantId}
+                  key={lineKey}
                   className="flex gap-4 p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.08]"
                 >
                   <div className="w-16 h-20 rounded-xl bg-slate-950 border border-white/10 p-1.5 flex items-center justify-center shrink-0">
@@ -121,16 +122,27 @@ export function CartDrawer() {
                           <span className="text-xs text-sky-400 font-semibold">
                             {item.denominationLabel}
                           </span>
+                          {item.requiresTarget && (
+                            <span className="px-2 py-0.5 rounded-full bg-sky-500/15 border border-sky-400/25 text-[10px] font-bold text-sky-300">
+                              Recarga ID
+                            </span>
+                          )}
                           {tier.appliedTier && (
                             <span className="px-2 py-0.5 rounded-full bg-white/[0.08] border border-white/15 text-[10px] font-semibold text-slate-200 tabular-nums">
                               {tier.appliedTier.minQuantity}+ u. · -{tier.discountPct}%
                             </span>
                           )}
                         </div>
+                        {item.targetSummary && (
+                          <div className="mt-1.5 rounded-lg bg-slate-950/80 border border-white/10 px-2 py-1 text-[11px] font-mono text-emerald-300/95 break-words">
+                            {item.targetValidationStatus === "valid" ? "✓ " : ""}
+                            {item.targetSummary}
+                          </div>
+                        )}
                       </div>
                       <button
                         type="button"
-                        onClick={() => removeFromCart(item.variantId)}
+                        onClick={() => removeFromCart(lineKey)}
                         aria-label="Eliminar producto"
                         className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
                       >
@@ -143,7 +155,7 @@ export function CartDrawer() {
                         <button
                           type="button"
                           onClick={() =>
-                            updateQuantity(item.variantId, item.quantity - 1)
+                            updateQuantity(lineKey, item.quantity - 1)
                           }
                           className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/10"
                         >
@@ -156,7 +168,7 @@ export function CartDrawer() {
                           type="button"
                           disabled={item.quantity >= MAX_ORDER_QUANTITY_PER_LINE}
                           onClick={() =>
-                            updateQuantity(item.variantId, item.quantity + 1)
+                            updateQuantity(lineKey, item.quantity + 1)
                           }
                           className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-300 hover:bg-white/10 disabled:opacity-35"
                         >

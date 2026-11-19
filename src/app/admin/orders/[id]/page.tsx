@@ -3,11 +3,13 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import { OrderDetailActions } from "@/components/admin/order-detail-actions";
+import { computeBdvFeeBreakdown } from "@/lib/bdv-fees";
 import { formatCents } from "@/lib/catalog-seed";
 import {
   getActiveReceiverBankAccount,
   getMatchedNotificationsForOrder,
   getOrderPagoMovilReport,
+  getPagoMovilSettings,
 } from "@/lib/server/pagomovil-store";
 import {
   getOrderById,
@@ -37,22 +39,31 @@ async function AdminOrderDetailContent({
   if (!order) notFound();
   const snap = getOrderSnapshot(order, actualItemCostCents);
 
-  const [zenoReceiver, zenoProof, activeBank, pmReport, pmNotifications] =
-    await Promise.all([
-      order.paymentGateway === "zenobank" ? getZenoBinanceReceiver() : Promise.resolve(null),
-      order.paymentGateway === "zenobank"
-        ? getZenoPaymentProofForOrder(order.id)
-        : Promise.resolve(null),
-      order.paymentGateway !== "zenobank"
-        ? getActiveReceiverBankAccount()
-        : Promise.resolve(null),
-      order.paymentGateway !== "zenobank"
-        ? getOrderPagoMovilReport(order.id)
-        : Promise.resolve(null),
-      order.paymentGateway !== "zenobank"
-        ? getMatchedNotificationsForOrder(order.id)
-        : Promise.resolve([]),
-    ]);
+  const [
+    zenoReceiver,
+    zenoProof,
+    activeBank,
+    pmReport,
+    pmNotifications,
+    pmSettings,
+  ] = await Promise.all([
+    order.paymentGateway === "zenobank" ? getZenoBinanceReceiver() : Promise.resolve(null),
+    order.paymentGateway === "zenobank"
+      ? getZenoPaymentProofForOrder(order.id)
+      : Promise.resolve(null),
+    order.paymentGateway !== "zenobank"
+      ? getActiveReceiverBankAccount()
+      : Promise.resolve(null),
+    order.paymentGateway !== "zenobank"
+      ? getOrderPagoMovilReport(order.id)
+      : Promise.resolve(null),
+    order.paymentGateway !== "zenobank"
+      ? getMatchedNotificationsForOrder(order.id)
+      : Promise.resolve([]),
+    order.paymentGateway !== "zenobank"
+      ? getPagoMovilSettings()
+      : Promise.resolve(null),
+  ]);
 
   const pmExpectedBsCents =
     pmReport?.amountDueBsCents ??
@@ -455,44 +466,72 @@ async function AdminOrderDetailContent({
 
             {pmNotifications.length > 0 ? (
               <div className="space-y-2">
-                {pmNotifications.map((pmNotif) => (
-                  <div
-                    key={pmNotif.id}
-                    className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 space-y-1"
-                  >
-                    <div className="font-bold text-emerald-300">
-                      Notificación bancaria emparejada ({pmNotif.sourceType})
+                {pmNotifications.map((pmNotif) => {
+                  const fee =
+                    pmNotif.amountBsCents && pmSettings
+                      ? computeBdvFeeBreakdown({
+                          grossBsCents: pmNotif.amountBsCents,
+                          incomingFeePct: pmSettings.incomingFeePct,
+                          outgoingFeePct: pmSettings.outgoingFeePct,
+                        })
+                      : null;
+                  return (
+                    <div
+                      key={pmNotif.id}
+                      className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 space-y-1"
+                    >
+                      <div className="font-bold text-emerald-300">
+                        {pmNotif.sourceType === "BDV_API"
+                          ? "Movimiento conciliado vía API Banco de Venezuela"
+                          : `Movimiento bancario registrado (${pmNotif.sourceType})`}
+                      </div>
+                      <div className="text-white tabular-nums">
+                        Referencia: <strong>#{pmNotif.referenceFull ?? "N/A"}</strong> •
+                        Bruto:{" "}
+                        <strong>
+                          {pmNotif.amountBsCents
+                            ? formatBsCents(pmNotif.amountBsCents)
+                            : "N/A"}
+                        </strong>
+                        {fee && fee.incomingFeePct > 0 && (
+                          <>
+                            {" "}
+                            · Comisión BDV (-{fee.incomingFeePct}%):{" "}
+                            <strong className="text-amber-300">
+                              -{formatBsCents(fee.incomingFeeBsCents)}
+                            </strong>{" "}
+                            · Real en BDV:{" "}
+                            <strong className="text-emerald-300">
+                              {formatBsCents(fee.netCreditedBsCents)}
+                            </strong>
+                          </>
+                        )}
+                      </div>
+                      <div className="text-slate-300 text-[11px]">
+                        Emisor: {pmNotif.senderBankCode ?? "?"} • Tel:{" "}
+                        {pmNotif.senderPhone ?? "?"} • CI:{" "}
+                        {pmNotif.senderDni ?? "?"}
+                      </div>
                     </div>
-                    <div className="text-white tabular-nums">
-                      Referencia: <strong>#{pmNotif.referenceFull ?? "N/A"}</strong> •
-                      Monto:{" "}
-                      <strong>
-                        {pmNotif.amountBsCents
-                          ? formatBsCents(pmNotif.amountBsCents)
-                          : "N/A"}
-                      </strong>
-                    </div>
-                    <div className="text-slate-300 text-[11px]">
-                      Emisor: {pmNotif.senderBankCode ?? "?"} • Tel:{" "}
-                      {pmNotif.senderPhone ?? "?"} • CI:{" "}
-                      {pmNotif.senderDni ?? "?"}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : pmReport?.reportedReference ? (
               <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-1">
                 <div className="font-bold text-slate-200">
-                  Referencia reportada por el cliente: #{pmReport.reportedReference}
+                  Último intento reportado por el cliente: #{pmReport.reportedReference}
                 </div>
                 <div className="text-[11px] text-slate-400">
                   Banco origen: {pmReport.reportedSenderBank ?? "?"} • Tel:{" "}
                   {pmReport.reportedSenderPhone ?? "?"}
+                  {pmReport.reportedSenderDni
+                    ? ` • CI: ${pmReport.reportedSenderDni}`
+                    : ""}
                 </div>
               </div>
             ) : (
               <p className="text-[11px] text-slate-400">
-                Sin reporte o notificación bancaria automática adjunta.
+                Sin movimiento conciliado con API BDV todavía.
               </p>
             )}
           </div>
@@ -509,6 +548,96 @@ async function AdminOrderDetailContent({
         isTest={order.isTest}
         testNote={order.testNote}
       />
+
+      {/* Direct ID / UID Top-Ups (Central One Recargas Directas) */}
+      {order.items.some((item) => Boolean(item.targetInfo)) && (
+        <div className="rounded-3xl apple-glass p-6 space-y-4 border border-cyan-500/25">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-base font-black text-white">
+              Recargas Directas por ID (
+              {order.items.filter((item) => Boolean(item.targetInfo)).length})
+            </h2>
+            <span className="px-2.5 py-1 rounded-full bg-cyan-500/15 border border-cyan-400/30 text-[10px] font-black uppercase text-cyan-200">
+              Central One · Direct Top-Up
+            </span>
+          </div>
+
+          <div className="space-y-2.5">
+            {order.items
+              .filter((item) => Boolean(item.targetInfo))
+              .map((item) => {
+                const info = item.targetInfo!;
+                const isDone =
+                  info.topupStatus === "completed" ||
+                  item.deliveredCount >= item.quantity;
+                const isFailed =
+                  info.topupStatus === "failed" ||
+                  info.topupStatus === "refunded";
+                return (
+                  <div
+                    key={item.id}
+                    className="p-4 rounded-2xl bg-white/[0.03] border border-white/[0.08] space-y-2 text-xs"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-bold text-white">
+                        {item.productName} ({item.denominationLabel}) ×{" "}
+                        {item.quantity}
+                      </div>
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase border ${
+                          isDone
+                            ? "bg-emerald-500/15 border-emerald-400/35 text-emerald-300"
+                            : isFailed
+                              ? "bg-rose-500/15 border-rose-400/35 text-rose-300"
+                              : "bg-sky-500/15 border-sky-400/35 text-sky-300"
+                        }`}
+                      >
+                        {info.topupStatus ??
+                          (isDone ? "completed" : item.status)}
+                      </span>
+                    </div>
+
+                    <div className="font-mono text-emerald-300 text-[11px] break-all">
+                      Destino: {info.displaySummary}
+                    </div>
+
+                    {info.playerName && (
+                      <div className="text-[11px] text-slate-300">
+                        Nickname verificado:{" "}
+                        <strong className="text-white">
+                          {info.playerName}
+                        </strong>
+                      </div>
+                    )}
+
+                    <div className="text-[11px] text-slate-400 flex flex-wrap gap-3">
+                      <span>
+                        Entregado:{" "}
+                        <strong className="text-white">
+                          {item.deliveredCount}/{item.quantity}
+                        </strong>
+                      </span>
+                      {info.supplierReferenceCode && (
+                        <span>
+                          Ref Central One:{" "}
+                          <strong className="font-mono text-sky-300">
+                            {info.supplierReferenceCode}
+                          </strong>
+                        </span>
+                      )}
+                    </div>
+
+                    {info.topupFailureReason && (
+                      <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-[11px] text-rose-200">
+                        Error proveedor: {info.topupFailureReason}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      )}
 
       {/* Fulfillments (Privacy Enforced: Last 4 Chars Only) */}
       <div className="rounded-3xl apple-glass p-6 space-y-4">

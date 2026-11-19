@@ -571,4 +571,89 @@ describe("exchange-rates — filtrado anti-trampa Binance P2P y cálculo de tasa
     expect(cmp!.effectiveBsPerCostDollar).toBeCloseTo(1157.43, 2); // Bs. 1.157,43
     expect(cmp!.effectiveBsSpreadOverUsdt).toBeCloseTo(87.43, 2); // +Bs. 87,43 sobre USDT
   });
+
+  it("Reinversion directa desde Pago Movil BDV (1.5% entrada + cambio a USDT con ganancia cambiaria) cuadra BDV en 0 y FazerCards exacto", () => {
+    // Cliente paga 1080 Bs por $10.00 (tasa 108 Bs/$) por un PIN que cuesta $9.00
+    const pmOrder = makeOrder({
+      id: "ord-bdv-reinvest",
+      paymentGateway: "pagomovil",
+      subtotalCents: 1000,
+      amountDueCents: 1000,
+      paidCents: 1000,
+      bsRateCents: 10800,
+      totalBsCents: 108000, // Bs 1,080.00
+      items: [
+        {
+          id: "item-bdv-1",
+          orderId: "ord-bdv-reinvest",
+          variantId: "v-10",
+          productName: "Gift Card $10",
+          productSlug: "gc-10",
+          denominationLabel: "$10",
+          region: "USA",
+          unitPriceCents: 1000,
+          unitCostCents: 900,
+          quantity: 1,
+          deliveredCount: 1,
+          status: "FULFILLED",
+        },
+      ],
+    });
+
+    // BDV cobra 1.5% entrada -> entran reales Bs 1,063.80 ($9.85 en libros).
+    // Luego Elvias saca los Bs 1,063.80 de BDV (BDV cobra 1.5% al sacar), Antonio los convierte a $10.10 USDT
+    // y los recarga directo a FazerCards (con $0.01 fee BSC -> llegan $10.09 netos a FazerCards).
+    const plan = buildTreasuryMovementWithFeePlan({
+      movementType: "SUPPLIER_TOPUP",
+      sourceAccount: "pagomovil",
+      targetAccount: "fazercards",
+      amountUsdCents: 1010,
+      networkFeeUsdCents: 1,
+    });
+
+    const movements: TreasuryMovementDTO[] = [
+      makeMovement({
+        movementType: "CAPITAL_IN",
+        sourceAccount: "external",
+        targetAccount: "fazercards",
+        amountUsdCents: 900,
+      }),
+      makeMovement({
+        movementType: "SUPPLIER_TOPUP",
+        sourceAccount: "pagomovil",
+        targetAccount: "fazercards",
+        amountUsdCents: plan.primaryAmountUsdCents,
+        amountBsCents: 106380,
+      }),
+      ...(plan.feeEntry
+        ? [
+            makeMovement({
+              movementType: plan.feeEntry.movementType,
+              sourceAccount: plan.feeEntry.sourceAccount,
+              targetAccount: plan.feeEntry.targetAccount,
+              amountUsdCents: plan.feeEntry.amountUsdCents,
+            }),
+          ]
+        : []),
+    ];
+
+    const pos = computeTreasuryPosition({
+      orders: [pmOrder],
+      movements,
+      suppliers: [
+        // Arrancó en $9.00, se vendió $9.00, entraron $10.09 netos -> saldo vivo $10.09
+        { id: "fazercards", balanceCents: 1009, enabled: true, configured: true },
+      ],
+      pagomovilIncomingFeePct: 1.5,
+      pagomovilOutgoingFeePct: 1.5,
+    });
+
+    expect(pos.pagomovilBalanceBsCents).toBe(0);
+    expect(pos.pagomovilBalanceUsdCents).toBe(0);
+    expect(pos.suppliersDiscrepancyUsdCents).toBe(0);
+    // Diferencia cambiaria de Antonio: $10.10 obtenidos - $9.85 en libros BDV = +$0.25
+    expect(pos.exchangeDiffUsdCents).toBe(25);
+    // Utilidad bruta ($1.00) - BDV entrada ($0.15) + cambio Antonio (+$0.25) - fee BSC ($0.01) = $1.09
+    expect(pos.netBusinessProfitUsdCents).toBe(109);
+  });
 });

@@ -46,6 +46,28 @@ export interface VolumeDiscountTier {
   unitPriceCents: number;
 }
 
+export interface TargetSchemaOption {
+  value: string;
+  label: string;
+}
+
+export interface TargetSchemaField {
+  key: string;
+  label: string | null;
+  type: "text" | "select";
+  options: TargetSchemaOption[] | null;
+}
+
+export interface OrderItemTargetInfo {
+  payload: Record<string, string>;
+  playerName?: string | null;
+  validationStatus?: "valid" | "unverified";
+  displaySummary: string;
+  supplierReferenceCode?: string | null;
+  topupStatus?: "pending" | "processing" | "completed" | "failed" | "refunded";
+  topupFailureReason?: string | null;
+}
+
 export interface ProductVariantDTO {
   id: string;
   productId: string;
@@ -64,6 +86,10 @@ export interface ProductVariantDTO {
   deliverableStock?: number | null;
   inStock: boolean;
   volumeDiscounts?: VolumeDiscountTier[];
+  requiresTarget?: boolean;
+  targetFields?: string[];
+  targetSchema?: TargetSchemaField[];
+  supportsPlayerValidate?: boolean;
 }
 
 export interface ProductDTO {
@@ -86,6 +112,7 @@ export interface ProductDTO {
 }
 
 export interface CartItem {
+  cartKey?: string;
   variantId: string;
   productId: string;
   productSlug: string;
@@ -98,6 +125,11 @@ export interface CartItem {
   unitCostCents?: number | null;
   quantity: number;
   volumeDiscounts?: VolumeDiscountTier[];
+  requiresTarget?: boolean;
+  targetPayload?: Record<string, string>;
+  targetSummary?: string;
+  verifiedPlayerName?: string | null;
+  targetValidationStatus?: "valid" | "unverified";
 }
 
 export interface OrderItemDTO {
@@ -113,6 +145,7 @@ export interface OrderItemDTO {
   quantity: number;
   deliveredCount: number;
   status: OrderItemStatus;
+  targetInfo?: OrderItemTargetInfo | null;
 }
 
 export interface FulfillmentSummaryDTO {
@@ -231,21 +264,6 @@ export interface ProviderConfigDTO {
   updatedAt: string;
 }
 
-export interface BotDeviceDTO {
-  id: string;
-  name: string;
-  deviceIdentifier: string;
-  channelType: "ANDROID_PUSH" | "ANDROID_SMS" | "EMAIL_SCRIPT";
-  allowPlainBearer?: boolean;
-  lastHeartbeatAt: string | null;
-  batteryLevel: number | null;
-  networkType: string | null;
-  appVersion: string | null;
-  active: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface ReceiverBankAccountDTO {
   id: string;
   bankCode: string;
@@ -254,7 +272,6 @@ export interface ReceiverBankAccountDTO {
   phone: string;
   dni: string;
   holderName: string;
-  allowedPackages: string[];
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -271,7 +288,7 @@ export interface BankPaymentNotificationDTO {
   id: string;
   deviceId: string | null;
   receiverAccountId: string | null;
-  sourceType: "APP_PUSH" | "SMS" | "EMAIL" | "MANUAL";
+  sourceType: "BDV_API" | "MANUAL" | "APP_PUSH" | "SMS" | "EMAIL";
   appPackage: string | null;
   rawContentHash: string;
   rawContentPreview: string;
@@ -291,14 +308,17 @@ export interface BankPaymentNotificationDTO {
   createdAt: string;
 }
 
-export interface PagoMovilBotSettingsDTO {
+export interface PagoMovilSettingsDTO {
   rateExpirationMinutes: number;
   orderExpirationMinutes: number;
   amountToleranceBsCents: number;
-  watchdogOfflineMinutes: number;
-  enforceWatchdog: boolean;
-  requireSenderPhone: boolean;
   minReferenceDigits: number;
+  /** Comisión porcentual que descuenta el Banco de Venezuela al recibir Pago Móvil jurídico (ej. 1.5%) */
+  incomingFeePct: number;
+  /** Comisión porcentual estimada al sacar/transferir los fondos en Bs del banco (ej. 1.5%) */
+  outgoingFeePct: number;
+  /** Traslado automático de comisión BDV al precio en Bs cobrado al cliente ("off" | "incoming" | "both") */
+  feePassThroughMode?: "off" | "incoming" | "both";
 }
 
 export interface AuditLogEntryDTO {
@@ -432,6 +452,17 @@ export interface TreasuryPositionSummary {
   pagomovilSalesGrossBsCents: number;
   pagomovilSalesCostUsdCents: number;
   pagomovilNominalProfitUsdCents: number;
+  /** Comisiones bancarias BDV aplicadas a cobros y estimación de retiro */
+  pagomovilIncomingFeePct: number;
+  pagomovilOutgoingFeePct: number;
+  pagomovilIncomingFeeBsCents: number;
+  pagomovilIncomingFeeUsdCents: number;
+  pagomovilEstimatedOutgoingFeeBsCents: number;
+  pagomovilEstimatedOutgoingFeeUsdCents: number;
+  pagomovilNetLiquidableBsCents: number;
+  pagomovilNetLiquidableUsdtCents: number;
+  pagomovilCombinedBankFeePct: number;
+  pagomovilRequiredMarkupPct: number;
   weightedBookBsRateCents: number | null;
   replacementUsdtRateCents: number | null;
   pagomovilMarkToMarketUsdtCents: number;

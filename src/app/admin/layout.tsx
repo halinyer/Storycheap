@@ -5,6 +5,7 @@ import { AdminSidebar } from "@/components/layout/admin-sidebar";
 import { AdminTopbar } from "@/components/layout/admin-topbar";
 import { getAdminIncludeTestsPreference } from "@/lib/server/admin-preferences";
 import { AuthError, requireAdminUser } from "@/lib/server/auth";
+import { getPagoMovilSettings } from "@/lib/server/pagomovil-store";
 import {
   getBsRateCents,
   listCatalog,
@@ -58,6 +59,7 @@ async function AdminAuthGate({ children }: { children: React.ReactNode }) {
     actualItemCostCents,
     includeTestOrders,
     supportTickets,
+    pagoMovilSettings,
   ] = await Promise.all([
     listOrdersAdmin({ needsAttentionOnly: true }),
     listOrdersAdmin(),
@@ -70,6 +72,7 @@ async function AdminAuthGate({ children }: { children: React.ReactNode }) {
     listSupplierItemCostsAdmin(),
     getAdminIncludeTestsPreference(),
     listSupportTicketsAdmin(),
+    getPagoMovilSettings(),
   ]);
 
   const openSupportTicketsCount = supportTickets.filter(
@@ -104,6 +107,9 @@ async function AdminAuthGate({ children }: { children: React.ReactNode }) {
     creditLiabilityUsdCents,
     includeTestOrders,
     bsRateCents,
+    pagomovilIncomingFeePct: pagoMovilSettings.incomingFeePct,
+    pagomovilOutgoingFeePct: pagoMovilSettings.outgoingFeePct,
+    pagomovilFeePassThroughMode: pagoMovilSettings.feePassThroughMode,
   });
 
   const unhealthySuppliersCount = suppliers.filter(

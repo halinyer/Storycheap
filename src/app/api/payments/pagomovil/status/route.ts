@@ -4,7 +4,7 @@ import { hasOrderAccessCookie } from "@/lib/server/order-access";
 import {
   getPagoMovilOrderPublicStatus,
   PagoMovilAuthError,
-} from "@/lib/server/payments/pagomovil-bot";
+} from "@/lib/server/payments/pagomovil-bdv";
 
 export async function GET(request: Request) {
   await connection();

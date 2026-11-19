@@ -1,11 +1,11 @@
 import "server-only";
 import type { PaymentGatewayId } from "@/types";
-import { PagoMovilBotAdapter } from "./pagomovil-bot";
+import { PagoMovilBdvAdapter } from "./pagomovil-bdv";
 import type { PaymentGatewayAdapter } from "./types";
 import { ZenoBankAdapter } from "./zenobank";
 
 let zenoBankAdapter: ZenoBankAdapter | null = null;
-let pagoMovilBotAdapter: PagoMovilBotAdapter | null = null;
+let pagoMovilBdvAdapter: PagoMovilBdvAdapter | null = null;
 
 export function getPaymentGateway(id: PaymentGatewayId): PaymentGatewayAdapter {
   switch (id) {
@@ -14,7 +14,7 @@ export function getPaymentGateway(id: PaymentGatewayId): PaymentGatewayAdapter {
       return zenoBankAdapter;
     case "pagomovil":
     case "pablito":
-      pagoMovilBotAdapter ??= new PagoMovilBotAdapter();
-      return pagoMovilBotAdapter;
+      pagoMovilBdvAdapter ??= new PagoMovilBdvAdapter();
+      return pagoMovilBdvAdapter;
   }
 }

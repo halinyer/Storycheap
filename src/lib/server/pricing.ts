@@ -1,6 +1,19 @@
 import "server-only";
+import {
+  buildCartLineKey,
+  buildOrderItemTargetInfo,
+  isLoginModeTarget,
+  normalizeTargetPayloadMap,
+  normalizeTargetSchema,
+  validateTargetPayloadAgainstSchema,
+} from "@/lib/topup-targets";
 import { resolveVolumeTierPrice } from "@/lib/volume-discounts";
-import type { ProductDTO, ProductVariantDTO, SupplierPricingPolicy } from "@/types";
+import type {
+  OrderItemTargetInfo,
+  ProductDTO,
+  ProductVariantDTO,
+  SupplierPricingPolicy,
+} from "@/types";
 import {
   getProviderConfig,
   getSupplierPricingPolicy,
@@ -12,7 +25,10 @@ import {
   applyLiveQuoteToVariant,
   fetchLiveQuoteForSku,
 } from "./supplier-sync";
-import { getCentralOneBalance } from "./suppliers/centralone";
+import {
+  getCentralOneBalance,
+  validateCentralOnePlayer,
+} from "./suppliers/centralone";
 import {
   getFazerCardsBalance,
   isFazerCardsProductId,
@@ -24,6 +40,8 @@ export interface CartLineInput {
   variantId: string;
   quantity: number;
   expectedUnitPriceCents?: number;
+  targetPayload?: Record<string, string>;
+  verifiedPlayerName?: string | null;
 }
 
 export interface ValidatedCheckoutLine {
@@ -32,6 +50,7 @@ export interface ValidatedCheckoutLine {
   quantity: number;
   effectiveUnitPriceCents: number;
   lineTotalCents: number;
+  targetInfo?: OrderItemTargetInfo | null;
 }
 
 export class CheckoutValidationError extends Error {
@@ -41,6 +60,8 @@ export class CheckoutValidationError extends Error {
       | "GATEWAY_DISABLED"
       | "EMPTY_CART"
       | "INVALID_VARIANT"
+      | "INVALID_TARGET"
+      | "INVALID_PLAYER"
       | "OUT_OF_STOCK"
       | "PRICE_UPDATED"
       | "QUANTITY_LIMIT"
@@ -78,9 +99,19 @@ export async function validateAndPriceCart(
     );
   }
 
-  // Merge duplicate variantIds safely
-  const mergedQty = new Map<string, number>();
-  const expectedPriceByVariant = new Map<string, number>();
+  // Merge duplicate (variantId + targetPayload) lines safely while capping per-variant total <= 10
+  const mergedLines = new Map<
+    string,
+    {
+      variantId: string;
+      quantity: number;
+      expectedUnitPriceCents?: number;
+      targetPayload?: Record<string, string>;
+      verifiedPlayerName?: string | null;
+    }
+  >();
+  const totalQtyByVariant = new Map<string, number>();
+
   for (const item of lines) {
     if (!Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 10) {
       throw new CheckoutValidationError(
@@ -89,27 +120,42 @@ export async function validateAndPriceCart(
         400
       );
     }
-    const nextQty = (mergedQty.get(item.variantId) ?? 0) + item.quantity;
-    if (nextQty > 10) {
+    const nextVariantTotal =
+      (totalQtyByVariant.get(item.variantId) ?? 0) + item.quantity;
+    if (nextVariantTotal > 10) {
       throw new CheckoutValidationError(
         "QUANTITY_LIMIT",
         "Máximo 10 unidades por variante en una sola orden.",
         400
       );
     }
-    mergedQty.set(item.variantId, nextQty);
-    if (
+    totalQtyByVariant.set(item.variantId, nextVariantTotal);
+
+    const cleanTarget = item.targetPayload
+      ? normalizeTargetPayloadMap(item.targetPayload)
+      : undefined;
+    const lineKey = buildCartLineKey(item.variantId, cleanTarget);
+    const existing = mergedLines.get(lineKey);
+    const expectedPrice =
       typeof item.expectedUnitPriceCents === "number" &&
       Number.isFinite(item.expectedUnitPriceCents)
-    ) {
-      expectedPriceByVariant.set(
-        item.variantId,
-        Math.round(item.expectedUnitPriceCents)
-      );
-    }
+        ? Math.round(item.expectedUnitPriceCents)
+        : existing?.expectedUnitPriceCents;
+
+    mergedLines.set(lineKey, {
+      variantId: item.variantId,
+      quantity: (existing?.quantity ?? 0) + item.quantity,
+      expectedUnitPriceCents: expectedPrice,
+      targetPayload:
+        cleanTarget && Object.keys(cleanTarget).length > 0
+          ? cleanTarget
+          : existing?.targetPayload,
+      verifiedPlayerName:
+        item.verifiedPlayerName ?? existing?.verifiedPlayerName ?? null,
+    });
   }
 
-  const variantIds = Array.from(mergedQty.keys());
+  const variantIds = Array.from(totalQtyByVariant.keys());
   const [lookup, reloadlyCfg, centralOneCfg, fazerCardsCfg] = await Promise.all([
     getVariantsLookupByIds(variantIds),
     getProviderConfig("reloadly"),
@@ -139,7 +185,8 @@ export async function validateAndPriceCart(
   const validatedLines: ValidatedCheckoutLine[] = [];
   let subtotalCents = 0;
 
-  for (const [variantId, quantity] of mergedQty.entries()) {
+  for (const lineInput of mergedLines.values()) {
+    const { variantId, quantity } = lineInput;
     const found = lookup.get(variantId);
     if (!found || !found.product.active || !found.variant.active) {
       throw new CheckoutValidationError(
@@ -151,7 +198,64 @@ export async function validateAndPriceCart(
 
     const { product, variant } = found;
     let effectiveVariant = variant;
+    let targetInfo: OrderItemTargetInfo | null = null;
+
+    if (variant.requiresTarget) {
+      const schema = normalizeTargetSchema(
+        variant.targetFields,
+        variant.targetSchema
+      );
+      if (isLoginModeTarget(variant.targetFields, schema, product.name)) {
+        throw new CheckoutValidationError(
+          "INVALID_TARGET",
+          `${product.name} requiere credenciales de acceso y no está habilitado para recarga directa por ID.`,
+          400
+        );
+      }
+
+      const targetCheck = validateTargetPayloadAgainstSchema(
+        lineInput.targetPayload,
+        schema
+      );
+      if (!targetCheck.ok) {
+        throw new CheckoutValidationError(
+          "INVALID_TARGET",
+          `${product.name} (${variant.denominationLabel}): ${targetCheck.error}`,
+          400
+        );
+      }
+
+      let resolvedPlayerName = lineInput.verifiedPlayerName ?? null;
+      let validationStatus: "valid" | "unverified" = "unverified";
+
+      if (variant.centraloneProductId && variant.supportsPlayerValidate) {
+        const validation = await validateCentralOnePlayer({
+          productId: variant.centraloneProductId,
+          targetPayload: targetCheck.cleanPayload,
+        });
+        if (validation.status === "invalid") {
+          throw new CheckoutValidationError(
+            "INVALID_PLAYER",
+            `El ID ingresado para ${product.name} (${variant.denominationLabel}) no existe o es inválido. Verifícalo antes de pagar.`,
+            400
+          );
+        }
+        if (validation.status === "valid") {
+          validationStatus = "valid";
+          resolvedPlayerName = validation.playerName ?? resolvedPlayerName;
+        }
+      }
+
+      targetInfo = buildOrderItemTargetInfo({
+        payload: targetCheck.cleanPayload,
+        schema,
+        playerName: resolvedPlayerName,
+        validationStatus,
+      });
+    }
+
     const csvAvailable =
+      variant.requiresTarget ||
       variant.sourcePriority === "centralone_only" ||
       variant.sourcePriority === "reloadly_only"
         ? 0
@@ -160,6 +264,7 @@ export async function validateAndPriceCart(
 
     if (deficit > 0) {
       const canFallbackReloadly =
+        !variant.requiresTarget &&
         Boolean(reloadlyCfg?.enabled) &&
         (variant.sourcePriority === "manual_then_reloadly" ||
           variant.sourcePriority === "reloadly_only") &&
@@ -171,6 +276,7 @@ export async function validateAndPriceCart(
       const isFazerSku = isFazerCardsProductId(variant.centraloneProductId);
 
       const canUseFazerCards =
+        !variant.requiresTarget &&
         isApiPriority &&
         Boolean(variant.centraloneProductId) &&
         isFazerSku &&
@@ -297,7 +403,7 @@ export async function validateAndPriceCart(
     });
     const effectiveUnitPriceCents = tierPricing.effectiveUnitPriceCents;
 
-    const expectedUnitPrice = expectedPriceByVariant.get(variantId);
+    const expectedUnitPrice = lineInput.expectedUnitPriceCents;
     if (
       typeof expectedUnitPrice === "number" &&
       expectedUnitPrice !== effectiveUnitPriceCents
@@ -317,6 +423,7 @@ export async function validateAndPriceCart(
       quantity,
       effectiveUnitPriceCents,
       lineTotalCents,
+      targetInfo,
     });
   }
 

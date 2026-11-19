@@ -7,10 +7,8 @@ import {
   processVerifiedWebhookEvent,
 } from "@/lib/server/fulfillment";
 import {
-  registerBotDevice,
   saveOrderPagoMovilReport,
   saveReceiverBankAccount,
-  updateBotDeviceHeartbeat,
 } from "@/lib/server/pagomovil-store";
 import { setSandboxZenoCheckout } from "@/lib/server/payments/zenobank";
 import {
@@ -58,29 +56,16 @@ async function setupPagoMovil() {
   await setBsRateCents(5000, ADMIN_SESSION.id);
   await saveReceiverBankAccount(
     {
-      bankCode: "0172",
-      bankName: "Bancamiga Banco Universal",
-      accountType: "natural",
+      bankCode: "0102",
+      bankName: "Banco de Venezuela",
+      accountType: "juridical",
       phone: "04121234567",
-      dni: "V-24123456",
-      holderName: "StoryCheap Personal",
-      allowedPackages: ["com.bancamiga.suite", "SMS"],
+      dni: "J-500123456",
+      holderName: "StoryCheap C.A.",
       active: true,
     },
     ADMIN_SESSION.id
   );
-  const { device } = await registerBotDevice(
-    {
-      name: "Android QA",
-      channelType: "ANDROID_PUSH",
-      allowPlainBearer: true,
-    },
-    ADMIN_SESSION.id
-  );
-  await updateBotDeviceHeartbeat(device.id, {
-    batteryLevel: 90,
-    networkType: "WIFI",
-  });
 }
 
 describe("Customer Order Cancellation (Atomic Release + Credit Refund)", () => {

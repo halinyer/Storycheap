@@ -3,10 +3,12 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useStore } from "@/context/store-context";
+import {
+  useStore,
+  type CatalogCategoryFilter,
+} from "@/context/store-context";
 import { StoryCheapLogo } from "@/components/brand/storycheap-logo";
 import { formatCents } from "@/lib/catalog-seed";
-import type { Category } from "@/types";
 import {
   ChevronDown,
   Flame,
@@ -21,18 +23,20 @@ import {
   User,
   Wallet,
   X,
+  Zap,
 } from "lucide-react";
 
 const EMPTY_SUBSCRIBE = () => () => {};
 
 const SUBNAV_ITEMS: Array<{
   label: string;
-  category?: Category | "ALL";
+  category?: CatalogCategoryFilter;
   href?: string;
   hot?: boolean;
 }> = [
   { label: "Tienda", category: "ALL" },
   { label: "Populares", category: "ALL", hot: true },
+  { label: "Recargas Directas", category: "topup" },
   { label: "Juegos y Consolas", category: "gaming" },
   { label: "Streaming y Música", category: "streaming" },
   { label: "Apple y Tiendas USA", category: "shopping" },
@@ -109,7 +113,10 @@ export function Navbar() {
     }
   };
 
-  const handleCategoryPick = (cat: Category | "ALL", onlyPopular?: boolean) => {
+  const handleCategoryPick = (
+    cat: CatalogCategoryFilter,
+    onlyPopular?: boolean
+  ) => {
     setSelectedCategory(cat);
     if (onlyPopular) {
       setSearchQuery("");
@@ -153,7 +160,7 @@ export function Navbar() {
               type="text"
               value={searchQuery}
               onChange={(e) => handleSearchChange(e.target.value)}
-              placeholder="Buscar tarjetas: PlayStation, Steam, Netflix, Apple..."
+              placeholder="Buscar: PlayStation, Steam, Genshin, Wuthering Waves..."
               className="w-full bg-transparent text-xs sm:text-sm text-white placeholder-slate-400 focus:outline-none"
             />
             {searchQuery ? (
@@ -428,6 +435,9 @@ export function Navbar() {
               >
                 {item.hot && (
                   <Flame className="w-3.5 h-3.5 text-orange-400 shrink-0" />
+                )}
+                {item.category === "topup" && (
+                  <Zap className="w-3.5 h-3.5 text-sky-400 shrink-0" />
                 )}
                 {item.category === "gaming" && (
                   <Gamepad2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />

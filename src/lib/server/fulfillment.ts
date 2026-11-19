@@ -33,8 +33,10 @@ import {
   findConsumedBinancePayTxIds,
   getOrderByGatewayCheckoutId,
   getOrderById,
+  getOrderItemTargets,
   getProviderConfig,
   getSupplierOrderByExternalId,
+  getSupplierOrderByIdentifier,
   getSupplierPricingPolicy,
   getUserCreditBalanceCents,
   getVariantPricingMetaMap,
@@ -51,6 +53,7 @@ import {
   reserveManualCodes,
   setOrderPaidCentsForManualReview,
   transitionOrderStatus,
+  updateOrderItemTargetStatus,
   updateOrderItemUnitCostCents,
   updateOrderPartialPaymentCents,
   updateSupplierOrderState,
@@ -257,6 +260,19 @@ async function insertFulfillmentIdempotently(
   }
 }
 
+async function safeUpdateOrderItemTargetStatus(
+  orderId: string,
+  orderItemId: string,
+  patch: {
+    supplierReferenceCode?: string | null;
+    topupStatus?: "pending" | "processing" | "completed" | "failed" | "refunded";
+    topupFailureReason?: string | null;
+  }
+): Promise<void> {
+  if (typeof updateOrderItemTargetStatus !== "function") return;
+  await updateOrderItemTargetStatus(orderId, orderItemId, patch).catch(() => {});
+}
+
 /**
  * Delivers all items of a PAID/PARTIAL/MANUAL_REVIEW order using pre-reserved
  * manual codes first, unreserved manual inventory second, and Reloadly only if enabled.
@@ -296,6 +312,10 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
   const variantLookup = await getVariantsLookupByIds(
     order.items.map((i) => i.variantId)
   );
+  const orderTargets =
+    typeof getOrderItemTargets === "function"
+      ? await getOrderItemTargets(order.id).catch(() => ({}))
+      : {};
   const reloadlyCfg = await getProviderConfig("reloadly");
   const centralOneCfg = await getProviderConfig("centralone");
   const fazerCardsCfg = await getProviderConfig("fazercards");
@@ -314,6 +334,13 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       anyFulfilledNowOrBefore = true;
       continue;
     }
+
+    const variantMeta = variantLookup.get(item.variantId)?.variant;
+    const itemTarget =
+      item.targetInfo ??
+      (orderTargets as Record<string, typeof item.targetInfo>)[item.id] ??
+      null;
+    const isDirectTopup = Boolean(itemTarget || variantMeta?.requiresTarget);
 
     const tryConsumeManualCode = async (row: {
       id: string;
@@ -343,15 +370,17 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       );
     };
 
-    // Step A: consume pre-committed manual codes for this variant
-    const pool = committedByVariant.get(item.variantId) ?? [];
-    while (delivered < item.quantity && pool.length > 0) {
-      await tryConsumeManualCode(pool.shift()!);
+    // Step A: consume pre-committed manual codes for this variant (never for direct ID top-ups)
+    if (!isDirectTopup) {
+      const pool = committedByVariant.get(item.variantId) ?? [];
+      while (delivered < item.quantity && pool.length > 0) {
+        await tryConsumeManualCode(pool.shift()!);
+      }
     }
 
-    // Step B: try claiming additional AVAILABLE manual stock if still needed
-    const variantMeta = variantLookup.get(item.variantId)?.variant;
+    // Step B: try claiming additional AVAILABLE manual stock if still needed (never for direct ID top-ups)
     if (
+      !isDirectTopup &&
       delivered < item.quantity &&
       (manualCfg?.enabled ?? true) &&
       variantMeta?.sourcePriority !== "reloadly_only" &&
@@ -375,8 +404,9 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       }
     }
 
-    // Step C: optional Reloadly fallback ONLY when enabled & variant configured
+    // Step C: optional Reloadly fallback ONLY when enabled & variant configured (never for direct ID top-ups)
     if (
+      !isDirectTopup &&
       delivered < item.quantity &&
       reloadlyCfg?.enabled &&
       variantMeta &&
@@ -562,7 +592,11 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
             itemUnitPriceCents: item.unitPriceCents,
           });
 
-      if (marginCheck.blockedReason) {
+      if (isDirectTopup && (!itemTarget || Object.keys(itemTarget.payload ?? {}).length === 0)) {
+        attentionReasons.push(
+          `Faltan los datos del jugador (ID/Servidor) para ejecutar la recarga directa de ${item.productName}.`
+        );
+      } else if (marginCheck.blockedReason) {
         attentionReasons.push(marginCheck.blockedReason);
       } else {
         try {
@@ -573,7 +607,22 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
                 catalogItemId: variantMeta.centraloneProductId,
                 quantity: remaining,
                 externalReference: `${order.orderNumber}:${item.id}`,
+                ...(isDirectTopup && itemTarget
+                  ? {
+                      targetPayload: itemTarget.payload,
+                      expectedUnitPrice:
+                        item.unitPriceCents > 1
+                          ? (item.unitPriceCents - 1) / 100
+                          : undefined,
+                    }
+                  : {}),
               });
+
+          const effectiveDeliveredFromC1 = isDirectTopup
+            ? c1Order.status === "completed" || c1Order.status === "delivered"
+              ? remaining
+              : Math.min(remaining, c1Order.completedLineCount ?? 0)
+            : c1Order.deliveredCount;
 
           await upsertSupplierOrder({
             orderId: order.id,
@@ -584,7 +633,7 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
             referenceCode: c1Order.referenceCode,
             status: c1Order.status,
             expectedQty: remaining,
-            deliveredCount: c1Order.deliveredCount,
+            deliveredCount: effectiveDeliveredFromC1,
             supplierUnitCostCents: c1Order.unitCostCents,
             rawPayload: c1Order.raw,
           });
@@ -594,71 +643,128 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
           }
           invalidateCentralOneBalanceCache();
 
-          const existingC1Count = order.fulfillments.filter(
-            (f) => f.orderItemId === item.id && f.source === "centralone"
-          ).length;
-
-          if (
-            isCentralOneReadyStatus(c1Order.status) ||
-            c1Order.deliveredCount > existingC1Count
-          ) {
-            const codesRes = await fetchCentralOneCodesSafe(
-              c1Order.externalOrderId
-            );
-            if (!codesRes.ready) {
-              if (delivered < item.quantity) {
-                itemPendingAsync = true;
-                hasPendingAsyncSupplier = true;
+          if (isDirectTopup) {
+            // Direct ID top-ups do NOT return PINs via /orders/{id}/codes (`delivered_count === 0`).
+            // Delivery is confirmed exclusively by Central One order/item status ("completed").
+            if (
+              c1Order.status === "completed" ||
+              c1Order.status === "delivered" ||
+              (c1Order.completedLineCount ?? 0) >= remaining
+            ) {
+              delivered = item.quantity;
+              anyFulfilledNowOrBefore = true;
+              await safeUpdateOrderItemTargetStatus(order.id, item.id, {
+                supplierReferenceCode: c1Order.referenceCode ?? c1Order.externalOrderId,
+                topupStatus: "completed",
+                topupFailureReason: null,
+              }).catch(() => {});
+            } else if (isCentralOnePendingStatus(c1Order.status)) {
+              itemPendingAsync = true;
+              hasPendingAsyncSupplier = true;
+              await safeUpdateOrderItemTargetStatus(order.id, item.id, {
+                supplierReferenceCode: c1Order.referenceCode ?? c1Order.externalOrderId,
+                topupStatus: "processing",
+                topupFailureReason: null,
+              }).catch(() => {});
+            } else if (isCentralOnePartialStatus(c1Order.status)) {
+              const completedUnits = Math.min(remaining, c1Order.completedLineCount ?? 0);
+              if (completedUnits > 0) {
+                delivered = Math.min(item.quantity, delivered + completedUnits);
+                anyFulfilledNowOrBefore = true;
               }
+              await safeUpdateOrderItemTargetStatus(order.id, item.id, {
+                supplierReferenceCode: c1Order.referenceCode ?? c1Order.externalOrderId,
+                topupStatus: "failed",
+                topupFailureReason: c1Order.failureReason ?? "Entrega parcial en recarga directa.",
+              }).catch(() => {});
+              attentionReasons.push(
+                `Central One completó parcialmente la recarga directa (${delivered}/${item.quantity}) para ${item.productName}${c1Order.failureReason ? `: ${c1Order.failureReason}` : ""}.`
+              );
             } else {
-              let skippedDuplicate = false;
-              for (const c of codesRes.codes.slice(0, item.quantity)) {
-                const inserted = await insertFulfillmentIdempotently({
-                  orderItemId: item.id,
-                  orderId: order.id,
-                  userId: order.userId,
-                  source: "centralone",
-                  supplierTxId: c1Order.externalOrderId,
-                  codePlaintext: c.codePlaintext,
-                  pinPlaintext: c.pinPlaintext,
-                  maxQuantity: item.quantity,
-                });
-                if (inserted) {
-                  delivered += 1;
-                  anyFulfilledNowOrBefore = true;
-                } else {
-                  skippedDuplicate = true;
-                }
-              }
-              if (skippedDuplicate) {
-                const freshOrder = await getOrderById(order.id);
-                const freshCount =
-                  freshOrder?.fulfillments.filter((f) => f.orderItemId === item.id)
-                    .length ?? delivered;
-                delivered = Math.min(item.quantity, Math.max(delivered, freshCount));
-                if (delivered > 0) anyFulfilledNowOrBefore = true;
-              }
+              const failStatus = c1Order.status === "refunded" ? "refunded" : "failed";
+              await safeUpdateOrderItemTargetStatus(order.id, item.id, {
+                supplierReferenceCode: c1Order.referenceCode ?? c1Order.externalOrderId,
+                topupStatus: failStatus,
+                topupFailureReason: c1Order.failureReason ?? c1Order.status,
+              }).catch(() => {});
+              attentionReasons.push(
+                `Central One no pudo acreditar la recarga directa para ${item.productName} (${c1Order.failureReason ?? c1Order.status})${c1Order.refunded ? " · Saldo liberado automáticamente en Central One." : "."}`
+              );
+            }
+          } else {
+            const existingC1Count = order.fulfillments.filter(
+              (f) => f.orderItemId === item.id && f.source === "centralone"
+            ).length;
 
-              if (delivered < item.quantity) {
-                if (isCentralOnePartialStatus(c1Order.status)) {
-                  attentionReasons.push(
-                    `Central One entregó parcialmente (${delivered}/${item.quantity}) para ${item.productName}${c1Order.failureReason ? `: ${c1Order.failureReason}` : ""}.`
-                  );
-                } else {
+            if (
+              isCentralOneReadyStatus(c1Order.status) ||
+              c1Order.deliveredCount > existingC1Count
+            ) {
+              const codesRes = await fetchCentralOneCodesSafe(
+                c1Order.externalOrderId
+              );
+              if (!codesRes.ready) {
+                if (delivered < item.quantity) {
                   itemPendingAsync = true;
                   hasPendingAsyncSupplier = true;
                 }
+              } else {
+                let skippedDuplicate = false;
+                for (const c of codesRes.codes.slice(0, item.quantity)) {
+                  const inserted = await insertFulfillmentIdempotently({
+                    orderItemId: item.id,
+                    orderId: order.id,
+                    userId: order.userId,
+                    source: "centralone",
+                    supplierTxId: c1Order.externalOrderId,
+                    codePlaintext: c.codePlaintext,
+                    pinPlaintext: c.pinPlaintext,
+                    maxQuantity: item.quantity,
+                  });
+                  if (inserted) {
+                    delivered += 1;
+                    anyFulfilledNowOrBefore = true;
+                  } else {
+                    skippedDuplicate = true;
+                  }
+                }
+                if (skippedDuplicate) {
+                  const freshOrder = await getOrderById(order.id);
+                  const freshCount =
+                    freshOrder?.fulfillments.filter((f) => f.orderItemId === item.id)
+                      .length ?? delivered;
+                  delivered = Math.min(item.quantity, Math.max(delivered, freshCount));
+                  if (delivered > 0) anyFulfilledNowOrBefore = true;
+                }
+
+                if (delivered < item.quantity) {
+                  if (isCentralOnePartialStatus(c1Order.status)) {
+                    attentionReasons.push(
+                      `Central One entregó parcialmente (${delivered}/${item.quantity}) para ${item.productName}${c1Order.failureReason ? `: ${c1Order.failureReason}` : ""}.`
+                    );
+                  } else {
+                    itemPendingAsync = true;
+                    hasPendingAsyncSupplier = true;
+                  }
+                }
               }
+            } else if (isCentralOnePendingStatus(c1Order.status)) {
+              itemPendingAsync = true;
+              hasPendingAsyncSupplier = true;
+            } else {
+              attentionReasons.push(
+                `Central One devolvió estado "${c1Order.status}" para ${item.productName}${c1Order.failureReason ? ` (${c1Order.failureReason})` : ""}.`
+              );
             }
-          } else if (isCentralOnePendingStatus(c1Order.status)) {
-            itemPendingAsync = true;
-            hasPendingAsyncSupplier = true;
-          } else {
-            attentionReasons.push(
-              `Central One devolvió estado "${c1Order.status}" para ${item.productName}${c1Order.failureReason ? ` (${c1Order.failureReason})` : ""}.`
-            );
           }
         } catch (err) {
+          if (isDirectTopup) {
+            await safeUpdateOrderItemTargetStatus(order.id, item.id, {
+              topupStatus: "failed",
+              topupFailureReason:
+                err instanceof Error ? err.message : "Error desconocido",
+            }).catch(() => {});
+          }
           attentionReasons.push(
             `Central One falló para ${item.productName}: ${err instanceof Error ? err.message : "Error desconocido"}`
           );
@@ -701,12 +807,25 @@ export async function fulfillOrder(orderId: string): Promise<OrderDTO> {
       attentionReason: null,
     });
     if (movedToDelivered) {
-      const totalDelivered = order.items.reduce((acc, it) => acc + it.quantity, 0);
+      const latestDeliveredOrder = (await getOrderById(order.id)) ?? order;
+      const totalDelivered = latestDeliveredOrder.items.reduce(
+        (acc, it) => acc + it.quantity,
+        0
+      );
+      const directTopupSummaries = latestDeliveredOrder.items
+        .filter((it) => Boolean(it.targetInfo))
+        .map((it) => ({
+          productName: it.productName,
+          denominationLabel: it.denominationLabel,
+          targetSummary: it.targetInfo!.displaySummary,
+          referenceCode: it.targetInfo?.supplierReferenceCode ?? null,
+        }));
       await sendOrderReadyEmail({
         to: order.email,
         orderId: order.id,
         orderNumber: order.orderNumber,
         itemCount: totalDelivered,
+        directTopupSummaries,
       }).catch(() => {});
     }
   } else if (hasPendingAsyncSupplier && attentionReasons.length === 0) {
@@ -1881,17 +2000,42 @@ async function fetchCentralOneCodesSafe(externalOrderId: string) {
  * GET /orders/{id}/codes. Called by /api/webhooks/centralone and /api/cron/reconcile.
  */
 export async function syncCentralOneOrderProgress(
-  externalOrderId: string,
+  externalOrderOrLookup:
+    | string
+    | {
+        externalOrderId?: string | null;
+        referenceCode?: string | null;
+        idempotencyKey?: string | null;
+      },
   sequenceHint?: number
 ): Promise<{ ok: boolean; status: string; addedCodes: number }> {
-  const isFazerOrder = isFazerCardsProductId(externalOrderId);
-  const supplierOrder = await getSupplierOrderByExternalId(
-    isFazerOrder ? ["fazercards", "centralone"] : ["centralone", "fazercards"],
-    externalOrderId
-  );
+  const lookup =
+    typeof externalOrderOrLookup === "string"
+      ? { externalOrderId: externalOrderOrLookup }
+      : externalOrderOrLookup;
+  const rawExternalId = lookup.externalOrderId?.trim() || "";
+  const isFazerHint = isFazerCardsProductId(rawExternalId);
+  const providers = isFazerHint
+    ? ["fazercards", "centralone"]
+    : ["centralone", "fazercards"];
+
+  let supplierOrder =
+    rawExternalId && typeof getSupplierOrderByExternalId === "function"
+      ? await getSupplierOrderByExternalId(providers, rawExternalId)
+      : null;
+  if (!supplierOrder && typeof getSupplierOrderByIdentifier === "function") {
+    supplierOrder = await getSupplierOrderByIdentifier(providers, lookup);
+  }
   if (!supplierOrder) {
     return { ok: false, status: "unknown_supplier_order", addedCodes: 0 };
   }
+
+  const externalOrderId = supplierOrder.externalOrderId ?? rawExternalId;
+  if (!externalOrderId) {
+    return { ok: false, status: "missing_external_order_id", addedCodes: 0 };
+  }
+  const isFazerOrder =
+    supplierOrder.provider === "fazercards" || isFazerCardsProductId(externalOrderId);
 
   if (
     typeof sequenceHint === "number" &&
@@ -1912,6 +2056,10 @@ export async function syncCentralOneOrderProgress(
               ? "failed"
               : "processing",
           deliveredCount: fz.codes.length,
+          completedLineCount: fz.status === "COMPLETED" ? fz.codes.length : 0,
+          failedLineCount: fz.status === "FAILED" ? 1 : 0,
+          refunded: false,
+          referenceCode: fz.rawOrderId ?? null,
           unitCostCents:
             fz.unitCostCents > 0 ? fz.unitCostCents : supplierOrder.supplierUnitCostCents,
           failureReason: null as string | null,
@@ -1940,65 +2088,128 @@ export async function syncCentralOneOrderProgress(
     return { ok: false, status: "order_item_not_found", addedCodes: 0 };
   }
 
+  const orderTargets =
+    typeof getOrderItemTargets === "function"
+      ? await getOrderItemTargets(order.id).catch(() => ({}))
+      : {};
+  const itemTarget =
+    targetItem.targetInfo ??
+    (orderTargets as Record<string, typeof targetItem.targetInfo>)[targetItem.id] ??
+    null;
+  const isDirectTopup = Boolean(!isFazerOrder && itemTarget);
+
   const existingCount = order.fulfillments.filter(
     (f) => f.orderItemId === targetItem.id && f.source === "centralone"
   ).length;
 
   let addedCodes = 0;
   let skippedDuplicate = false;
-  const shouldFetchCodes =
-    existingCount < targetItem.quantity &&
-    (isCentralOneReadyStatus(live.status) || live.deliveredCount > existingCount);
+  let newDeliveredForItem = targetItem.deliveredCount;
 
-  if (shouldFetchCodes) {
-    const codesRes = live.fazerCodes
-      ? {
-          ready: true as const,
-          codes: live.fazerCodes.map((codePlaintext) => ({
-            codePlaintext,
-            pinPlaintext: null,
-          })),
-        }
-      : await fetchCentralOneCodesSafe(externalOrderId);
+  if (isDirectTopup) {
+    if (
+      live.status === "completed" ||
+      live.status === "delivered" ||
+      (live.completedLineCount ?? 0) >= targetItem.quantity
+    ) {
+      newDeliveredForItem = targetItem.quantity;
+      await safeUpdateOrderItemTargetStatus(order.id, targetItem.id, {
+        supplierReferenceCode:
+          live.referenceCode ?? supplierOrder.referenceCode ?? externalOrderId,
+        topupStatus: "completed",
+        topupFailureReason: null,
+      }).catch(() => {});
+    } else if (
+      live.status === "failed" ||
+      live.status === "cancelled" ||
+      live.status === "refunded"
+    ) {
+      newDeliveredForItem = Math.min(
+        targetItem.quantity,
+        Math.max(targetItem.deliveredCount, live.completedLineCount ?? 0)
+      );
+      await safeUpdateOrderItemTargetStatus(order.id, targetItem.id, {
+        supplierReferenceCode:
+          live.referenceCode ?? supplierOrder.referenceCode ?? externalOrderId,
+        topupStatus: live.status === "refunded" ? "refunded" : "failed",
+        topupFailureReason: live.failureReason ?? live.status,
+      }).catch(() => {});
+    } else if (isCentralOnePartialStatus(live.status)) {
+      newDeliveredForItem = Math.min(
+        targetItem.quantity,
+        Math.max(targetItem.deliveredCount, live.completedLineCount ?? 0)
+      );
+      await safeUpdateOrderItemTargetStatus(order.id, targetItem.id, {
+        supplierReferenceCode:
+          live.referenceCode ?? supplierOrder.referenceCode ?? externalOrderId,
+        topupStatus: "failed",
+        topupFailureReason: live.failureReason ?? "Entrega parcial",
+      }).catch(() => {});
+    } else {
+      await safeUpdateOrderItemTargetStatus(order.id, targetItem.id, {
+        supplierReferenceCode:
+          live.referenceCode ?? supplierOrder.referenceCode ?? externalOrderId,
+        topupStatus: "processing",
+      }).catch(() => {});
+    }
+  } else {
+    const shouldFetchCodes =
+      existingCount < targetItem.quantity &&
+      (isCentralOneReadyStatus(live.status) || live.deliveredCount > existingCount);
 
-    if (codesRes.ready) {
-      for (const c of codesRes.codes.slice(0, targetItem.quantity)) {
-        const inserted = await insertFulfillmentIdempotently({
-          orderItemId: targetItem.id,
-          orderId: order.id,
-          userId: order.userId,
-          source: "centralone",
-          supplierTxId: externalOrderId,
-          codePlaintext: c.codePlaintext,
-          pinPlaintext: c.pinPlaintext,
-          maxQuantity: targetItem.quantity,
-        });
-        if (inserted) {
-          addedCodes += 1;
-        } else {
-          skippedDuplicate = true;
+    if (shouldFetchCodes) {
+      const codesRes = live.fazerCodes
+        ? {
+            ready: true as const,
+            codes: live.fazerCodes.map((codePlaintext) => ({
+              codePlaintext,
+              pinPlaintext: null,
+            })),
+          }
+        : await fetchCentralOneCodesSafe(externalOrderId);
+
+      if (codesRes.ready) {
+        for (const c of codesRes.codes.slice(0, targetItem.quantity)) {
+          const inserted = await insertFulfillmentIdempotently({
+            orderItemId: targetItem.id,
+            orderId: order.id,
+            userId: order.userId,
+            source: "centralone",
+            supplierTxId: externalOrderId,
+            codePlaintext: c.codePlaintext,
+            pinPlaintext: c.pinPlaintext,
+            maxQuantity: targetItem.quantity,
+          });
+          if (inserted) {
+            addedCodes += 1;
+          } else {
+            skippedDuplicate = true;
+          }
         }
       }
     }
-  }
 
-  let actualItemFulfillments = existingCount + addedCodes;
-  if (skippedDuplicate) {
-    const afterCodesOrder = await getOrderById(order.id);
-    actualItemFulfillments =
-      afterCodesOrder?.fulfillments.filter((f) => f.orderItemId === targetItem.id)
-        .length ?? actualItemFulfillments;
+    let actualItemFulfillments = existingCount + addedCodes;
+    if (skippedDuplicate) {
+      const afterCodesOrder = await getOrderById(order.id);
+      actualItemFulfillments =
+        afterCodesOrder?.fulfillments.filter((f) => f.orderItemId === targetItem.id)
+          .length ?? actualItemFulfillments;
+    }
+    const totalCentralOneForItem = Math.min(targetItem.quantity, actualItemFulfillments);
+    newDeliveredForItem = Math.min(
+      targetItem.quantity,
+      Math.max(targetItem.deliveredCount, totalCentralOneForItem)
+    );
   }
-  const totalCentralOneForItem = Math.min(targetItem.quantity, actualItemFulfillments);
-  const newDeliveredForItem = Math.min(
-    targetItem.quantity,
-    Math.max(targetItem.deliveredCount, totalCentralOneForItem)
-  );
 
   const resolvedUnitCost = live.unitCostCents ?? supplierOrder.supplierUnitCostCents;
   await updateSupplierOrderState(supplierOrder.id, {
     status: live.status,
-    deliveredCount: Math.min(targetItem.quantity, Math.max(live.deliveredCount, totalCentralOneForItem)),
+    deliveredCount: Math.min(
+      targetItem.quantity,
+      Math.max(live.deliveredCount, newDeliveredForItem)
+    ),
     supplierUnitCostCents: resolvedUnitCost,
     lastSequence:
       typeof sequenceHint === "number" && sequenceHint > supplierOrder.lastSequence
@@ -2021,18 +2232,28 @@ export async function syncCentralOneOrderProgress(
 
   const failureNote = live.failureReason ?? live.fazerFailReason ?? null;
 
-  if (live.status === "failed" || live.status === "cancelled") {
+  if (
+    live.status === "failed" ||
+    live.status === "cancelled" ||
+    live.status === "refunded"
+  ) {
     await markOrderItemProgress(targetItem.id, {
       deliveredCount: newDeliveredForItem,
-      status: newDeliveredForItem >= targetItem.quantity ? "FULFILLED" : "MANUAL_REVIEW",
+      status:
+        newDeliveredForItem >= targetItem.quantity && live.status !== "refunded"
+          ? "FULFILLED"
+          : "MANUAL_REVIEW",
     });
-    const nextOrderStatus = newDeliveredForItem > 0 ? "PARTIAL" : "MANUAL_REVIEW";
+    const nextOrderStatus =
+      newDeliveredForItem > 0 && live.status !== "refunded"
+        ? "PARTIAL"
+        : "MANUAL_REVIEW";
     await transitionOrderStatus({
       orderId: order.id,
-      expectedStatuses: ["FULFILLING", "PARTIAL"],
+      expectedStatuses: ["FULFILLING", "PARTIAL", "DELIVERED"],
       nextStatus: nextOrderStatus,
       needsAttention: true,
-      attentionReason: `${isFazerOrder ? "FazerCards" : "Central One"} devolvió estado "${live.status}" (orden ${externalOrderId}${failureNote ? `: ${failureNote}` : ""}).`,
+      attentionReason: `${isFazerOrder ? "FazerCards" : "Central One"} devolvió estado "${live.status}" (orden ${live.referenceCode ?? externalOrderId}${failureNote ? `: ${failureNote}` : ""})${live.refunded ? " · Saldo liberado en Central One." : "."}`,
     });
     return { ok: true, status: live.status, addedCodes };
   }
@@ -2047,7 +2268,7 @@ export async function syncCentralOneOrderProgress(
       expectedStatuses: ["FULFILLING", "PARTIAL"],
       nextStatus: newDeliveredForItem > 0 ? "PARTIAL" : "MANUAL_REVIEW",
       needsAttention: true,
-      attentionReason: `Central One entregó parcialmente (${newDeliveredForItem}/${targetItem.quantity}) en orden ${externalOrderId}${failureNote ? `: ${failureNote}` : ""}.`,
+      attentionReason: `Central One entregó parcialmente (${newDeliveredForItem}/${targetItem.quantity}) en orden ${live.referenceCode ?? externalOrderId}${failureNote ? `: ${failureNote}` : ""}.`,
     });
     return { ok: true, status: live.status, addedCodes };
   }
@@ -2071,11 +2292,20 @@ export async function syncCentralOneOrderProgress(
       attentionReason: null,
     });
     if (movedToDelivered) {
+      const directTopupSummaries = refreshed.items
+        .filter((it) => Boolean(it.targetInfo))
+        .map((it) => ({
+          productName: it.productName,
+          denominationLabel: it.denominationLabel,
+          targetSummary: it.targetInfo!.displaySummary,
+          referenceCode: it.targetInfo?.supplierReferenceCode ?? null,
+        }));
       await sendOrderReadyEmail({
         to: order.email,
         orderId: order.id,
         orderNumber: order.orderNumber,
         itemCount: refreshed.items.reduce((acc, it) => acc + it.quantity, 0),
+        directTopupSummaries,
       }).catch(() => {});
     }
   }

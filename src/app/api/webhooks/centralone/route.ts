@@ -72,6 +72,19 @@ export async function POST(request: NextRequest) {
       payload.order_id ??
       ""
   ).trim();
+  const referenceCode = String(
+    nestedOrderObj?.reference_code ??
+      dataObj.reference_code ??
+      payload.reference_code ??
+      ""
+  ).trim();
+  const idempotencyKey = String(
+    nestedOrderObj?.idempotency_key ??
+      dataObj.idempotency_key ??
+      payload.idempotency_key ??
+      ""
+  ).trim();
+  const primaryOrderRef = externalOrderId || referenceCode || idempotencyKey;
   const sequence =
     typeof payload.sequence === "number"
       ? payload.sequence
@@ -88,7 +101,7 @@ export async function POST(request: NextRequest) {
 
   // Non-order webhook events documented by Central One (e.g. webhook.test,
   // deposit.*, balance.*, product.*) do not reference a specific order.
-  if (!externalOrderId) {
+  if (!primaryOrderRef) {
     if (eventType !== "unknown" && !eventType.startsWith("order.")) {
       return NextResponse.json(
         { received: true, eventId, eventType, acknowledged: true },
@@ -96,7 +109,7 @@ export async function POST(request: NextRequest) {
       );
     }
     return NextResponse.json(
-      { error: "Missing order_id in Central One webhook" },
+      { error: "Missing order identifier in Central One webhook" },
       { status: 400 }
     );
   }
@@ -106,7 +119,7 @@ export async function POST(request: NextRequest) {
     eventId,
     eventType,
     orderId: null,
-    gatewayCheckoutId: externalOrderId,
+    gatewayCheckoutId: primaryOrderRef,
     signatureValid: true,
     payload,
   });
@@ -120,7 +133,16 @@ export async function POST(request: NextRequest) {
 
   runAsyncTask(async () => {
     try {
-      await syncCentralOneOrderProgress(externalOrderId, sequence);
+      await syncCentralOneOrderProgress(
+        externalOrderId && !referenceCode && !idempotencyKey
+          ? externalOrderId
+          : {
+              externalOrderId: externalOrderId || null,
+              referenceCode: referenceCode || null,
+              idempotencyKey: idempotencyKey || null,
+            },
+        sequence
+      );
       await updateWebhookEventStatus(recordId, "processed");
     } catch (err) {
       await updateWebhookEventStatus(
@@ -132,7 +154,13 @@ export async function POST(request: NextRequest) {
   });
 
   return NextResponse.json(
-    { received: true, eventId, eventType, externalOrderId },
+    {
+      received: true,
+      eventId,
+      eventType,
+      externalOrderId: primaryOrderRef,
+      ...(referenceCode ? { referenceCode } : {}),
+    },
     { status: 200 }
   );
 }

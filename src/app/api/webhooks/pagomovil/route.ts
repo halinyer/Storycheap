@@ -2,15 +2,15 @@ import { after, NextResponse } from "next/server";
 import { processVerifiedWebhookEvent } from "@/lib/server/fulfillment";
 import {
   PagoMovilAuthError,
-  PagoMovilBotAdapter,
-} from "@/lib/server/payments/pagomovil-bot";
+  PagoMovilBdvAdapter,
+} from "@/lib/server/payments/pagomovil-bdv";
 
 export async function POST(request: Request) {
   const rawBody = await request.text();
   const headers = Object.fromEntries(request.headers.entries());
 
   try {
-    const adapter = new PagoMovilBotAdapter();
+    const adapter = new PagoMovilBdvAdapter();
     const event = await adapter.verifyWebhook({ rawBody, headers });
 
     after(async () => {

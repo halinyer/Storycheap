@@ -16,6 +16,9 @@ export interface TreasuryMovementModalPreset {
   movementType?: TreasuryMovementType;
   sourceAccount?: string;
   targetAccount?: string;
+  amountUsd?: string;
+  networkFeeUsd?: string;
+  reference?: string;
   notes?: string;
 }
 
@@ -100,7 +103,7 @@ export function TreasuryMovementModal(props: TreasuryMovementModalProps) {
   if (!props.open) return null;
   return (
     <TreasuryMovementModalForm
-      key={`${props.preset?.movementType ?? "SUPPLIER_TOPUP"}-${props.preset?.sourceAccount ?? ""}-${props.preset?.targetAccount ?? ""}`}
+      key={`${props.preset?.movementType ?? "SUPPLIER_TOPUP"}-${props.preset?.sourceAccount ?? ""}-${props.preset?.targetAccount ?? ""}-${props.preset?.reference ?? ""}-${props.preset?.amountUsd ?? ""}`}
       onClose={props.onClose}
       suppliers={props.suppliers}
       preset={props.preset}
@@ -132,11 +135,13 @@ function TreasuryMovementModalForm({
   const [targetAccount, setTargetAccount] = useState(
     preset?.targetAccount ?? TYPE_META[initialType].defaultTarget
   );
-  const [usdInput, setUsdInput] = useState("");
-  const [networkFeeInput, setNetworkFeeInput] = useState("");
+  const [usdInput, setUsdInput] = useState(preset?.amountUsd ?? "");
+  const [networkFeeInput, setNetworkFeeInput] = useState(
+    preset?.networkFeeUsd ?? ""
+  );
   const [bsInput, setBsInput] = useState("");
   const [partnerName, setPartnerName] = useState("");
-  const [reference, setReference] = useState("");
+  const [reference, setReference] = useState(preset?.reference ?? "");
   const [notes, setNotes] = useState(preset?.notes ?? "");
   const [adjustDirection, setAdjustDirection] = useState<"out" | "in">("out");
   const [adjustAccount, setAdjustAccount] = useState("zenobank");
@@ -176,9 +181,9 @@ function TreasuryMovementModalForm({
       : null;
 
   const isSwapBsToUsd =
-    movementType === "INTERNAL_TRANSFER" &&
     sourceAccount === "pagomovil" &&
-    targetAccount === "zenobank";
+    (movementType === "SUPPLIER_TOPUP" ||
+      (movementType === "INTERNAL_TRANSFER" && targetAccount === "zenobank"));
   const showBsInput =
     isSwapBsToUsd ||
     sourceAccount === "pagomovil" ||

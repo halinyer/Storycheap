@@ -18,6 +18,10 @@ const checkoutSchema = z.object({
         variantId: z.string().uuid("Variante de producto inválida"),
         quantity: z.number().int().min(1).max(10),
         expectedUnitPriceCents: z.number().int().positive().optional(),
+        targetPayload: z
+          .record(z.string().min(1).max(64), z.string().max(64))
+          .optional(),
+        verifiedPlayerName: z.string().max(120).nullable().optional(),
       })
     )
     .min(1, "Agrega al menos un producto al carrito")

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity,
+  Building2,
   ChevronRight,
   FileKey2,
   Headset,
@@ -49,20 +50,13 @@ export function AdminSidebar({
 
   const groups: SidebarGroup[] = [
     {
-      title: "Principal",
+      title: "Dirección",
       items: [
-        { href: "/admin", label: "Inicio", icon: LayoutDashboard, exact: true },
+        { href: "/admin", label: "Inicio Ejecutivo", icon: LayoutDashboard, exact: true },
       ],
     },
     {
-      title: "Finanzas y Caja",
-      items: [
-        { href: "/admin/treasury", label: "Tesorería y Cuadre", icon: Landmark },
-        { href: "/admin/customers", label: "Clientes y Saldos", icon: Users },
-      ],
-    },
-    {
-      title: "Operación y Catálogo",
+      title: "Ventas y Operaciones",
       items: [
         {
           href: "/admin/orders",
@@ -71,9 +65,35 @@ export function AdminSidebar({
           badge: needsAttentionCount > 0 ? needsAttentionCount : undefined,
           badgeTone: "bg-rose-500 text-white",
         },
+        { href: "/admin/customers", label: "Clientes y Saldos", icon: Users },
+        {
+          href: "/admin/support",
+          label: "Soporte y Tickets",
+          icon: Headset,
+          badge:
+            openSupportTicketsCount > 0 ? openSupportTicketsCount : undefined,
+          badgeTone: "bg-sky-400 text-slate-950",
+        },
+      ],
+    },
+    {
+      title: "Finanzas y Tesorería",
+      items: [
+        { href: "/admin/banks", label: "Bancos y Cuentas", icon: Building2 },
+        { href: "/admin/treasury", label: "Tesorería y Movimientos", icon: Landmark },
+        {
+          href: "/admin/pagomovil",
+          label: "Pago Móvil (BDV)",
+          icon: Smartphone,
+        },
+      ],
+    },
+    {
+      title: "Catálogo y Proveedores",
+      items: [
         {
           href: "/admin/products",
-          label: "Gift Cards",
+          label: "Productos y Recargas",
           icon: PackageSearch,
         },
         {
@@ -83,11 +103,6 @@ export function AdminSidebar({
           badge: lowStockCount > 0 ? lowStockCount : undefined,
           badgeTone: "bg-amber-400 text-slate-950",
         },
-      ],
-    },
-    {
-      title: "Canales y Sistema",
-      items: [
         {
           href: "/admin/providers",
           label: "Distribuidores y APIs",
@@ -95,19 +110,11 @@ export function AdminSidebar({
           badge: unhealthySuppliersCount > 0 ? unhealthySuppliersCount : undefined,
           badgeTone: "bg-amber-500 text-slate-950",
         },
-        {
-          href: "/admin/pagomovil",
-          label: "Pago Móvil (Bs)",
-          icon: Smartphone,
-        },
-        {
-          href: "/admin/support",
-          label: "Soporte y Canales",
-          icon: Headset,
-          badge:
-            openSupportTicketsCount > 0 ? openSupportTicketsCount : undefined,
-          badgeTone: "bg-sky-400 text-slate-950",
-        },
+      ],
+    },
+    {
+      title: "Sistema",
+      items: [
         {
           href: "/admin/audit",
           label: "Auditoría y Logs",

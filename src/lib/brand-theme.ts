@@ -26,6 +26,9 @@ export const CARD_IMAGE_PRESETS: CardImagePreset[] = [
   { label: "PUBG / PUBG Mobile", imageUrl: "/cards/pubg.png" },
   { label: "Mobile Legends", imageUrl: "/cards/mobilelegends.png" },
   { label: "Honor of Kings", imageUrl: "/cards/honorofkings.png" },
+  { label: "Wuthering Waves", imageUrl: "/cards/wutheringwaves.png" },
+  { label: "Genshin Impact", imageUrl: "/cards/genshin.png" },
+  { label: "Blood Strike", imageUrl: "/cards/bloodstrike.jpg" },
   { label: "NetEase Pay", imageUrl: "/cards/netease.png" },
   { label: "Discord", imageUrl: "/cards/discord.png" },
   { label: "Twitch", imageUrl: "/cards/twitch.png" },
@@ -139,6 +142,57 @@ interface SimpleBrandRule {
 }
 
 const SIMPLE_BRAND_RULES: SimpleBrandRule[] = [
+  {
+    match: ["blood strike", "bloodstrike"],
+    brandName: "Blood Strike",
+    imageUrl: "/cards/bloodstrike.jpg",
+    accentHex: "#ef4444",
+    palette: "crimson",
+    redeemUrl: null,
+    redeemHost: null,
+    redeemLabel: "Recarga directa por ID",
+    importantNote:
+      "Verifica tu User ID en tu perfil dentro de Blood Strike y usa el botón de verificación en vivo para confirmar tu nickname antes de pagar.",
+    steps: [
+      "Abre Blood Strike y toca tu avatar en la esquina superior izquierda para ver tu User ID.",
+      "Ingresa tu User ID aquí y presiona 'Verificar ID y ver Nickname' para confirmar tu cuenta en vivo.",
+      "Completa el pago y tus Gold / Strike Pass se acreditan automáticamente directo a tu cuenta sin códigos ni contraseña.",
+    ],
+  },
+  {
+    match: ["wuthering waves", "wuthering", "lunite"],
+    brandName: "Wuthering Waves",
+    imageUrl: "/cards/wutheringwaves.png",
+    accentHex: "#38bdf8",
+    palette: "sky",
+    redeemUrl: null,
+    redeemHost: null,
+    redeemLabel: "Recarga directa por UID",
+    importantNote:
+      "Verifica tu UID (9 dígitos en la esquina inferior derecha dentro del juego) y selecciona el servidor exacto antes de pagar. Las recargas directas acreditadas no son reversibles.",
+    steps: [
+      "Abre Wuthering Waves y copia tu UID ubicado en la esquina inferior derecha de la pantalla.",
+      "Ingresa tu UID y selecciona tu servidor (América, Europa, Asia, SEA o TW/HK/MO) antes de pagar.",
+      "Al confirmarse tu pago, tus Lunites o Suscripción Lunite se acreditan automáticamente directo a tu cuenta sin necesidad de códigos ni contraseña.",
+    ],
+  },
+  {
+    match: ["genshin impact", "genshin", "genesis crystals", "welkin"],
+    brandName: "Genshin Impact",
+    imageUrl: "/cards/genshin.png",
+    accentHex: "#a855f7",
+    palette: "violet",
+    redeemUrl: null,
+    redeemHost: null,
+    redeemLabel: "Recarga directa por UID",
+    importantNote:
+      "Verifica tu UID (9 dígitos en la esquina inferior derecha dentro del juego) y selecciona el servidor exacto antes de pagar. Las recargas directas acreditadas no son reversibles.",
+    steps: [
+      "Abre Genshin Impact y copia tu UID ubicado en la esquina inferior derecha de la pantalla.",
+      "Ingresa tu Player ID (UID) y selecciona tu servidor (America, Europe, Asia o TW/HK/MO) antes de pagar.",
+      "Al confirmarse tu pago, tus Genesis Crystals o Bendición Lunar se acreditan automáticamente directo en tu cuenta sin necesidad de PIN ni contraseña.",
+    ],
+  },
   {
     match: ["xbox game pass", "game pass"],
     brandName: "Xbox Game Pass",

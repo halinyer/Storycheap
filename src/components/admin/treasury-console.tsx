@@ -1,22 +1,18 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   captureMonthlyCapitalSnapshotAction,
-  settleHistoricalTestsAction,
   voidTreasuryMovementAction,
 } from "@/app/admin/actions";
-import { BsExchangeDeskCard } from "@/components/admin/bs-exchange-desk-card";
-import {
-  ReceiverLedgersSection,
-  type MatchedPagoMovilSummary,
-} from "@/components/admin/receiver-ledgers-section";
+import type { MatchedPagoMovilSummary } from "@/components/admin/receiver-ledgers-section";
 import {
   TreasuryMovementModal,
   type TreasuryMovementModalPreset,
 } from "@/components/admin/treasury-movement-modal";
-import { formatCents, formatExactUsd } from "@/lib/catalog-seed";
+import { formatCents } from "@/lib/catalog-seed";
 import type {
   CapitalSnapshotRecord,
   ZenoBinanceReceiverDTO,
@@ -39,11 +35,11 @@ import {
   ArrowRightLeft,
   ArrowUpRight,
   Ban,
+  Building2,
   Camera,
   CheckCircle2,
   ClipboardCopy,
-  FlaskConical,
-  Landmark,
+  PlugZap,
   Plus,
   Scale,
   Wallet,
@@ -98,23 +94,14 @@ function labelAccount(id: string): string {
 }
 
 export function TreasuryConsole({
-  orders,
   movements,
   suppliers,
   position,
-  bsRateCents = null,
-  bsRatePolicy = null,
   liveRates = null,
   snapshots: initialSnapshots,
   sqlMigrationApplied,
   migrationSqlSnippet,
-  includeTestOrders,
-  zenoConfigured,
-  initialZenoReceiver,
-  zenoProofs,
   activePagoMovilAccount,
-  matchedPagoMovilByOrder,
-  actualItemCostCents,
 }: {
   orders: OrderDTO[];
   movements: TreasuryMovementDTO[];
@@ -143,37 +130,6 @@ export function TreasuryConsole({
   const [capturing, setCapturing] = useState(false);
   const [voidingId, setVoidingId] = useState<string | null>(null);
   const [showSqlDrawer, setShowSqlDrawer] = useState(false);
-
-  // Historical test settlement wizard state
-  const candidateSettledOrders = useMemo(
-    () =>
-      orders.filter(
-        (o) =>
-          !o.isTest &&
-          (o.status === "DELIVERED" || o.paidCents > 0 || o.status === "PAID")
-      ),
-    [orders]
-  );
-
-  const [selectedTestIds, setSelectedTestIds] = useState<Record<string, boolean>>(() => {
-    const initial: Record<string, boolean> = {};
-    for (const o of orders) {
-      if (
-        !o.isTest &&
-        (o.status === "DELIVERED" || o.paidCents > 0)
-      ) {
-        initial[o.id] = true;
-      }
-    }
-    return initial;
-  });
-  const [seedOpeningBalances, setSeedOpeningBalances] = useState(true);
-  const [settlingTests, setSettlingTests] = useState(false);
-
-  const activeMovementsCount = useMemo(
-    () => movements.filter((m) => !m.voidedAt).length,
-    [movements]
-  );
 
   const filteredMovements = useMemo(
     () =>
@@ -222,48 +178,6 @@ export function TreasuryConsole({
       toast.error(err instanceof Error ? err.message : "Error al anular");
     } finally {
       setVoidingId(null);
-    }
-  };
-
-  const handleSettleHistoricalTests = async () => {
-    const chosenIds = candidateSettledOrders
-      .filter((o) => selectedTestIds[o.id])
-      .map((o) => o.id);
-
-    if (chosenIds.length === 0 && !seedOpeningBalances) {
-      toast.error("Selecciona al menos una orden o activa el saldo de apertura.");
-      return;
-    }
-
-    const openingSupplierCapitalCents: Record<string, number> = {};
-    if (seedOpeningBalances) {
-      for (const s of suppliers) {
-        if (
-          (s.enabled || s.configured) &&
-          typeof s.balanceCents === "number" &&
-          s.balanceCents > 0
-        ) {
-          openingSupplierCapitalCents[s.id] = s.balanceCents;
-        }
-      }
-    }
-
-    setSettlingTests(true);
-    try {
-      const res = await settleHistoricalTestsAction({
-        orderIds: chosenIds,
-        openingSupplierCapitalCents,
-      });
-      toast.success(
-        `Cuadre aplicado: ${res.flaggedOrdersCount} orden(es) marcadas como prueba y ${res.createdMovementsCount} asiento(s) iniciales creados.`
-      );
-      router.refresh();
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Error al cuadrar pruebas históricas"
-      );
-    } finally {
-      setSettlingTests(false);
     }
   };
 
@@ -375,30 +289,41 @@ export function TreasuryConsole({
 
       {/* Accounting Equation Overview */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
-        <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-5 space-y-1">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-            1. En Receptoras Hoy
+        <Link
+          href="/admin/banks"
+          className="group rounded-2xl bg-[#0d101b] hover:bg-[#121626] border border-white/[0.08] hover:border-emerald-400/30 p-5 space-y-1 transition-colors"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              1. En Bancos Hoy
+            </span>
+            <ArrowUpRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-emerald-300" />
           </div>
           <div className="text-2xl font-black font-mono text-white">
             {formatCents(position.totalReceiversUsdCents)}
           </div>
           <div className="text-[11px] text-slate-400">
-            Binance {formatCents(position.zenobankBalanceUsdCents)} · Pago Móvil{" "}
-            {formatCents(position.pagomovilBalanceUsdCents)}
+            Ver Binance, BDV y tasa Bs →
           </div>
-        </div>
+        </Link>
 
-        <div className="rounded-2xl bg-[#0d101b] border border-white/[0.08] p-5 space-y-1">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-            2. En Distribuidores
+        <Link
+          href="/admin/providers"
+          className="group rounded-2xl bg-[#0d101b] hover:bg-[#121626] border border-white/[0.08] hover:border-sky-400/30 p-5 space-y-1 transition-colors"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              2. En Distribuidores
+            </span>
+            <ArrowUpRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-sky-300" />
           </div>
           <div className="text-2xl font-black font-mono text-sky-300">
             {formatCents(position.totalSuppliersUsdCents)}
           </div>
           <div className="text-[11px] text-slate-400">
-            Cupo vivo listo en APIs + CSV
+            Ver saldos FazerCards y C1 →
           </div>
-        </div>
+        </Link>
 
         <div className="rounded-2xl bg-[#0d101b] border border-indigo-400/25 p-5 space-y-1">
           <div className="text-[11px] font-bold uppercase tracking-wider text-indigo-300">
@@ -485,214 +410,53 @@ export function TreasuryConsole({
         </div>
       </div>
 
-      {/* Guided Reconciliation for Initial Test Orders */}
-      {(candidateSettledOrders.length > 0 || activeMovementsCount === 0) && (
-        <div className="rounded-2xl bg-[#111524] border border-amber-400/25 p-6 space-y-4">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-300">
-                <FlaskConical className="w-4 h-4" />
-                <span>Asistente de Cuadre de Pruebas Históricas</span>
-              </div>
-              <h2 className="text-base font-bold text-white">
-                {candidateSettledOrders.length > 0
-                  ? `Detectadas ${candidateSettledOrders.length} orden(es) entregada(s)/pagada(s) aún contadas como operación real`
-                  : "Registra los saldos vivos actuales en tus APIs como capital inicial"}
-              </h2>
-              <p className="text-xs text-slate-400 max-w-3xl leading-relaxed">
-                Marca abajo las órdenes que fueron de prueba inicial (por ejemplo los pedidos con tu socio Antonio o las pruebas de Central One) para excluirlas de ventas reales y registrar automáticamente tu saldo vivo actual en APIs como capital de arranque.
-              </p>
-            </div>
-
-            <button
-              type="button"
-              disabled={settlingTests}
-              onClick={() => void handleSettleHistoricalTests()}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs disabled:opacity-50 shrink-0"
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              <span>
-                {settlingTests ? "Aplicando cuadre..." : "Aplicar Cuadre Inicial"}
-              </span>
-            </button>
-          </div>
-
-          {candidateSettledOrders.length > 0 && (
-            <div className="divide-y divide-white/[0.06] rounded-xl bg-slate-950/70 border border-white/[0.07] max-h-56 overflow-y-auto text-xs">
-              {candidateSettledOrders.map((ord) => {
-                const checked = Boolean(selectedTestIds[ord.id]);
-                const summary = ord.items
-                  .map((i) => `${i.productName} ${i.denominationLabel}`)
-                  .join(", ");
-                return (
-                  <label
-                    key={ord.id}
-                    className="flex items-center justify-between gap-4 px-4 py-2.5 cursor-pointer hover:bg-white/[0.03]"
-                  >
-                    <span className="flex items-center gap-3 min-w-0">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) =>
-                          setSelectedTestIds((prev) => ({
-                            ...prev,
-                            [ord.id]: e.target.checked,
-                          }))
-                        }
-                        className="rounded border-white/25 bg-slate-900"
-                      />
-                      <span className="font-mono font-bold text-white shrink-0">
-                        {ord.orderNumber}
-                      </span>
-                      <span className="text-slate-300 truncate">{summary}</span>
-                      <span className="text-slate-500 hidden sm:inline truncate">
-                        ({ord.email})
-                      </span>
-                    </span>
-                    <span className="font-mono font-semibold text-amber-200 shrink-0">
-                      {formatCents(ord.subtotalCents)} ·{" "}
-                      {ord.paymentGateway.toUpperCase()}
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          )}
-
-          {activeMovementsCount === 0 && (
-            <label className="flex items-start gap-2.5 text-xs text-slate-200 cursor-pointer pt-1">
-              <input
-                type="checkbox"
-                checked={seedOpeningBalances}
-                onChange={(e) => setSeedOpeningBalances(e.target.checked)}
-                className="mt-0.5 rounded border-white/25 bg-slate-900"
-              />
-              <span>
-                Registrar también como <strong>Capital Inicial (`CAPITAL_IN`)</strong> el saldo vivo actual que tienen hoy tus proveedores (
-                {suppliers
-                  .filter(
-                    (s) =>
-                      (s.enabled || s.configured) &&
-                      typeof s.balanceCents === "number" &&
-                      s.balanceCents > 0
-                  )
-                  .map(
-                    (s) =>
-                      `${s.label}: ${formatExactUsd(s.balanceCents, s.exactBalanceUsd)}`
-                  )
-                  .join(" · ") || "sin saldo vivo"}
-                ), para que tu caja arranque 100% cuadrada en <strong>\$0.00</strong> de ganancia neta y <strong>\$0.00</strong> en receptoras.
-              </span>
-            </label>
-          )}
-        </div>
-      )}
-
-      {/* Receivers (ZenoBank / Binance & Pago Movil Config + Ledgers) */}
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-bold text-white flex items-center gap-2">
-            <Landmark className="w-4 h-4 text-sky-400" />
-            <span>Saldos en Cuentas Receptoras y Auditoría de Ingresos</span>
-          </h2>
-          {includeTestOrders && (
-            <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-400/30 text-[11px] font-semibold text-amber-200">
-              Incluyendo órdenes de prueba según selector superior
+      {/* Department Separation Links: Banks vs Distributors */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Link
+          href="/admin/banks"
+          className="group rounded-2xl bg-[#0d101b] hover:bg-[#121626] border border-emerald-400/20 p-5 flex items-center justify-between gap-4 transition-colors"
+        >
+          <div className="flex items-center gap-3.5 min-w-0">
+            <span className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-400/25 text-emerald-300 flex items-center justify-center shrink-0">
+              <Building2 className="w-5 h-5" />
             </span>
-          )}
-        </div>
-
-        {/* Net Live Balance Cards per Receiver */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="rounded-2xl bg-[#0d101b] border border-amber-400/20 p-5 flex items-center justify-between gap-4">
-            <div>
-              <div className="text-xs font-bold text-amber-300">
-                Saldo Neto Disponible en ZenoBank / Binance Pay
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-white">
+                Bancos y Cuentas Receptoras
               </div>
-              <div className="text-2xl font-black font-mono text-white mt-1">
-                {formatCents(position.zenobankBalanceUsdCents)}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-1">
-                Cobros {formatCents(position.zenobankSalesGrossUsdCents)} menos recargas API, retiros y ajustes
+              <div className="text-[11px] text-slate-400 truncate">
+                Binance ({formatCents(position.zenobankBalanceUsdCents)}) · BDV Bs ({formatBsCents(position.pagomovilBalanceBsCents)}) · Tasa Bs y retiros Binance
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() =>
-                openModal({
-                  movementType: "SUPPLIER_TOPUP",
-                  sourceAccount: "zenobank",
-                  targetAccount: "fazercards",
-                })
-              }
-              className="px-3 py-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-xs font-semibold text-white shrink-0"
-            >
-              Reinvertir desde aquí →
-            </button>
           </div>
+          <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/[0.06] group-hover:bg-white text-slate-200 group-hover:text-slate-950 text-xs font-bold shrink-0 transition-colors">
+            <span>Abrir</span>
+            <ArrowUpRight className="w-3.5 h-3.5" />
+          </span>
+        </Link>
 
-          <div className="rounded-2xl bg-[#0d101b] border border-sky-400/20 p-5 flex items-center justify-between gap-4">
-            <div>
-              <div className="text-xs font-bold text-sky-300">
-                Saldo Neto Disponible en{" "}
-                {activePagoMovilAccount?.bankName
-                  ? `${activePagoMovilAccount.bankName} / Pago Móvil`
-                  : "Pago Móvil (Bs)"}
+        <Link
+          href="/admin/providers"
+          className="group rounded-2xl bg-[#0d101b] hover:bg-[#121626] border border-indigo-400/20 p-5 flex items-center justify-between gap-4 transition-colors"
+        >
+          <div className="flex items-center gap-3.5 min-w-0">
+            <span className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-400/25 text-indigo-300 flex items-center justify-center shrink-0">
+              <PlugZap className="w-5 h-5" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-white">
+                Distribuidores y Saldos API
               </div>
-              <div className="text-2xl font-black font-mono text-white mt-1">
-                {formatBsCents(position.pagomovilBalanceBsCents)}{" "}
-                <span className="text-sm font-semibold text-slate-400">
-                  ({formatCents(position.pagomovilBalanceUsdCents)})
-                </span>
-              </div>
-              <div className="text-[11px] text-slate-400 mt-1">
-                Cobros {formatCents(position.pagomovilSalesGrossUsdCents)} menos cambios Bs→USDT y retiros
+              <div className="text-[11px] text-slate-400 truncate">
+                Saldo vivo en FazerCards, Central One, Reloadly y Stock CSV ({formatCents(position.totalSuppliersUsdCents)})
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() =>
-                openModal({
-                  movementType: "INTERNAL_TRANSFER",
-                  sourceAccount: "pagomovil",
-                  targetAccount: "zenobank",
-                })
-              }
-              className="px-3 py-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-xs font-semibold text-white shrink-0"
-            >
-              Cambiar Bs → USDT →
-            </button>
           </div>
-        </div>
-
-        <BsExchangeDeskCard
-          bsRateCents={bsRateCents}
-          initialPolicy={bsRatePolicy}
-          initialLiveRates={liveRates}
-          position={position}
-          onOpenSwapModal={() =>
-            openModal({
-              movementType: "INTERNAL_TRANSFER",
-              sourceAccount: "pagomovil",
-              targetAccount: "zenobank",
-            })
-          }
-        />
-
-        <ReceiverLedgersSection
-          allOrders={
-            includeTestOrders ? orders : orders.filter((o) => !o.isTest)
-          }
-          filteredOrders={
-            includeTestOrders ? orders : orders.filter((o) => !o.isTest)
-          }
-          zenoConfigured={zenoConfigured}
-          initialZenoReceiver={initialZenoReceiver}
-          zenoProofs={zenoProofs}
-          activePagoMovilAccount={activePagoMovilAccount}
-          matchedPagoMovilByOrder={matchedPagoMovilByOrder}
-          actualItemCostCents={actualItemCostCents}
-        />
+          <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/[0.06] group-hover:bg-white text-slate-200 group-hover:text-slate-950 text-xs font-bold shrink-0 transition-colors">
+            <span>Abrir</span>
+            <ArrowUpRight className="w-3.5 h-3.5" />
+          </span>
+        </Link>
       </div>
 
       {/* Treasury Ledger Table */}

@@ -1,50 +1,33 @@
 import React, { Suspense } from "react";
 import { connection } from "next/server";
-import { PagoMovilBotConsole } from "@/components/admin/pagomovil-bot-console";
-import { getSiteUrl } from "@/lib/server/env";
+import { PagoMovilBdvConsole } from "@/components/admin/pagomovil-bdv-console";
+import { loadAdminPortfolioSnapshot } from "@/lib/server/admin-portfolio";
+import { getBdvApiBaseUrl, isBdvConciliacionConfigured } from "@/lib/server/env";
 import {
-  fetchLiveVenezuelaRates,
-  getBsRateAutoSyncPolicy,
-} from "@/lib/server/exchange-rates";
-import {
-  getPagoMovilBotSettings,
-  isBotWatchdogHealthy,
+  getPagoMovilSettings,
   listBankNotifications,
-  listBotDevices,
   listReceiverBankAccounts,
 } from "@/lib/server/pagomovil-store";
-import {
-  getBsRateCents,
-  getProviderConfig,
-  listOrdersAdmin,
-} from "@/lib/server/repository";
+import { getVenezuelaDateYmd } from "@/lib/server/payments/bdv-api";
+import { getProviderConfig } from "@/lib/server/repository";
 
 async function AdminPagoMovilContent() {
   await connection();
   const [
     providerCfg,
-    bsRateCents,
-    bsRatePolicy,
-    liveRates,
+    portfolio,
     settings,
     receiverAccounts,
-    devices,
     notifications,
-    allOrders,
   ] = await Promise.all([
     getProviderConfig("pagomovil"),
-    getBsRateCents(),
-    getBsRateAutoSyncPolicy(),
-    fetchLiveVenezuelaRates().catch(() => null),
-    getPagoMovilBotSettings(),
+    loadAdminPortfolioSnapshot({ includeOrdersReports: false }),
+    getPagoMovilSettings(),
     listReceiverBankAccounts(),
-    listBotDevices(),
     listBankNotifications(100),
-    listOrdersAdmin(),
   ]);
 
-  const watchdog = await isBotWatchdogHealthy(settings);
-  const pendingOrders = allOrders.filter(
+  const pendingOrders = portfolio.orders.filter(
     (o) =>
       (o.paymentGateway === "pagomovil" || o.paymentGateway === "pablito") &&
       (o.status === "PENDING_PAYMENT" ||
@@ -56,23 +39,25 @@ async function AdminPagoMovilContent() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-black text-white">
-          Pasarela Pago Móvil Venezuela
+          Pago Móvil · API Conciliación BDV
         </h1>
         <p className="text-xs text-slate-400 mt-1">
-          Conciliación automática de transferencias y Pago Móvil vía notificaciones bancarias o correo cifrado con HMAC-SHA256.
+          Conciliación directa 24/7 con el Banco de Venezuela, control real de
+          comisiones BDV (entrada/retiro) y gestión de tasa Bs/USD.
         </p>
       </div>
 
-      <PagoMovilBotConsole
-        siteUrl={getSiteUrl()}
+      <PagoMovilBdvConsole
         providerEnabled={Boolean(providerCfg?.enabled)}
-        bsRateCents={bsRateCents}
-        initialBsRatePolicy={bsRatePolicy}
-        initialLiveRates={liveRates}
-        watchdog={watchdog}
+        bdvApiConfigured={isBdvConciliacionConfigured()}
+        bdvEndpoint={getBdvApiBaseUrl()}
+        todayDateVe={getVenezuelaDateYmd()}
+        bsRateCents={portfolio.bsRateCents}
+        initialBsRatePolicy={portfolio.bsRatePolicy}
+        initialLiveRates={portfolio.liveRates}
+        position={portfolio.position}
         settings={settings}
         receiverAccounts={receiverAccounts}
-        devices={devices}
         notifications={notifications}
         pendingOrders={pendingOrders}
       />
@@ -85,7 +70,7 @@ export default function AdminPagoMovilPage() {
     <Suspense
       fallback={
         <div className="text-xs text-slate-400">
-          Cargando consola Pago Móvil...
+          Cargando consola Pago Móvil BDV...
         </div>
       }
     >

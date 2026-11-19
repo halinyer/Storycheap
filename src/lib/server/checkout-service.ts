@@ -1,5 +1,10 @@
 import "server-only";
-import type { OrderDTO, PaymentGatewayId, SessionUser } from "@/types";
+import type {
+  OrderDTO,
+  OrderItemTargetInfo,
+  PaymentGatewayId,
+  SessionUser,
+} from "@/types";
 import { getSiteUrl } from "./env";
 import { fulfillOrder } from "./fulfillment";
 import { getPaymentGateway } from "./payments";
@@ -18,6 +23,7 @@ import {
   getUserCreditBalanceCents,
   releaseReservedCodesForOrder,
   reserveManualCodes,
+  saveOrderItemTargets,
   setOrderGatewaySession,
   transitionOrderStatus,
 } from "./repository";
@@ -80,13 +86,19 @@ export async function initiateCheckout(
     }
   }
 
-  const bsRateCents = await getBsRateCents();
-  if (
-    amountDueCents > 0 &&
-    (input.paymentGateway === "pagomovil" || input.paymentGateway === "pablito")
-  ) {
+  const baseBsRateCents = await getBsRateCents();
+  const isPagoMovilOrder =
+    input.paymentGateway === "pagomovil" || input.paymentGateway === "pablito";
+  let bsRateCents = baseBsRateCents;
+  if (isPagoMovilOrder) {
+    const { getEffectiveCustomerBsRateCents } = await import(
+      "./pagomovil-store"
+    );
+    bsRateCents = await getEffectiveCustomerBsRateCents(baseBsRateCents);
+  }
+  if (amountDueCents > 0 && isPagoMovilOrder) {
     const { assertPagoMovilCheckoutReady } = await import(
-      "./payments/pagomovil-bot"
+      "./payments/pagomovil-bdv"
     );
     await assertPagoMovilCheckoutReady(bsRateCents);
   }
@@ -117,6 +129,18 @@ export async function initiateCheckout(
     })),
   });
 
+  const targetsByOrderItemId: Record<string, OrderItemTargetInfo> = {};
+  for (let i = 0; i < validatedLines.length; i++) {
+    const line = validatedLines[i];
+    const createdItem = order.items[i];
+    if (line?.targetInfo && createdItem) {
+      targetsByOrderItemId[createdItem.id] = line.targetInfo;
+    }
+  }
+  if (Object.keys(targetsByOrderItemId).length > 0) {
+    await saveOrderItemTargets(order.id, targetsByOrderItemId, customerUserId);
+  }
+
   try {
     // 1) Deduct store credit atomically first (DB trigger prevents negative cumulative balance)
     if (creditAppliedCents > 0) {
@@ -137,6 +161,10 @@ export async function initiateCheckout(
       getProviderConfig("fazercards"),
     ]);
     for (const line of validatedLines) {
+      // Direct ID top-ups NEVER consume manual vault gift cards
+      if (line.variant.requiresTarget) {
+        continue;
+      }
       const canFallbackReloadly =
         Boolean(reloadlyCfg?.enabled) &&
         line.variant.sourcePriority !== "manual_only" &&
