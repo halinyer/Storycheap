@@ -190,25 +190,7 @@ function TreasuryMovementModalForm({
     targetAccount === "pagomovil";
 
   const availableBsCents = receiverBalances?.pagomovilBsCents ?? 0;
-  const bookRateCents = receiverBalances?.weightedBookBsRateCents ?? null;
   const liveP2pRateCents = receiverBalances?.liveP2pRateCents ?? null;
-
-  const swapBookUsdReleasedCents =
-    isSwapBsToUsd && parsedBsCents && parsedBsCents > 0 && bookRateCents && bookRateCents > 0
-      ? availableBsCents > 0 &&
-        parsedBsCents >= availableBsCents &&
-        (receiverBalances?.pagomovilUsdCents ?? 0) > 0
-        ? receiverBalances!.pagomovilUsdCents
-        : Math.round((parsedBsCents * 100) / bookRateCents)
-      : null;
-
-  const swapExchangeDiffPreviewCents =
-    isSwapBsToUsd &&
-    parsedUsdCents !== null &&
-    parsedUsdCents > 0 &&
-    swapBookUsdReleasedCents !== null
-      ? parsedUsdCents - swapBookUsdReleasedCents
-      : null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -516,49 +498,9 @@ function TreasuryMovementModalForm({
                   onChange={(e) => setBsInput(e.target.value)}
                   className="w-full rounded-xl bg-slate-950 border border-white/15 px-3.5 py-2 text-sm font-mono tabular-nums font-bold text-sky-300 focus:outline-none focus:border-sky-400"
                 />
-                {impliedP2pRate && (
-                  <p className="mt-1 text-[11px] text-sky-300 font-mono tabular-nums">
-                    Tasa implícita P2P: Bs {impliedP2pRate.toFixed(2)} / $1 USDT
-                  </p>
-                )}
               </div>
             )}
           </div>
-
-          {isSwapBsToUsd &&
-            swapBookUsdReleasedCents !== null &&
-            swapExchangeDiffPreviewCents !== null && (
-              <div
-                className={`rounded-xl border px-3.5 py-2.5 text-[11px] flex flex-wrap items-center justify-between gap-2 font-mono tabular-nums ${
-                  swapExchangeDiffPreviewCents >= 0
-                    ? "bg-emerald-500/[0.07] border-emerald-400/25 text-emerald-200"
-                    : "bg-rose-500/[0.08] border-rose-400/25 text-rose-200"
-                }`}
-              >
-                <span>
-                  Valor en libros liberado:{" "}
-                  <strong className="text-white">
-                    {formatCents(swapBookUsdReleasedCents)}
-                  </strong>
-                  {bookRateCents
-                    ? ` (a Bs ${(bookRateCents / 100).toFixed(2)}/$)`
-                    : ""}
-                </span>
-                <span>
-                  Resultado cambiario:{" "}
-                  <strong
-                    className={
-                      swapExchangeDiffPreviewCents >= 0
-                        ? "text-emerald-300"
-                        : "text-rose-300"
-                    }
-                  >
-                    {swapExchangeDiffPreviewCents >= 0 ? "+" : ""}
-                    {formatCents(swapExchangeDiffPreviewCents)} USD
-                  </strong>
-                </span>
-              </div>
-            )}
 
           {supportsNetworkFee && parsedUsdCents !== null && parsedUsdCents > 0 && (
             <div className="rounded-xl bg-amber-500/[0.07] border border-amber-400/25 px-3.5 py-2.5 text-[11px] space-y-1">
