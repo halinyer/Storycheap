@@ -4,6 +4,7 @@ import { connection } from "next/server";
 import { CatalogFilters } from "@/components/storefront/catalog-filters";
 import { GiftCardGrid } from "@/components/storefront/gift-card-grid";
 import { HeroSection } from "@/components/storefront/hero-section";
+import { Gta6Banner } from "@/components/storefront/gta6-banner";
 import { PayYourWay } from "@/components/storefront/pay-your-way";
 import { getBsRateCents, listCatalog } from "@/lib/server/repository";
 import { getEffectiveCustomerBsRateCents } from "@/lib/server/pagomovil-store";
@@ -31,6 +32,7 @@ export default function HomePage() {
   return (
     <div className="min-h-screen pb-16">
       <HeroSection />
+      <Gta6Banner />
       <PayYourWay variant="strip" />
 
       {/* Catalog Section */}
