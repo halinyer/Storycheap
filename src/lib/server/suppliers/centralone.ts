@@ -126,7 +126,7 @@ async function executeCentralOneHttp(args: {
   retryAfter: string | null;
 }> {
   const signal =
-    args.init.signal ?? AbortSignal.timeout(args.useProxy ? 12_000 : 8_000);
+    args.init.signal ?? AbortSignal.timeout(args.useProxy ? 45_000 : 35_000);
   const response =
     args.useProxy && args.proxyUrl
       ? await fetchViaStaticProxy(args.proxyUrl, args.targetUrl, {

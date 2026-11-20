@@ -1853,7 +1853,8 @@ function OrderDetailInner() {
                         )}
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5">
-                        {item.denominationLabel} • Región {item.region} • Cant:{" "}
+                        {item.denominationLabel}
+                        {!item.targetInfo && ` • Región ${item.region}`} • Cant:{" "}
                         {item.quantity}
                       </div>
                       {item.targetInfo?.displaySummary && (
