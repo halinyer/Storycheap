@@ -2082,7 +2082,7 @@ export async function getOrderById(
   if (error) throw error;
   if (!o) return null;
 
-  const [{ data: items }, { data: fulfillments }, orderTargets] = await Promise.all([
+  const [{ data: items }, { data: fulfillments }, { data: supplierOrders }, orderTargets] = await Promise.all([
     ctx.admin
       .from("order_items")
       .select("*")
@@ -2093,6 +2093,11 @@ export async function getOrderById(
       .select(
         "id, order_item_id, order_id, source, code_last4, supplier_tx_id, revealed_at, created_at"
       )
+      .eq("order_id", o.id)
+      .order("created_at", { ascending: true }),
+    ctx.admin
+      .from("supplier_orders")
+      .select("id, provider, status")
       .eq("order_id", o.id)
       .order("created_at", { ascending: true }),
     getOrderItemTargets(o.id).catch(
@@ -2177,6 +2182,11 @@ export async function getOrderById(
         createdAt: f.created_at,
       };
     }),
+    supplierOrders: (supplierOrders ?? []).map((so) => ({
+      id: so.id,
+      provider: so.provider,
+      status: so.status,
+    })),
   };
 }
 

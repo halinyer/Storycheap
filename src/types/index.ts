@@ -172,6 +172,12 @@ export interface RevealedCodeDTO {
   revealedAt: string;
 }
 
+export interface SupplierOrderSummaryDTO {
+  id: string;
+  provider: string;
+  status: string;
+}
+
 export interface OrderDTO {
   id: string;
   orderNumber: string;
@@ -196,6 +202,7 @@ export interface OrderDTO {
   updatedAt: string;
   items: OrderItemDTO[];
   fulfillments: FulfillmentSummaryDTO[];
+  supplierOrders?: SupplierOrderSummaryDTO[];
 }
 
 export interface CreditLedgerEntryDTO {

@@ -57,6 +57,9 @@ function getOrderProviders(order: OrderDTO): string[] {
   for (const f of order.fulfillments ?? []) {
     set.add(resolveFulfillmentProvider(f));
   }
+  for (const so of order.supplierOrders ?? []) {
+    if (so.provider) set.add(so.provider);
+  }
   return Array.from(set);
 }
 
@@ -144,7 +147,7 @@ export function OrdersConsole({
   const [gateway, setGateway] = useState<GatewayFilter>(initialGateway);
   const [provider, setProvider] = useState<ProviderFilter>("all");
   const [delivery, setDelivery] = useState<DeliveryFilter>("all");
-  const [datePreset, setDatePreset] = useState<DatePreset>("all");
+  const [datePreset, setDatePreset] = useState<DatePreset>("today");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [sortBy, setSortBy] = useState<SortBy>("newest");
@@ -284,7 +287,7 @@ export function OrdersConsole({
     gateway !== "all" ||
     provider !== "all" ||
     delivery !== "all" ||
-    datePreset !== "all" ||
+    datePreset !== "today" ||
     sortBy !== "newest";
 
   const resetFilters = () => {
@@ -293,7 +296,7 @@ export function OrdersConsole({
     setGateway("all");
     setProvider("all");
     setDelivery("all");
-    setDatePreset("all");
+    setDatePreset("today");
     setDateFrom("");
     setDateTo("");
     setSortBy("newest");
