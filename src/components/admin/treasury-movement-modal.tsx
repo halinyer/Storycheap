@@ -46,7 +46,7 @@ const TYPE_META: Record<
     defaultTarget: "partner_payout",
   },
   CAPITAL_IN: {
-    label: "Inyectar Capital Externo (+)",
+    label: "Aporte de Capital / Saldo Inicial (+)",
     helper:
       "Dinero nuevo aportado desde afuera hacia una cuenta receptora o directamente a un distribuidor. Suma a Capital Aportado sin falsificar ventas ni ganancias.",
     defaultSource: "external",
