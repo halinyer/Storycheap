@@ -92,8 +92,10 @@ export function getFazerCardsWebhookSecret(): string | null {
 }
 
 export function getFazerCardsBaseUrl(): string {
-  const configured = process.env.FAZERCARDS_BASE_URL?.trim();
-  return (configured || "https://api.fzr.cards/api/v2").replace(/\/+$/, "");
+  const configured =
+    process.env.FAZERCARDS_BASE_URL?.trim() ||
+    process.env.FAZER_BASE_URL?.trim();
+  return (configured || "https://reseller.fazercards.com/api/v2").replace(/\/+$/, "");
 }
 
 export function isResendConfigured(): boolean {
